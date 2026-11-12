@@ -1,0 +1,13 @@
+{
+  "car": "Lancia Delta",
+  "comment": "x/y/w/h: place of each texture in the atlas at 1x (= its place in the game's texture memory). 'from': a texture the game also uses, made by shrinking a piece of the atlas (the car seen from afar).",
+  "size": [640, 384],
+  "textures": [
+    {"hash": "5f2c35d032b6d1f7", "x": 0, "y": 0, "w": 512, "h": 128, "what": "side A + lights"},
+    {"hash": "00694903ce40ef8f", "x": 0, "y": 128, "w": 512, "h": 128, "what": "side B"},
+    {"hash": "e13f580fc37dfc8b", "x": 512, "y": 0, "w": 128, "h": 256, "what": "roof and bonnet"},
+    {"hash": "56b5b61d10380daf", "x": 0, "y": 256, "w": 256, "h": 128, "what": "front"},
+    {"hash": "d0fa11dde8ea6b02", "x": 256, "y": 256, "w": 256, "h": 128, "what": "rear"},
+    {"hash": "7d9be73bb3759f7c", "x": 512, "y": 256, "w": 64, "h": 64, "what": "wheel"}
+  ]
+}

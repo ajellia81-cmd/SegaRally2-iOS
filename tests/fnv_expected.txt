@@ -1,0 +1,9 @@
+# FNV-1a 64 test vectors: name fnv1a64 (see tests/fnv_test.cpp and tests/fnv_test.py)
+empty CBF29CE484222325
+a AF63DC4C8601EC8C
+foobar 85944171F73967E8
+bytes0-255 4242DC5249C33625
+words8 5F46B41ACB33723D
+zeros64 B9B23F3A46FD0825
+dims+words 527075FF326BAC2D
+mix D0D0B908E18F4E97

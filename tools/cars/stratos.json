@@ -1,0 +1,14 @@
+{
+  "car": "Lancia Stratos",
+  "comment": "x/y/w/h: place of each texture in the atlas at 1x (= its place in the game's texture memory). 'from': a texture the game also uses, made by shrinking a piece of the atlas (the car seen from afar).",
+  "size": [640, 384],
+  "textures": [
+    {"hash": "bf9ba7e53d9388ad", "x": 0, "y": 0, "w": 512, "h": 128, "what": "side A + lights"},
+    {"hash": "a85882f27bfb11d2", "x": 0, "y": 128, "w": 512, "h": 128, "what": "side B"},
+    {"hash": "f17c9c2417c853f9", "x": 512, "y": 0, "w": 128, "h": 256, "what": "roof and bonnet"},
+    {"hash": "bcf0116882d4d090", "x": 0, "y": 256, "w": 256, "h": 128, "what": "front"},
+    {"hash": "3a3781ab35fc4c09", "x": 256, "y": 256, "w": 256, "h": 128, "what": "rear"},
+    {"hash": "c778496fa528cbbf", "x": 512, "y": 256, "w": 64, "h": 64, "what": "wheel"},
+    {"hash": "f89a9ef6e6b5f1ae", "x": 512, "y": 320, "w": 128, "h": 64, "what": "rear detail"}
+  ]
+}

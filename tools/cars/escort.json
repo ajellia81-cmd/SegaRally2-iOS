@@ -1,0 +1,14 @@
+{
+  "car": "Ford Escort",
+  "comment": "x/y/w/h: place of each texture in the atlas at 1x (= its place in the game's texture memory). 'from': a texture the game also uses, made by shrinking a piece of the atlas (the car seen from afar).",
+  "size": [640, 384],
+  "textures": [
+    {"hash": "cd5d3ebbff964e31", "x": 0, "y": 0, "w": 512, "h": 128, "what": "side A + lights"},
+    {"hash": "1f094204d95de798", "x": 0, "y": 128, "w": 512, "h": 128, "what": "side B"},
+    {"hash": "df976b92db58fa06", "x": 512, "y": 0, "w": 128, "h": 256, "what": "roof and bonnet"},
+    {"hash": "8b8d4ae263331546", "x": 0, "y": 256, "w": 256, "h": 128, "what": "front"},
+    {"hash": "ccbba3247edcbaab", "x": 256, "y": 256, "w": 256, "h": 128, "what": "rear"},
+    {"hash": "6b74d615be9373c0", "x": 512, "y": 256, "w": 64, "h": 64, "what": "wheel"},
+    {"hash": "d4928f658112c804", "w": 256, "h": 128, "from": [0, 0, 512, 128], "what": "side A, low detail"}
+  ]
+}

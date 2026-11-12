@@ -1,0 +1,133 @@
+@echo off
+rem Builds Sega Rally 2 Native: extracts the ROM, recompiles it and builds with MSVC.
+rem Usage: build.bat [path to srally2.zip]   (or set SR2_ROM_ZIP, or put it next to
+rem this file; only needed the first time)
+setlocal
+cd /d "%~dp0"
+rem Started with a double click (cmd /c): keep the window open at the end so the
+rem message can be read
+set "PAUSE_AT_END="
+for %%a in (%cmdcmdline%) do if /i "%%~a"=="/c" set PAUSE_AT_END=1
+rem update.bat and install.bat run it and pause themselves
+if defined SR2_NO_PAUSE set "PAUSE_AT_END="
+set ZIP=%~1
+if "%ZIP%"=="" set ZIP=%SR2_ROM_ZIP%
+if "%ZIP%"=="" set ZIP=%~dp0srally2.zip
+
+rem Python 3.10 or later, checked: "python" in PATH can be an older one (Star Wars Trilogy issue #51)
+call tools\find_python.bat || goto no_python
+rem drive_program.bin too: data\ from an older build.bat can lack it (a set without
+rem epr-21119), and the game then stops at FAILED FEEDBACK LEVER INITIALIZE
+if exist data\crom.bin if exist data\drive_program.bin goto rom_ok
+if not exist "%ZIP%" goto no_rom
+echo [1/5] Extracting the ROM
+%BUILD_PY% tools\romtool.py "%ZIP%" data || goto fail
+:rom_ok
+echo [2/5] Recompiling the PowerPC code
+%BUILD_PY% tools\recomp.py data\crom.bin build\gen || goto fail
+rem NVIDIA DLSS SDK (not in the repository): fetched from NVIDIA's GitHub the first
+rem time. Optional: without it CMakeLists.txt builds a stub and the game uses MSAA
+rem (DLAA itself only runs on NVIDIA RTX anyway).
+rem Every file is checked, not only the library: a third_party\ngx left incomplete
+rem (an interrupted download, files copied by hand) is fetched again (Star Wars Trilogy issue #32)
+set "NGX_OK=1"
+for %%f in (include\nvsdk_ngx.h include\nvsdk_ngx_defs.h include\nvsdk_ngx_defs_vk.h include\nvsdk_ngx_helpers.h include\nvsdk_ngx_helpers_vk.h include\nvsdk_ngx_loader.h include\nvsdk_ngx_params.h include\nvsdk_ngx_vk.h lib\nvsdk_ngx_d.lib bin\nvngx_dlss.dll) do (
+    if not exist third_party\ngx\%%f set "NGX_OK="
+)
+if not defined NGX_OK (
+    echo [3/5] Downloading the NVIDIA DLSS SDK ^(optional: only for DLAA/DLSS on NVIDIA RTX^)
+    call tools\get_dlss.bat || echo The DLSS SDK could not be downloaded: building without DLAA/DLSS ^(MSAA works the same^).
+)
+rem SDL3 and miniz: downloaded once into third_party\downloads, CMake builds from there
+call tools\get_deps.bat || goto fail
+
+rem Visual Studio 2022 or later (Build Tools or any edition) with the C++ tools and
+rem its CMake, and a Windows SDK
+call tools\find_vs.bat
+if errorlevel 2 goto no_sdk
+if not exist "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" goto no_vs
+echo [4/5] Setting up Visual Studio ^("%VSDIR%"^)
+rem A double quote in a PATH entry (C:\Program Files\WSL" and the like, left by
+rem some installers) breaks vcvars64.bat with "\GNU was unexpected at this time"
+rem once a later entry has "(x86)": take the quotes out, for this window only
+set "PATH=%PATH:"=%"
+rem Its output is hidden unless it fails (a missing Windows SDK, for example)
+call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >"%TEMP%\sr2_vcvars.log" 2>&1 || (
+    type "%TEMP%\sr2_vcvars.log"
+    echo Visual Studio setup failed. Check that the "Windows 11 SDK" component is installed.
+    goto fail
+)
+rem The console in UTF-8: Ninja reads the headers each file includes from the
+rem compiler's messages, in the language of Visual Studio, and the prefix
+rem CMakeLists.txt takes from them must come out the same (accents included)
+chcp 65001 >nul
+set "CMAKE=%VSDIR%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+set "CTEST=%VSDIR%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe"
+if not exist "%CMAKE%" goto no_vs
+rem glslang needs CMake 3.27, and the CMake of Visual Studio 2022 before 17.8 is
+rem older: then use a newer cmake.exe from PATH if there is one
+set "OLD_CMAKE=%CMAKE%"
+set "CMAKE="
+call :try_cmake "%OLD_CMAKE%"
+if defined CMAKE goto cmake_ok
+for /f "delims=" %%i in ('where cmake 2^>nul') do if not defined CMAKE call :try_cmake "%%i"
+if not defined CMAKE goto old_cmake
+for %%i in ("%CMAKE%") do set "CTEST=%%~dpictest.exe"
+echo The CMake of Visual Studio is too old, using "%CMAKE%"
+:cmake_ok
+echo [5/5] Building
+"%CMAKE%" -S . -B build\cmake -G Ninja -DCMAKE_BUILD_TYPE=Release || goto fail
+"%CMAKE%" --build build\cmake --target SegaRally2 || goto fail
+copy /y build\cmake\SegaRally2.exe SegaRally2.exe >nul
+rem NVIDIA DLSS runtime (official signed DLL) for --aa dlaa
+if exist third_party\ngx\bin\nvngx_dlss.dll copy /y third_party\ngx\bin\nvngx_dlss.dll nvngx_dlss.dll >nul
+rem The tests after the game: one that does not build or pass (a new compiler's
+rem bug, say) is reported but does not take SegaRally2.exe away
+set "TESTS_OK=1"
+"%CMAKE%" --build build\cmake || set "TESTS_OK="
+if defined TESTS_OK "%CTEST%" --test-dir build\cmake --output-on-failure || set "TESTS_OK="
+echo.
+echo Done: SegaRally2.exe
+if not defined TESTS_OK echo Warning: the tests did not build or did not pass ^(see above^). The game is built and can be played.
+if defined PAUSE_AT_END pause
+exit /b 0
+
+:fail
+echo.
+echo Build failed: see the message above.
+if defined PAUSE_AT_END pause
+exit /b 1
+
+:no_rom
+echo ROM not found ^("%ZIP%"^): pass the path to srally2.zip as an argument ^(build.bat D:\roms\srally2.zip^),
+echo in the SR2_ROM_ZIP environment variable, or put it next to build.bat. Only needed the first time: it is extracted into data\.
+goto fail
+
+:no_python
+echo Python 3.10 or later not found ^(an older Python or the Microsoft Store alias does not count^).
+echo Run install.bat instead: it installs Python and the C++ tools, then builds.
+goto fail
+
+:try_cmake
+rem Sets CMAKE to the cmake.exe in %1 if it is at least the version
+rem tools\cmake_version.cmake asks for
+"%~1" -P tools\cmake_version.cmake >nul 2>&1
+if not errorlevel 1 set "CMAKE=%~1"
+exit /b 0
+
+:old_cmake
+"%OLD_CMAKE%" -P tools\cmake_version.cmake
+echo The CMake of Visual Studio ^("%VSDIR%"^) is too old: this needs CMake 3.27 or newer.
+echo Update Visual Studio ^(Visual Studio Installer, Update button^) or run install.bat, which updates it.
+echo A cmake.exe in PATH is ignored unless it is 3.27 or newer.
+goto fail
+
+:no_vs
+echo Visual Studio 2022 with the x64 C++ tools and CMake not found.
+echo Run install.bat instead: it installs them, then builds. Or install Build Tools for
+echo Visual Studio 2022 with the "Desktop development with C++" workload yourself.
+goto fail
+:no_sdk
+echo Visual Studio is in "%VSDIR%" but there is no Windows SDK. Run install.bat: it adds
+echo it. Or add "Windows 11 SDK" in the Visual Studio Installer ^(Individual components^).
+goto fail

@@ -1,0 +1,38 @@
+# Sega Rally 2 Native: what is new, for the players.
+#
+# The game reads this file from GitHub (main branch) at launch. When it has an
+# entry with a higher number than the news.txt in the player's folder, the main
+# menu shows those entries in an UPDATE AVAILABLE window with UPDATE NOW
+# (update.bat) and LATER. Commits that do not add an entry show nothing, so
+# several fixes can go out together: add the entry when they are all in.
+#
+# Format:
+#   [N] title      starts entry N (a number one higher than the last; the
+#                  title is usually the date)
+#   - text         a line of the entry (lines starting "- " get a bullet)
+#   # ...          a comment, never shown
+# Newest entry at the top. Keep each one short: about ten lines fit.
+
+[6] 12 November 2026
+- Attract demos: the cars now sit on the road instead of hovering over it, and keep their windows in place.
+- Smooth motion in the attract demos and replays: the wheels no longer show through the bodywork of a car coming fast at the camera.
+
+[5] 12 November 2026
+- Closer to the arcade: the cars' white paint no longer looks grey, with or without ray tracing, and sunny stages are no longer darkened.
+- BUY ME A COFFEE has moved to MORE RECOMPS.
+
+[4] 11 November 2026
+- Shadows: without ray tracing the cars have the arcade's shadow underneath again, so they no longer seem to float.
+- Without ray tracing, the sun's shadows have smooth edges instead of blocky steps.
+
+[3] 11 November 2026
+- No more console window behind the game.
+- Building: fixed a Visual Studio setup error on PCs with an unusual PATH, and the NVIDIA DLSS download is now optional.
+
+[2] 11 November 2026
+- Engine sound fixed: the engines play through the sound chip's effects processor, which a bug in the emulation kept silent. Thanks to the Reddit player who noticed!
+
+[1] 11 November 2026
+- 14 achievements, from your first finish to champion of the championship.
+- RECORDS is back in the main menu, with ACHIEVEMENTS and STATS tabs: races, championships, best laps and times on each course.
+- MORE RECOMPS now lists Star Wars Trilogy too.

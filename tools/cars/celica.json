@@ -1,0 +1,13 @@
+{
+  "car": "Toyota Celica",
+  "comment": "x/y/w/h: place of each texture in the atlas at 1x (= its place in the game's texture memory). 'from': a texture the game also uses, made by shrinking a piece of the atlas (the car seen from afar).",
+  "size": [640, 384],
+  "textures": [
+    {"hash": "9c0fdded920f73f9", "x": 0, "y": 0, "w": 512, "h": 128, "what": "side A + lights"},
+    {"hash": "de08f21a69c64122", "x": 0, "y": 128, "w": 512, "h": 128, "what": "side B"},
+    {"hash": "3bd6081444fa5b68", "x": 512, "y": 0, "w": 128, "h": 256, "what": "roof and bonnet"},
+    {"hash": "72f85401472d7bfd", "x": 0, "y": 256, "w": 256, "h": 128, "what": "front"},
+    {"hash": "f1b4fe345a2cda08", "x": 256, "y": 256, "w": 256, "h": 128, "what": "rear"},
+    {"hash": "8ac346110d054032", "x": 512, "y": 256, "w": 64, "h": 64, "what": "wheel"}
+  ]
+}

@@ -1,0 +1,65 @@
+Sega Rally 2 arcade - native PC port (SegaRally2Native)
+Copyright (c) 2026 snicolast
+
+The source code in this repository is made available under the MIT License
+below, together with the Additional Terms that follow it. Where the two
+disagree, the Additional Terms win. Third-party libraries, fonts and assets
+keep their own licenses (see the README).
+
+-------------------------------------------------------------------------------
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+ADDITIONAL TERMS
+
+1. No compiled builds. You may not distribute, publish, upload, sell or
+   otherwise share compiled builds of this project or of any version of it,
+   modified or not, free or paid: executables, libraries, installers, archives,
+   disk images or any other package that runs the game. Each user builds the
+   program on their own machine, from the source code and their own copy of the
+   game.
+
+2. No game data. You may not distribute any ROM of Sega Rally 2, or any file
+   made from one: extracted data, translated or generated code, textures,
+   models, music, sounds, save states, or any build output that contains them.
+   This repository contains none of it, and contributions that add any will be
+   refused.
+
+3. Forks. You may share the source code, modified or not, under these same
+   terms. Keep this file whole, keep the credit to the original author
+   (snicolast), and say clearly that your version is a modified one. Do not
+   present the project, or a version of it, as your own work.
+
+4. Not affiliated. This is an unofficial, non-commercial fan project. It is not
+   affiliated with, endorsed or sponsored by SEGA or any of the car makers
+   whose cars appear in the game. Sega Rally 2 and all of its names,
+   characters, code, art, music and sounds belong to their owners, and nothing
+   here grants any right to them.
+
+5. Your own copy. To use this project you need your own ROM of the game
+   (srally2.zip), and you alone are responsible for being legally entitled to
+   it.
+
+6. Unofficial downloads. The author has never distributed, and does not
+   distribute, any ROM, game data or compiled build of this project, and does
+   not approve or support any prebuilt download of it. Whoever distributes one
+   does so in breach of these terms and on their own responsibility. The author
+   is not liable for it, for what it contains, or for how it is used.

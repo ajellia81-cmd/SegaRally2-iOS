@@ -1,0 +1,1 @@
+0000004C  # Sega Rally 2: the interrupt's warm restart (TEST), runtime.cpp WarmRestart

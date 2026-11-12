@@ -1,0 +1,114 @@
+@echo off
+rem One-click install of Sega Rally 2 Native. Installs what the build needs with
+rem winget (Python 3 and the C++ tools of Build Tools for Visual Studio 2022, a few
+rem GB), then runs build.bat. Running it again skips whatever is already installed.
+rem Usage: double-click it with srally2.zip in this folder, drop srally2.zip on it,
+rem or install.bat D:\roms\srally2.zip
+setlocal
+cd /d "%~dp0"
+rem Started with a double click or a drop (cmd /c): keep the window open at the end
+set "PAUSE_AT_END="
+for %%a in (%cmdcmdline%) do if /i "%%~a"=="/c" set PAUSE_AT_END=1
+
+echo Sega Rally 2 Native - install
+echo.
+
+rem 1. The ROM, asked for first so nothing is installed for nothing
+set "ZIP=%~1"
+if "%ZIP%"=="" set "ZIP=%SR2_ROM_ZIP%"
+if "%ZIP%"=="" set "ZIP=%~dp0srally2.zip"
+if exist data\crom.bin if exist data\drive_program.bin goto rom_ok
+:wait_rom
+if exist "%ZIP%" goto rom_ok
+echo The arcade ROM is not here ^("%ZIP%"^).
+echo Copy your srally2.zip into this folder:
+echo     %~dp0
+echo then press a key. Or close this window.
+pause >nul
+set "ZIP=%~dp0srally2.zip"
+goto wait_rom
+:rom_ok
+
+rem 2. Python 3.10 or later (the build scripts use only its standard library)
+call tools\find_python.bat && goto python_ok
+call :need_winget || goto fail
+echo Installing Python 3 for this user...
+winget install -e --id Python.Python.3.12 --scope user --accept-package-agreements --accept-source-agreements --override "/passive InstallAllUsers=0 PrependPath=1 Include_test=0"
+call :refresh_path
+rem find_python.bat also looks where the installer puts it, for one that ignored PrependPath
+call tools\find_python.bat && goto python_ok
+echo Could not install Python 3.10 or later. Install it from https://www.python.org/downloads/
+echo ^(tick "Add python.exe to PATH"^) and run install.bat again.
+goto fail
+:python_ok
+echo Python: OK
+
+rem 3. MSVC, CMake and a Windows SDK (the same check as build.bat)
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+set "VS_ADD=--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.VC.CMake.Project --add Microsoft.VisualStudio.Component.Windows11SDK.22621"
+call tools\find_vs.bat && goto vs_ok
+rem Visual Studio 2022 or later is there without the C++ tools: add them to it (an
+rem older one is left alone and Build Tools 2022 is installed next to it)
+set "VSDIR="
+if exist "%VSWHERE%" for /f "usebackq delims=" %%i in (`"%VSWHERE%" -all -latest -version 17.0 -products * -property installationPath`) do set "VSDIR=%%i"
+if "%VSDIR%"=="" goto vs_new
+echo Adding the C++ tools to "%VSDIR%". Accept the Windows prompt; it takes a while.
+"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\setup.exe" modify --installPath "%VSDIR%" %VS_ADD% --passive --norestart
+goto vs_check
+:vs_new
+call :need_winget || goto fail
+echo Installing the C++ tools of Build Tools for Visual Studio 2022 ^(a few GB^).
+echo Accept the Windows prompt; it takes a while.
+winget install -e --id Microsoft.VisualStudio.2022.BuildTools --accept-package-agreements --accept-source-agreements --override "--passive --wait --norestart %VS_ADD%"
+:vs_check
+call tools\find_vs.bat && goto vs_ok
+if defined VSDIR echo Visual Studio is in "%VSDIR%" but there is no Windows SDK.
+echo Could not install the C++ tools. Install Build Tools for Visual Studio 2022 from
+echo https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022
+echo and in Individual components tick these three:
+echo     MSVC v143 - VS 2022 C++ x64/x86 build tools ^(Latest^)
+echo     C++ CMake tools for Windows
+echo     Windows 11 SDK ^(any version, it works on Windows 10 too^)
+echo ^(the "Desktop development with C++" workload includes them^). Then restart Windows
+echo and run install.bat again.
+goto fail
+:vs_ok
+rem Visual Studio 2022 before 17.8 comes with CMake older than 3.27 (glslang's
+rem minimum): update it
+set "VSCMAKE=%VSDIR%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+"%VSCMAKE%" -P tools\cmake_version.cmake >nul 2>&1 && goto vs_current
+echo Updating Visual Studio in "%VSDIR%": its CMake is older than 3.27.
+echo Accept the Windows prompt; it takes a while.
+"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\setup.exe" update --installPath "%VSDIR%" --passive --norestart
+:vs_current
+echo C++ tools: OK
+echo.
+
+rem 4. Build (SR2_NO_PAUSE: build.bat must not pause, this window does)
+set SR2_NO_PAUSE=1
+if exist data\drive_program.bin (call build.bat) else (call build.bat "%ZIP%")
+if errorlevel 1 goto fail
+echo.
+echo Installed. Play with SegaRally2.exe; update later with update.bat.
+if not defined PAUSE_AT_END exit /b 0
+choice /c YN /m "Start the game now"
+if not errorlevel 2 start "" "%~dp0SegaRally2.exe"
+exit /b 0
+
+:fail
+echo.
+echo Install failed: see the messages above.
+if defined PAUSE_AT_END pause
+exit /b 1
+
+:need_winget
+where winget >nul 2>&1 && exit /b 0
+echo winget is missing. Install "App Installer" from the Microsoft Store:
+echo     https://apps.microsoft.com/detail/9NBLGGH4NNS1
+echo and run install.bat again, or install Python 3 and the Build Tools yourself ^(see README.md^).
+exit /b 1
+
+:refresh_path
+rem winget changes PATH in the registry only: read it back into this window
+for /f "usebackq delims=" %%p in (`powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')"`) do set "PATH=%%p"
+exit /b 0

@@ -1,0 +1,14 @@
+{
+  "car": "Peugeot 306",
+  "comment": "x/y/w/h: place of each texture in the atlas at 1x (= its place in the game's texture memory). 'from': a texture the game also uses, made by shrinking a piece of the atlas (the car seen from afar).",
+  "size": [640, 384],
+  "textures": [
+    {"hash": "8338d357158700e0", "x": 0, "y": 0, "w": 512, "h": 128, "what": "side A + lights"},
+    {"hash": "6f39a32260ce0024", "x": 0, "y": 128, "w": 512, "h": 128, "what": "side B"},
+    {"hash": "2086d319117f980d", "x": 512, "y": 0, "w": 128, "h": 256, "what": "roof and bonnet"},
+    {"hash": "15092d6d31ef7cd1", "x": 0, "y": 256, "w": 256, "h": 128, "what": "front"},
+    {"hash": "e6c81988949e3653", "x": 256, "y": 256, "w": 256, "h": 128, "what": "rear"},
+    {"hash": "869da4f791891fb5", "x": 512, "y": 256, "w": 64, "h": 64, "what": "wheel"},
+    {"hash": "cc701085fea6ed9b", "w": 256, "h": 128, "from": [0, 0, 512, 128], "what": "side A, low detail"}
+  ]
+}
