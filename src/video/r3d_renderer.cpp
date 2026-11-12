@@ -894,14 +894,24 @@ void R3DRenderer::verify_texture_ram(const std::vector<uint16_t>& cpu) {
             float u0 = 1e9f, u1 = -1e9f, v0 = 1e9f, v1 = -1e9f;
         };
         std::map<std::pair<uint32_t, uint32_t>, Use> used;
-        for (const R3DVertex& v : scene_->vertices)
+        // which list each vertex is in: 0 opaque, 1 translucent (bit 30 of the key)
+        std::vector<uint8_t> in_trans(scene_->vertices.size(), 0);
+        for (const R3DViewport& vw : scene_->viewports)
+            for (uint32_t i = vw.trans_first; i < vw.trans_first + vw.trans_count && i < in_trans.size(); i++)
+                in_trans[i] = 1;
+        for (size_t vi = 0; vi < scene_->vertices.size(); vi++) {
+            const R3DVertex& v = scene_->vertices[vi];
             if (v.flags & R3D_TEXTURED) {
-                Use& u = used[{v.tex, v.flags | (v.replace ? 0x80000000u : 0u)}];
+                Use& u = used[{v.tex, v.flags | (v.replace ? 0x80000000u : 0u) | (in_trans[vi] ? 0x40000000u : 0u)}];
                 u.n++;
                 u.rep = v.replace;
                 u.u0 = std::min(u.u0, v.uv[0]), u.u1 = std::max(u.u1, v.uv[0]);
                 u.v0 = std::min(u.v0, v.uv[1]), u.v1 = std::max(u.v1, v.uv[1]);
             }
+        }
+        for (const R3DViewport& vw : scene_->viewports)
+            printf("[texuse] viewport: opaque %u+%u translucent %u+%u world %d\n", vw.opaque_first, vw.opaque_count,
+                   vw.trans_first, vw.trans_count, int(vw.world));
         static std::map<uint32_t, int> dumped;   // texture word -> times seen changed
         CreateDirectoryA("out/texuse", nullptr);
         int listed = 0;
