@@ -163,7 +163,13 @@ void main() {
         out_ao = vec4(bounce, 1.0);
         return;
     }
+#ifdef SR2_MOBILE
+    // iOS port: 18 depth samples instead of 32 (the pass took 6 ms and more
+    // at a phone's resolution; the noise is turned per pixel as before)
+    const int DIRECTIONS = 6, STEPS = 3;
+#else
     const int DIRECTIONS = 8, STEPS = 4;
+#endif
     float occlusion = 0.0;
     for (int i = 0; i < DIRECTIONS; i++) {
         float angle = (float(i) + noise) * (6.2831853 / float(DIRECTIONS));

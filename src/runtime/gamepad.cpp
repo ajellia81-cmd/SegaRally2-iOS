@@ -194,6 +194,26 @@ std::vector<PadKey> Gamepads::take_keys() {
 void Gamepads::rumble(int i, float low, float high, int ms) {
     if (!slot_[i].pad) return;
     float k = RUMBLE_STRENGTH[std::clamp(rumble_, 0, 3)] * 65535.0f;
-    SDL_RumbleGamepad(slot_[i].pad, Uint16(std::clamp(low, 0.0f, 1.0f) * k), Uint16(std::clamp(high, 0.0f, 1.0f) * k),
-                      Uint32(ms));
+    bool ok = SDL_RumbleGamepad(slot_[i].pad, Uint16(std::clamp(low, 0.0f, 1.0f) * k),
+                                Uint16(std::clamp(high, 0.0f, 1.0f) * k), Uint32(ms));
+#ifdef __APPLE__
+    // iOS port: a controller's haptics engine that iOS stopped (the app in the
+    // background, an idle spell, an audio interruption) is never started again
+    // by SDL: the rumble stopped for good. Closing and opening the controller
+    // again makes a new one
+    static Uint64 last_reopen[MAX] = {};   // at most every 2 s (a pad without haptics fails every time)
+    if (!ok && (low > 0 || high > 0) && SDL_GetTicks() - last_reopen[i] > 2000) {
+        last_reopen[i] = SDL_GetTicks();
+        SDL_JoystickID id = slot_[i].id;
+        SDL_CloseGamepad(slot_[i].pad);
+        slot_[i].pad = SDL_OpenGamepad(id);
+        if (slot_[i].pad)
+            SDL_RumbleGamepad(slot_[i].pad, Uint16(std::clamp(low, 0.0f, 1.0f) * k),
+                              Uint16(std::clamp(high, 0.0f, 1.0f) * k), Uint32(ms));
+        else
+            slot_[i] = Slot{};
+    }
+#else
+    (void)ok;
+#endif
 }

@@ -49,6 +49,12 @@ layout(location = 2) out vec4 out_glow;     // bloom: the bright part of luminou
 
 // Sun shadows (not in the original): how much of the sun reaches this point
 // of the game world, 0..1, from the shadow map drawn from the sun this frame
+// The world's up, never NaN (no world: the view's up; iOS port)
+vec3 world_up_safe() {
+    vec3 u = atm.axes[1].xyz;
+    return dot(u, u) > 1e-8 ? normalize(u) : vec3(0.0, 1.0, 0.0);
+}
+
 bool sun_shadowed() {
     return atm.shadow.x > 0.0 && vp.sun.w > 0.0 && (flags & (WORLD | NO_SHADOW)) == WORLD;
 }
@@ -323,7 +329,7 @@ vec4 sample_texture(vec2 duv_dx, vec2 duv_dy) {
 // turns towards blue, as shadows do outdoors on a clear day, against the
 // warm light of the sun
 vec3 sky_ambient(vec3 n) {
-    vec3 up = normalize(atm.axes[1].xyz);
+    vec3 up = world_up_safe();
     float h = length(n) > 0.0 ? dot(normalize(n), up) : 0.5;
     vec3 horizon = dot(atm.haze.rgb, vec3(1.0)) > 0.05 ? atm.haze.rgb : vec3(0.85, 0.9, 1.0);
     vec3 zenith = horizon * vec3(0.5, 0.72, 1.15);
@@ -372,7 +378,7 @@ vec4 dust() {
     float seed = float((tex >> 8) & 0xFFFFu) / 65535.0;
     float t = params.x;
     vec3 eye = normalize(normal);
-    vec3 up = normalize(atm.axes[1].xyz);
+    vec3 up = world_up_safe();
     vec3 sun_dir = length(vp.sun.xyz) > 0.01 ? normalize(vp.sun.xyz) : up;
     float sun = vp.sun.w, ambient = vp.params.x;
     if (atm.sunlight.z > 0.0) {   // clear outdoor scenes (SUN), as the world is lit
@@ -585,7 +591,7 @@ void main() {
         if (fill > 0.0 && car_body && length(normal) > 0.0) {
             vec3 fn = normalize(normal);
             if (dot(fn, view_pos) > 0.0) fn = -fn;
-            float down = 0.5 - 0.5 * dot(fn, normalize(atm.axes[1].xyz));
+            float down = 0.5 - 0.5 * dot(fn, world_up_safe());
             float world_sun = max(vp.sun.w, 0.0) * (atm.sunlight.z > 0.0 ? atm.sunlight.x : 1.0);
             light += vec3(1.0, 0.92, 0.80) * world_sun * fill * (0.6 + 0.4 * down);
         }
@@ -622,7 +628,7 @@ void main() {
         // Rally cars are not showroom cars: a satin, dusty paint. Less of a
         // mirror (the Fresnel rise held back too), and dirtier low down and on
         // the sides, where the wheels throw the dust, than on the roof and bonnet
-        vec3 world_up = normalize(atm.axes[1].xyz);
+        vec3 world_up = world_up_safe();
         float clean = mix(0.35, 1.0, smoothstep(-0.3, 0.7, dot(nn, world_up)));
         // The glass: blotches of dried mud and dust, fixed to it (its texture
         // coordinates), that break the reflection up and veil it, heavier towards
@@ -712,6 +718,9 @@ void main() {
         float d = texelFetch(scene_depth, ivec2(gl_FragCoord.xy), 0).r;
         if (d > 0.0) c.a *= clamp((view_pos.z + 1e-3 / d) / atm.soft.y, 0.0, 1.0);
     }
+    // A NaN or an infinity left by the lighting: the PC's GPUs happened to
+    // draw it as light, Apple's as black. The unlit colour instead (iOS port)
+    if (any(isnan(c)) || any(isinf(c))) c = vec4(clamp(t.rgb * col.rgb, 0.0, 1.0), isnan(c.a) ? 1.0 : clamp(c.a, 0.0, 1.0));
     out_color = c;
     // Bloom source: fire, explosions and lights are drawn unlit (luminous);
     // only their bright part glows. Everything else writes no glow, so it

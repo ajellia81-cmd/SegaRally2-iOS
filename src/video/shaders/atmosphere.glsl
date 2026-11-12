@@ -106,7 +106,7 @@ vec3 distance_haze(vec3 c, vec3 view_point, float game_fog) {
     // takes the haze near the horizon only, where the air is thickest
     float beyond = smoothstep(1.5 * far, 3.0 * far, d);
     if (beyond > 0.0) {
-        float up = dot(view_point / d, normalize(atm.axes[1].xyz));
+        float up = dot(view_point / d, dot(atm.axes[1].xyz, atm.axes[1].xyz) > 1e-8 ? normalize(atm.axes[1].xyz) : vec3(0.0, 1.0, 0.0));
         k *= mix(1.0, 1.0 - smoothstep(0.02, 0.22, up), beyond);
     }
     float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));

@@ -259,6 +259,10 @@ int main(int argc, char** argv) {
             ini.save("save/settings.ini");
             if (FILE* f = fopen("save/ios_profile_2", "w")) fclose(f);
         }
+        // Up to 4 anisotropic taps instead of 8 (the textures are filtered in
+        // the shader: each tap is 4 to 8 reads): at 460 pixels per inch no
+        // difference shows, and the 3D pass costs a good part less
+        g_opt.aniso = std::min(g_opt.aniso, 4);
 #endif
         options_from_settings(g_opt, ini);
         g_pad_rumble = ini.vibration;
@@ -337,6 +341,57 @@ int main(int argc, char** argv) {
     // many calls: run it on a thread with 512 MB of native stack.
     if (g_opt.headless) {
         HANDLE t = CreateThread(nullptr, 512u << 20, game_thread, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+        // Debugging aid (iOS port): SR2_SCENESTATS=N, every N frames the 3D
+        // scene is built as for drawing and each viewport's polygons summed up
+        if (const char* every = getenv("SR2_SCENESTATS")) {
+            uint64_t n = std::max(1, atoi(every));
+            R3DSceneBuilder sb;
+            TexturePack tp;
+            tp.init("textures", "", "save/clean_textures");
+            sb.set_texture_pack(&tp, &g_texture_ram);
+            uint64_t last = 0;
+            while (WaitForSingleObject(t, 5) != WAIT_OBJECT_0) {
+                std::shared_ptr<const R3DFrameState> st;
+                {
+                    std::lock_guard<std::mutex> lock(g_r3d_mutex);
+                    st = g_r3d_latest;
+                }
+                if (!st || st->frame / n == last / n) continue;
+                last = st->frame;
+                R3DScene sc;
+                sb.build(*st, sc);
+                printf("[scene] frame %llu: %zu viewports, %zu vertices\n", (unsigned long long)st->frame, sc.viewports.size(), sc.vertices.size());
+                for (const R3DViewport& v : sc.viewports) {
+                    uint32_t count = v.opaque_count + v.trans_count;
+                    if (!count) continue;
+                    uint32_t any = 0, all = ~0u;
+                    double r = 0, g = 0, b = 0, shade = 0, fog = 0, spec = 0;
+                    size_t replaced = 0, m = 0;
+                    double zsum = 0, nlen = 0;
+                    auto add = [&](uint32_t first, uint32_t cnt) {
+                        for (uint32_t i = first; i < first + cnt && i < sc.vertices.size(); i++) {
+                            const R3DVertex& x = sc.vertices[i];
+                            any |= x.flags, all &= x.flags;
+                            r += x.color & 0xFF, g += (x.color >> 8) & 0xFF, b += (x.color >> 16) & 0xFF;
+                            shade += x.shade, fog += x.fog, spec += x.spec;
+                            zsum += -x.pos[2];
+                            nlen += std::sqrt(x.nrm[0] * x.nrm[0] + x.nrm[1] * x.nrm[1] + x.nrm[2] * x.nrm[2]);
+                            replaced += x.replace != 0;
+                            m++;
+                        }
+                    };
+                    add(v.opaque_first, v.opaque_count);
+                    add(v.trans_first, v.trans_count);
+                    if (!m) continue;
+                    printf("  vp %.0f,%.0f %.0fx%.0f world %d: %zu verts flags any %06x all %06x  rgb %.0f %.0f %.0f  "
+                           "shade %.2f fog %.2f spec %.2f replaced %zu z %.1f |n| %.2f fa %.2f | sun %.2f %.2f %.2f x%.2f ambient %.2f fog %.2f %.2f %.2f d%.4f s%.2f\n",
+                           v.x, v.y, v.w, v.h, v.world ? 1 : 0, m, any, all, r / m, g / m, b / m, shade / m, fog / m, spec / m,
+                           replaced, zsum / m, nlen / m, v.fog_ambient, v.sun[0], v.sun[1], v.sun[2], v.sun_intensity, v.ambient, v.fog_color[0], v.fog_color[1],
+                           v.fog_color[2], v.fog_density, v.fog_start);
+                }
+                fflush(stdout);
+            }
+        }
         WaitForSingleObject(t, INFINITE);
         return 0;
     }
@@ -1189,6 +1244,16 @@ int main(int argc, char** argv) {
             g_touch.set_window(rc.right, rc.bottom, {sa.left, sa.top, sa.right, sa.bottom});
             // (nothing over the unseen run to SELECT GAME nor the splash)
             g_touch.set_state(frontend.active() || g_boot_skip, back, any_pad);
+            // The app sent to the background in a race: the pause menu, as
+            // the pause button would
+            static bool was_focused = true;
+            bool now_focused = GetForegroundWindow() != nullptr;
+            bool to_background = was_focused && !now_focused;
+            was_focused = now_focused;
+            if (to_background && g_opt.menu && !frontend.active()) {
+                frontend.open(Frontend::Screen::Pause);
+                g_menu_open = g_hold = true;
+            }
             if (g_touch.take_escape()) {
                 if (frontend.active()) frontend.key(VK_ESCAPE);
                 else if (g_opt.menu) {

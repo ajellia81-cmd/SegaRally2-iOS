@@ -923,7 +923,14 @@ void R3DRenderer::add_sky_pictures(const std::vector<RgbaImage>& images) {
 // The background layers continue beside the 4:3 area only while the 3D
 // scene is widened too; a small 3D window (camera effects) keeps black sides
 bool R3DRenderer::back_layer_extended() const {
+#ifdef __APPLE__
+    // iOS port: on a 2D screen (no 3D: the stages' title cards) black sides.
+    // As wide as a phone's screen, the back layers' margin showed what earlier
+    // screens had left there
+    if (!scene_ || scene_->viewports.empty()) return false;
+#else
     if (!scene_ || scene_->viewports.empty()) return true;
+#endif
     int scene_priority = scene_->viewports.front().priority;
     for (const R3DViewport& v : scene_->viewports)
         if (v.priority == scene_priority && v.x <= 0.5f && v.w >= SCREEN_W - 0.5f) return true;
@@ -1006,6 +1013,13 @@ void R3DRenderer::update_atmosphere(const ScreenLayout& lay, uint32_t target_w, 
         for (const R3DViewport& v : scene_->viewports)
             if (v.world) w = &v;
     WorldPose pose = world_pose(w);
+    if (!w) {
+        // No world (the menus' car, the selection screens): the world's axes as
+        // the view's, not zero; the shaders normalise them (the cars' clear
+        // coat: normalize(0) is NaN, and Apple's GPUs drew those cars black). iOS port
+        for (int k = 0; k < 3; k++)
+            for (int i = 0; i < 3; i++) u.axes[k * 4 + i] = k == i ? 1.0f : 0.0f;
+    }
     if (w) {
         // Game time (about 57.5 frames per second), so a replay drifts the same way
         float time = (float(scene_->frame % 100000) + interp_) / 57.5f;

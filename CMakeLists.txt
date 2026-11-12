@@ -59,6 +59,12 @@ if(MSVC)
     add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>)
 endif()
 add_subdirectory(third_party/glslang EXCLUDE_FROM_ALL)
+# iOS port: the shaders' cheaper variants for a phone's GPU (SR2_MOBILE)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(SR2_SHADER_DEFS -DSR2_MOBILE)
+else()
+    set(SR2_SHADER_DEFS "")
+endif()
 if(SR2_HOST_GLSLANG)
     set(GLSLANG_EXE ${SR2_HOST_GLSLANG})
     set(GLSLANG_DEP "")
@@ -79,7 +85,7 @@ foreach(src ${SHADER_SOURCES})
     # in any of them rebuilds it (no list of includes to keep by hand)
     add_custom_command(OUTPUT ${out}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}
-        COMMAND ${GLSLANG_EXE} -V --target-env vulkan1.2 --vn spv_${var} --depfile ${out}.d -o ${out} ${src}
+        COMMAND ${GLSLANG_EXE} -V --target-env vulkan1.2 ${SR2_SHADER_DEFS} --vn spv_${var} --depfile ${out}.d -o ${out} ${src}
         DEPENDS ${src} ${GLSLANG_DEP}
         DEPFILE ${out}.d
         COMMENT "Shader ${name}")
@@ -91,7 +97,7 @@ foreach(name r3d ao)
     set(out ${SHADER_OUT}/${name}_rt.frag.h)
     add_custom_command(OUTPUT ${out}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}
-        COMMAND ${GLSLANG_EXE} -V --target-env vulkan1.2 -DRAY_TRACING --vn spv_${name}_rt_frag --depfile ${out}.d -o ${out} ${SHADER_DIR}/${name}.frag
+        COMMAND ${GLSLANG_EXE} -V --target-env vulkan1.2 ${SR2_SHADER_DEFS} -DRAY_TRACING --vn spv_${name}_rt_frag --depfile ${out}.d -o ${out} ${SHADER_DIR}/${name}.frag
         DEPENDS ${SHADER_DIR}/${name}.frag ${GLSLANG_DEP}
         DEPFILE ${out}.d
         COMMENT "Shader ${name}.frag (ray tracing)")
@@ -101,7 +107,7 @@ endforeach()
 set(out ${SHADER_OUT}/r3d_rt.vert.h)
 add_custom_command(OUTPUT ${out}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}
-    COMMAND ${GLSLANG_EXE} -V --target-env vulkan1.2 -DRAY_TRACING --vn spv_r3d_rt_vert --depfile ${out}.d -o ${out} ${SHADER_DIR}/r3d.vert
+    COMMAND ${GLSLANG_EXE} -V --target-env vulkan1.2 ${SR2_SHADER_DEFS} -DRAY_TRACING --vn spv_r3d_rt_vert --depfile ${out}.d -o ${out} ${SHADER_DIR}/r3d.vert
     DEPENDS ${SHADER_DIR}/r3d.vert ${GLSLANG_DEP}
     DEPFILE ${out}.d
     COMMENT "Shader r3d.vert (ray tracing)")
