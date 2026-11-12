@@ -1687,6 +1687,8 @@ void R3DRenderer::record_world(const Frame& f) {
             // Steps: opaque, the occlusion, translucent
             for (int step = 0; step < 3; step++) {
                 int pass = step == 2 ? 1 : 0;
+                // debug views 22 and 23: no translucent pass (22: as TEX ID)
+                if (step == 2 && (g_sr2_debug_view.load() == 22 || g_sr2_debug_view.load() == 23)) continue;
                 // Between the opaque and the translucent surfaces of the world:
                 // the ambient occlusion, from its depth (the HUD clears it later)
                 if (step == 1 && split && world_here) {
