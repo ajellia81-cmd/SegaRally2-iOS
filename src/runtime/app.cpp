@@ -389,6 +389,28 @@ int main(int argc, char** argv) {
                     };
                     add(v.opaque_first, v.opaque_count);
                     add(v.trans_first, v.trans_count);
+                    {   // untextured polygons by flags and colour, in drawing order
+                        std::map<std::pair<uint32_t, uint32_t>, std::pair<int, uint32_t>> un;
+                        auto scan = [&](uint32_t first, uint32_t cnt, int list) {
+                            for (uint32_t i = first; i < first + cnt && i < sc.vertices.size(); i++) {
+                                const R3DVertex& q = sc.vertices[i];
+                                if (q.flags & 1) continue;
+                                auto& e = un[{q.flags | (list << 31), q.color}];
+                                if (!e.first) e.second = i;
+                                e.first++;
+                            }
+                        };
+                        scan(v.opaque_first, v.opaque_count, 0);
+                        scan(v.trans_first, v.trans_count, 1);
+                        for (auto& [k, e] : un)
+                            printf("    untextured %s flags %06x colour %08x: %d verts from %u\n", (k.first >> 31) ? "trans" : "opaque",
+                                   k.first & 0x7FFFFFFF, k.second, e.first, e.second);
+                        // and the textured ones' first index
+                        std::map<uint32_t, uint32_t> firsts;
+                        for (uint32_t i = v.opaque_first; i < v.opaque_first + v.opaque_count; i++)
+                            if ((sc.vertices[i].flags & 1) && !firsts.count(sc.vertices[i].tex)) firsts[sc.vertices[i].tex] = i;
+                        for (auto& [t, i] : firsts) printf("    opaque tex %08x from %u\n", t, i);
+                    }
                     if (true) {   // its texture RAM textures, decoded as the shader does
                         std::map<uint32_t, int> texs;
                         auto count_tex = [&](uint32_t first, uint32_t cnt) {
