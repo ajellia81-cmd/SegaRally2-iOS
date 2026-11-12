@@ -28,6 +28,13 @@ void platform_prepare_files() {
         return;
     }
     for (const char* d : {"save", "out", "data", "third_party"}) mkdir(d, 0755);
+    // The log in out/log.txt (the previous run's in out/log_prev.txt), to read
+    // in the Files app when something goes wrong
+    rename("out/log.txt", "out/log_prev.txt");
+    if (freopen("out/log.txt", "w", stdout)) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        dup2(fileno(stdout), fileno(stderr));
+    }
     // The bundle's folders, linked again at every launch: the bundle moves when
     // the app is reinstalled or updated
     auto link_to = [&](const std::string& from, const std::string& to) {

@@ -23,19 +23,19 @@ M68KMAKE=$ROOT/build/host/m68kmake
 
 echo "== [3/6] MoltenVK $MVK_VERSION"
 MVK_DIR=$ROOT/build/moltenvk
-if [ ! -f "$MVK_DIR/MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64/libMoltenVK.a" ]; then
+MVK_FW=$MVK_DIR/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework
+if [ ! -f "$MVK_FW/MoltenVK" ]; then
     mkdir -p "$MVK_DIR"
     curl -sSfL -o "$MVK_DIR/MoltenVK-ios.tar" \
         "https://github.com/KhronosGroup/MoltenVK/releases/download/$MVK_VERSION/MoltenVK-ios.tar"
     tar -xf "$MVK_DIR/MoltenVK-ios.tar" -C "$MVK_DIR"
 fi
-MVK_LIB=$MVK_DIR/MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64/libMoltenVK.a
 
 echo "== [4/6] Configure for iOS (arm64)"
 cmake -S . -B build/ios -G Ninja \
     -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 -DCMAKE_BUILD_TYPE=Release \
-    -DSR2_HOST_GLSLANG="$GLSLANG" -DSR2_HOST_M68KMAKE="$M68KMAKE" -DMOLTENVK_LIB="$MVK_LIB" \
+    -DSR2_HOST_GLSLANG="$GLSLANG" -DSR2_HOST_M68KMAKE="$M68KMAKE" \
     -DSDL_SHARED=OFF -DSDL_STATIC=ON
 
 echo "== [5/6] Build"
@@ -52,8 +52,21 @@ mkdir -p "$GAME/third_party"
 cp -R res textures "$GAME/"
 cp -R third_party/fonts "$GAME/third_party/"
 cp "$ROM" "$GAME/srally2.zip"
+# MoltenVK, loaded by the game at run time (vk_presenter_sdl.cpp)
+mkdir -p "$PAY/SegaRally2.app/Frameworks"
+cp -R "$MVK_FW" "$PAY/SegaRally2.app/Frameworks/"
+codesign --force --sign - --timestamp=none "$PAY/SegaRally2.app/Frameworks/MoltenVK.framework" || true
 # An ad-hoc signature (LiveContainer and the sideloading tools sign it again)
 codesign --force --sign - --timestamp=none "$PAY/SegaRally2.app" || true
 (cd build/ipa && rm -f ../SegaRally2.ipa && zip -qry ../SegaRally2.ipa Payload)
+echo "== Checks"
+BIN=$PAY/SegaRally2.app/SegaRally2
+# volk's function pointers must be the game's own: no Vulkan implementation linked in
+if nm -m "$BIN" | grep -E "\(__TEXT,__text\) external _vkCreateInstance$"; then echo "Vulkan functions linked into the game"; exit 1; fi
+nm -m "$BIN" | grep -E " _vkCreateInstance$" || true
+otool -L "$BIN"
+plutil -p "$PAY/SegaRally2.app/Info.plist" | head -40
+du -sh "$PAY/SegaRally2.app" "$PAY/SegaRally2.app/game" "$PAY/SegaRally2.app/Frameworks"
+ls "$PAY/SegaRally2.app"
 ls -la build/SegaRally2.ipa
 file "$PAY/SegaRally2.app/SegaRally2"

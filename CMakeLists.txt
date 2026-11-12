@@ -234,9 +234,6 @@ else()
     set(SR2_PLATFORM_SOURCES platform/audio_out_sdl.cpp platform/menu_music_sdl.cpp platform/splash_video_stub.cpp
         platform/image_io_stb.cpp platform/vk_presenter_sdl.cpp platform/compat/win_compat.cpp
         platform/touch_controls.cpp platform/platform_files.cpp)
-    if(APPLE)
-        list(APPEND SR2_PLATFORM_SOURCES platform/moltenvk_entry.c)
-    endif()
 endif()
 if(GEN_SOURCES STREQUAL "")
     message(FATAL_ERROR "build/gen/files.cmake is missing: run tools/romtool.py and tools/recomp.py first")
@@ -327,15 +324,11 @@ if(WIN32)
     target_link_libraries(SegaRally2 PRIVATE SDL3::SDL3-static winmm ole32 oleaut32 windowscodecs mfplat mfuuid gdi32 dwmapi shell32 winhttp
         ${DLSS_LIB})
 elseif(APPLE)
-    # iOS port: MoltenVK (Vulkan on Metal) linked statically
-    set(MOLTENVK_LIB "" CACHE FILEPATH "libMoltenVK.a (the ios-arm64 slice of MoltenVK.xcframework)")
-    if(NOT MOLTENVK_LIB)
-        message(FATAL_ERROR "MOLTENVK_LIB not set (platform/ios/build.sh downloads MoltenVK)")
-    endif()
+    # iOS port: MoltenVK (Vulkan on Metal) is loaded at run time from the
+    # app's Frameworks/ (platform/ios/build.sh puts it there), through volk
     target_compile_definitions(SegaRally2 PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_METAL_EXT)
-    target_link_libraries(SegaRally2 PRIVATE SDL3::SDL3-static ${MOLTENVK_LIB}
-        "-framework Metal" "-framework QuartzCore" "-framework IOSurface" "-framework Foundation"
-        "-framework CoreGraphics" "-framework UIKit" "-framework IOKit")
+    target_link_libraries(SegaRally2 PRIVATE SDL3::SDL3-static
+        "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework UIKit")
     set_target_properties(SegaRally2 PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/platform/ios/Info.plist.in
         XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO)

@@ -25,7 +25,7 @@
 #include "sdl_events.h"
 
 #ifdef __APPLE__
-extern "C" PFN_vkGetInstanceProcAddr sr2_moltenvk_get_instance_proc_addr();   // moltenvk_entry.c
+#include <dlfcn.h>
 #endif
 
 namespace {
@@ -182,7 +182,20 @@ bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) 
 #ifdef __APPLE__
     // MoltenVK: Metal argument buffers carry the texture pack's descriptor array
     setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
-    volkInitializeCustom(sr2_moltenvk_get_instance_proc_addr());
+    {
+        // MoltenVK is a framework inside the app (Frameworks/), loaded here: linked
+        // statically, its vkXxx functions took the place of volk's pointers of the same names
+        const char* base = SDL_GetBasePath();
+        std::string path = std::string(base ? base : "") + "Frameworks/MoltenVK.framework/MoltenVK";
+        void* lib = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!lib) lib = dlopen("MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_LOCAL);
+        auto gipa = lib ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(lib, "vkGetInstanceProcAddr")) : nullptr;
+        if (!gipa) {
+            fprintf(stderr, "[vulkan] could not load %s: %s\n", path.c_str(), dlerror());
+            return false;
+        }
+        volkInitializeCustom(gipa);
+    }
     inst_names.push_back(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
 #else
     if (!check(volkInitialize(), "volkInitialize (is the Vulkan driver missing?)")) return false;
