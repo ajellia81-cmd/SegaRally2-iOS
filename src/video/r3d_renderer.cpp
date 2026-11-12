@@ -476,8 +476,9 @@ VkPipeline R3DRenderer::make_pipeline(const PipelineDesc& d) {
         ds.depthWriteEnable = VK_TRUE;
         ds.depthCompareOp = VK_COMPARE_OP_GREATER;
     }
-    if (d.bias != 0) {
+    if (d.bias != 0 || d.slope_bias != 0) {
         rs.depthBiasEnable = VK_TRUE;
+        rs.depthBiasSlopeFactor = d.slope_bias;
         rs.depthBiasConstantFactor = d.bias;
     }
     VkPipelineColorBlendAttachmentState cbas[3]{};
@@ -581,6 +582,15 @@ bool R3DRenderer::create_pipelines() {
     translucent_ = make_pipeline(translucent);
     PipelineDesc trans_depth = world;
     trans_depth.depth_only = true;
+#ifdef __APPLE__
+    // iOS port: Metal compiles this depth-only pipeline's vertex stage apart
+    // from the colour pipeline's, and the depths came out a hair nearer than
+    // the colour pass's: see-through models (the car on the selection screen,
+    // the countdown's numbers) failed the depth test and were left black. The
+    // nearest depth goes a little farther, as for the blob shadows
+    trans_depth.bias = -4.0f;
+    trans_depth.slope_bias = -1.0f;
+#endif
     trans_depth_ = make_pipeline(trans_depth);
     // The game's dark patch under each car (its shadow), made of several
     // shapes laid over each other: blended over one another they came out

@@ -179,6 +179,7 @@ private:
         bool once = false;                     // blended once at each pixel: depth tested strictly
                                                // nearer, and written (the cars' patch, blob_)
         float bias = 0;                        // depth bias (constant factor; < 0: farther)
+        float slope_bias = 0;                  // ... and its slope factor
     };
     VkPipeline make_pipeline(const PipelineDesc& d);
     void bind_scene_image(VkImageView view, VkImageView alpha);
