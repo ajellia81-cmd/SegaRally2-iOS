@@ -36,8 +36,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p rom
-          gh release download rom --repo "$GITHUB_REPOSITORY" --pattern 'srally2.zip' --dir rom --clobber
+          # srally2.zip whole, or in parts (srally2.zip.part0, part1, ...: the web's
+          # upload limit), put back together in order
+          gh release download rom --repo "$GITHUB_REPOSITORY" --pattern 'srally2.zip*' --dir rom --clobber
+          if [ ! -f rom/srally2.zip ]; then
+            cat $(ls rom/srally2.zip.part* | sort -V) > rom/srally2.zip
+            rm -f rom/srally2.zip.part*
+          fi
           ls -la rom
+          shasum -a 256 rom/srally2.zip
 
       - name: Cache downloads
         uses: actions/cache@v4
