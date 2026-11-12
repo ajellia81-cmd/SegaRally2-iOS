@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # the IPA goes to the private release "ipa"
 
 concurrency:
   group: ios-build
@@ -64,3 +64,12 @@ jobs:
           path: build/SegaRally2.ipa
           retention-days: 7
           compression-level: 0
+
+      - name: IPA to the private release "ipa" (for the owner's phone)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view ipa --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create ipa --repo "$GITHUB_REPOSITORY" --title "SegaRally2.ipa (private build)" \
+              --notes "The latest build, for the owner's own device (LiveContainer). Not for distribution."
+          gh release upload ipa build/SegaRally2.ipa --repo "$GITHUB_REPOSITORY" --clobber
