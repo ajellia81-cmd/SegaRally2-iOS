@@ -4,6 +4,7 @@
 // makes the surface. Keys, touches, the mouse and the game controllers'
 // arrivals come in as SDL events and go where the Win32 messages went.
 #include "vk_presenter.h"
+#include "image_io.h"
 
 #include <SDL3/SDL.h>
 #ifdef __APPLE__
@@ -25,6 +26,7 @@
 
 #include <atomic>
 extern std::atomic<int> g_sr2_debug_view;   // r3d_renderer.cpp
+extern std::atomic<int> g_sr2_capture_request;
 #include "sdl_events.h"
 
 #ifdef __APPLE__
@@ -517,7 +519,7 @@ void VkPresenter::handle_event(const SDL_Event& e) {
     case SDL_EVENT_FINGER_UP:
     case SDL_EVENT_FINGER_CANCELED: {
         float x = e.tfinger.x * float(pixel_w_), y = e.tfinger.y * float(pixel_h_);
-        if (e.type == SDL_EVENT_FINGER_DOWN) {   // debugging aid: three fingers cycle the 3D debug views
+        if (e.type == SDL_EVENT_FINGER_DOWN) {   // debugging aid: three fingers capture every 3D debug view
             int n = 0;
             if (SDL_Finger** f = SDL_GetTouchFingers(e.tfinger.touchID, &n)) SDL_free(f);
             // (once per gesture: the three fingers' touches can each see all three)
@@ -525,9 +527,8 @@ void VkPresenter::handle_event(const SDL_Event& e) {
             if (n < 3) gesture = false;
             if (n == 3 && !gesture) {
                 gesture = true;
-                int v = (g_sr2_debug_view.load() + 1) % 24;
-                g_sr2_debug_view = v;
-                printf("[debug] 3D view %d\n", v);
+                g_sr2_capture_request++;
+                printf("[debug] captures asked for\n");
                 break;
             }
         }
@@ -711,7 +712,19 @@ void VkPresenter::frame(const RecordFn& record) {
         vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
         void* data = nullptr;
         vkMapMemory(device_, capture_memory_, 0, VK_WHOLE_SIZE, 0, &data);
-        if (FILE* f = fopen(capture_path_.c_str(), "wb")) {
+        bool png = capture_path_.size() > 4 && capture_path_.compare(capture_path_.size() - 4, 4, ".png") == 0;
+        if (png) {   // half size, RGBA (iOS port: the debug captures)
+            uint32_t w = extent_.width / 2, h = extent_.height / 2;
+            std::vector<uint8_t> rgba(size_t(w) * h * 4);
+            const uint8_t* src = static_cast<const uint8_t*>(data);
+            for (uint32_t y = 0; y < h; y++)
+                for (uint32_t x = 0; x < w; x++) {
+                    const uint8_t* p = src + (size_t(2 * y) * extent_.width + 2 * x) * 4;
+                    uint8_t* o = &rgba[(size_t(y) * w + x) * 4];
+                    o[0] = p[2], o[1] = p[1], o[2] = p[0], o[3] = 255;
+                }
+            png_save(capture_path_.c_str(), int(w), int(h), rgba.data());
+        } else if (FILE* f = fopen(capture_path_.c_str(), "wb")) {
             BITMAPFILEHEADER fh{};
             BITMAPINFOHEADER ih{};
             fh.bfType = 0x4D42;

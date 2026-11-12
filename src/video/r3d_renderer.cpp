@@ -26,6 +26,7 @@
 // Debugging aid (iOS port): what r3d.frag draws instead (0: the picture; a
 // three-finger tap cycles it, platform/vk_presenter_sdl.cpp)
 std::atomic<int> g_sr2_debug_view{0};
+std::atomic<int> g_sr2_capture_request{0};   // iOS port: three fingers ask for the debug captures (app.cpp)
 
 namespace {
 

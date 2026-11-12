@@ -1565,13 +1565,12 @@ int main(int argc, char** argv) {
             }
         }
         int y0, y1, tex_dirty_rows = 0;
-        {   // Debugging aid (iOS port): each debug view change checks the GPU's texture RAM
-            extern std::atomic<int> g_sr2_debug_view;
-            static int checked_view = 0, frames_since = 0;
-            int view = g_sr2_debug_view.load();
-            if (view != checked_view) {
-                frames_since = 0;
-                checked_view = view;
+        {   // Debugging aid (iOS port): each capture request (three fingers) checks
+            // the GPU's texture RAM and logs the scene's textures
+            extern std::atomic<int> g_sr2_capture_request;
+            static int checked = 0;
+            if (g_sr2_capture_request.load() != checked) {
+                checked = g_sr2_capture_request.load();
                 std::vector<uint16_t> cpu;
                 g_texture_ram.copy_all(cpu);
                 renderer.verify_texture_ram(cpu);
@@ -1667,6 +1666,34 @@ int main(int argc, char** argv) {
             bool paired = shift_to == built->vblank && shift_from == built_from;
             renderer.set_back_shift(paired ? float(1 - t) : 0.0f);
             if (g_pacing_log) pacing_sample(now, display, built->time - frame_period * (1 - t), *built);
+        }
+        {   // Debugging aid (iOS port): three fingers capture the 3D debug views one
+            // after another, each to out/capture/<n>_<view>.png (n: the request)
+            extern std::atomic<int> g_sr2_debug_view, g_sr2_capture_request;
+            static const int VIEWS[] = {0, 2, 11, 15, 16, 17, 18, 19, 20, 21, 22, 23};
+            static int request = 0, step = -1, presents_in_step = 0;
+            if (step < 0 && g_sr2_capture_request.load() > request) {
+                request = g_sr2_capture_request.load();
+                step = 0, presents_in_step = 0;
+                CreateDirectoryA("out/capture", nullptr);
+                g_sr2_debug_view = VIEWS[0];
+            }
+            if (step >= 0) {
+                if (++presents_in_step == 4) {
+                    char path[96];
+                    snprintf(path, sizeof(path), "out/capture/%02d_%02d.png", request, VIEWS[step]);
+                    presenter.capture_next(path);
+                } else if (presents_in_step > 4) {
+                    presents_in_step = 0;
+                    if (++step >= int(sizeof(VIEWS) / sizeof(VIEWS[0]))) {
+                        step = -1;
+                        g_sr2_debug_view = 0;
+                        printf("[debug] captures %02d saved in out/capture\n", request);
+                    } else {
+                        g_sr2_debug_view = VIEWS[step];
+                    }
+                }
+            }
         }
         static int film_presents = 0;
         if (!film.empty() && ++film_presents == 3) {
