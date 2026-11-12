@@ -86,6 +86,10 @@ int to_vk(SDL_Keycode k) {
 
 }  // namespace
 
+#ifndef __APPLE__
+std::atomic<bool> g_sr2_backgrounded{false};
+#endif
+
 bool sr2_take_device_event(SDL_Event* e) {
     std::lock_guard<std::mutex> lock(g_device_mutex);
     if (g_device_events.empty()) return false;
@@ -180,11 +184,19 @@ bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) 
     // not the queue): GPU work sent after that loses the device for good
     SDL_AddEventWatch(
         [](void*, SDL_Event* e) -> bool {
-            if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND || e->type == SDL_EVENT_DID_ENTER_BACKGROUND) compat_set_focus(false);
-            else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND) compat_set_focus(true);
+            if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND || e->type == SDL_EVENT_DID_ENTER_BACKGROUND ||
+                e->type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+                compat_set_focus(false);
+                g_sr2_backgrounded = true;
+            }
+            else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND || e->type == SDL_EVENT_WINDOW_FOCUS_GAINED)
+                compat_set_focus(true);
             return true;
         },
         nullptr);
+#ifdef __APPLE__
+    platform_watch_lifecycle();
+#endif
     update_size();
     printf("[video] window %dx%d pixels (x%.2f), safe area insets L%d T%d R%d B%d\n", pixel_w_, pixel_h_, density_,
            safe_.left, safe_.top, safe_.right, safe_.bottom);
@@ -505,7 +517,7 @@ void VkPresenter::handle_event(const SDL_Event& e) {
             int n = 0;
             if (SDL_Finger** f = SDL_GetTouchFingers(e.tfinger.touchID, &n)) SDL_free(f);
             if (n == 3) {
-                int v = (g_sr2_debug_view.load() + 1) % 11;
+                int v = (g_sr2_debug_view.load() + 1) % 15;
                 g_sr2_debug_view = v;
                 printf("[debug] 3D view %d\n", v);
                 break;

@@ -240,6 +240,10 @@ else()
     set(SR2_PLATFORM_SOURCES platform/audio_out_sdl.cpp platform/menu_music_sdl.cpp platform/splash_video_stub.cpp
         platform/image_io_stb.cpp platform/vk_presenter_sdl.cpp platform/compat/win_compat.cpp
         platform/touch_controls.cpp platform/platform_files.cpp)
+    if(APPLE)
+        enable_language(OBJCXX)
+        list(APPEND SR2_PLATFORM_SOURCES platform/ios_lifecycle.mm)
+    endif()
 endif()
 if(GEN_SOURCES STREQUAL "")
     message(FATAL_ERROR "build/gen/files.cmake is missing: run tools/romtool.py and tools/recomp.py first")

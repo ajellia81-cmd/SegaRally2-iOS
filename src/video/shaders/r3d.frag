@@ -747,7 +747,13 @@ void main() {
         vec4 v = dbg == 1 ? vec4(col.rgb, 1.0) : dbg == 2 ? vec4(t.rgb, 1.0) : dbg == 3 ? vec4(d_light * 0.5, 1.0)
                : dbg == 4 ? d_lit : dbg == 5 ? d_coat : dbg == 6 ? c
                : dbg == 7 ? vec4(normal * 0.5 + 0.5, 1.0) : dbg == 8 ? vec4(params, 1.0)
-               : dbg == 9 ? vec4(vp_pc.params.x, vp_pc.sun.w, 0.0, 1.0) : vec4(vp.params.x, vp.sun.w, 0.0, 1.0);
+               : dbg == 9 ? vec4(vp_pc.params.x, vp_pc.sun.w, 0.0, 1.0) : dbg == 10 ? vec4(vp.params.x, vp.sun.w, 0.0, 1.0)
+               // 11: which texture (red: texture pack, green: with the game's dirt over it, blue: textured at all)
+               : dbg == 11 ? vec4(replace != 0u ? 1.0 : 0.0, (replace >> 16) != 0u ? 1.0 : 0.0, (flags & TEXTURED) != 0u ? 1.0 : 0.0, 1.0)
+               // 12: the texture pack's picture alone (no dirt); 13: the dirt layer's colour, 14: its opacity
+               : dbg == 12 ? (replace != 0u ? vec4(textureGrad(replacements[nonuniformEXT(replace & 0xFFFFu)], uv, duv_dx, duv_dy).rgb, 1.0) : vec4(0.0, 0.0, 0.3, 1.0))
+               : dbg == 13 ? ((replace >> 16) != 0u ? vec4(textureGrad(replacements[nonuniformEXT(replace >> 16)], uv, duv_dx, duv_dy).rgb, 1.0) : vec4(0.0, 0.0, 0.3, 1.0))
+               : ((replace >> 16) != 0u ? vec4(vec3(textureGrad(replacements[nonuniformEXT(replace >> 16)], uv, duv_dx, duv_dy).a), 1.0) : vec4(0.0, 0.0, 0.3, 1.0));
         bool bad_nan = any(isnan(v)) || (dbg == 7 && any(isnan(normal)));
         bool bad_inf = any(isinf(v));
         out_color = bad_nan ? vec4(1.0, 0.0, 1.0, 1.0) : bad_inf ? vec4(0.0, 1.0, 1.0, 1.0) : vec4(clamp(v.rgb, 0.0, 1.0), 1.0);

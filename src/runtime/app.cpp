@@ -60,6 +60,7 @@
 #include <SDL3/SDL_main.h>
 #include "platform_files.h"
 #include "touch_controls.h"
+#include "sdl_events.h"
 TouchControls g_touch;
 #endif
 
@@ -1252,10 +1253,7 @@ int main(int argc, char** argv) {
             g_touch.set_state(frontend.active() || g_boot_skip, back, any_pad);
             // The app sent to the background in a race: the pause menu, as
             // the pause button would
-            static bool was_focused = true;
-            bool now_focused = GetForegroundWindow() != nullptr;
-            bool to_background = was_focused && !now_focused;
-            was_focused = now_focused;
+            bool to_background = g_sr2_backgrounded.exchange(false);
             if (to_background && g_opt.menu && !frontend.active()) {
                 frontend.open(Frontend::Screen::Pause);
                 g_menu_open = g_hold = true;
