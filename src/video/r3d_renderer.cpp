@@ -60,11 +60,7 @@ struct AtmosphereUniform {
 // The cars, stands and poles are a few units big, so the map covers little
 // ground at a fine texel (at 220 units and 2048 texels the shadows without
 // ray tracing were blotchy and thin ones vanished)
-#ifdef __APPLE__
-constexpr uint32_t SHADOW_SIZE = 2048;   // shadow map, square (iOS port: a quarter of the PC's)
-#else
 constexpr uint32_t SHADOW_SIZE = 4096;   // shadow map, square
-#endif
 constexpr float SHADOW_RANGE = 100.0f;   // how far in front of the camera shadows are drawn (view units)
 
 VkShaderModule make_module(VkDevice dev, const uint32_t* code, size_t bytes) {

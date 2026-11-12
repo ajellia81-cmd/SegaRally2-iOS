@@ -44,6 +44,8 @@ void platform_prepare_files() {
     link_to(game + "/res", "res");
     link_to(game + "/textures", "textures");
     link_to(game + "/third_party/fonts", "third_party/fonts");
+    // The GPU's time per pass in the log, every 300 images (for tuning)
+    setenv("SR2_GPUTIME", "1", 0);
     std::string zip = game + "/srally2.zip";
     if (stat(zip.c_str(), &st) == 0) setenv("SR2_ROM_ZIP", zip.c_str(), 0);
     printf("[files] working folder %s, game files %s\n", work.c_str(), game.c_str());

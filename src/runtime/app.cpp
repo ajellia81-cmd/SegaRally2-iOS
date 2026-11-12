@@ -247,18 +247,18 @@ int main(int argc, char** argv) {
     if (g_opt.menu) {   // save/settings.ini, written by the options menu; command-line options win
         ini.load("save/settings.ini");
 #ifndef _WIN32
-        // iOS port: a phone's GPU, at 2868 x 1320. Once (the marker file), the
-        // costly effects start off: screen-space ambient occlusion, ray tracing
-        // (none here anyway), the strongest bloom; the menu can turn them on
-        if (GetFileAttributesA("save/ios_profile_1") == INVALID_FILE_ATTRIBUTES) {
-            ini.ao = false;
-            ini.ray_tracing = 0;
-            ini.bloom = std::min(ini.bloom, 1);
+        // iOS port: the full effects at the screen's own resolution, without
+        // MSAA (the menu can turn it on). Once (the marker file): an earlier
+        // build had turned ambient occlusion off and bloom down; put back
+        if (GetFileAttributesA("save/ios_profile_2") == INVALID_FILE_ATTRIBUTES) {
+            FrontendSettings defaults;
+            ini.ao = defaults.ao;
+            ini.bloom = defaults.bloom;
+            ini.shadows = defaults.shadows;
+            ini.aa = 2;   // MSAA off
             ini.save("save/settings.ini");
-            if (FILE* f = fopen("save/ios_profile_1", "w")) fclose(f);
+            if (FILE* f = fopen("save/ios_profile_2", "w")) fclose(f);
         }
-        g_opt.supersample = 0.7f;   // the 3D at 70% of the screen's size each way (about half the pixels)
-        g_opt.msaa = 2;
 #endif
         options_from_settings(g_opt, ini);
         g_pad_rumble = ini.vibration;
