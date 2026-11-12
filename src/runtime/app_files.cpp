@@ -260,9 +260,9 @@ bool load_game_rom(std::vector<uint8_t>& sound_program, std::vector<uint8_t>& so
     }
 #ifdef __APPLE__
     // iOS port: the app carries no ROM; the player's own goes in its folder
-    error += "\nCopy your srally2.zip into this app's folder with the Files app\n"
-             "(LiveContainer: On My iPhone > LiveContainer > Data > Application > ... > Documents,\n"
-             "the folder that holds out/log.txt), then start the game again.";
+    error += "\nCopy your srally2.zip into the rom folder of this app's folder with the\n"
+             "Files app (LiveContainer: On My iPhone > LiveContainer > Data > Application > ...\n"
+             "> Documents > rom, next to the out folder), then start the game again.";
 #else
     error += "\nPut srally2.zip next to SegaRally2.exe, or give its path with\n"
              "  SegaRally2.exe --rom D:\\roms\\srally2.zip\n"

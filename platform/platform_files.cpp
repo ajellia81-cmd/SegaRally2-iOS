@@ -27,7 +27,7 @@ void platform_prepare_files() {
         chdir(game.c_str());
         return;
     }
-    for (const char* d : {"save", "out", "data", "third_party"}) mkdir(d, 0755);
+    for (const char* d : {"save", "out", "data", "third_party", "rom"}) mkdir(d, 0755);
     // The log in out/log.txt (the previous run's in out/log_prev.txt), to read
     // in the Files app when something goes wrong
     rename("out/log.txt", "out/log_prev.txt");
@@ -46,9 +46,13 @@ void platform_prepare_files() {
     link_to(game + "/third_party/fonts", "third_party/fonts");
     // The GPU's time per pass in the log, every 300 images (for tuning)
     setenv("SR2_GPUTIME", "1", 0);
-    // The ROM: the player's own srally2.zip, copied into this folder with the
-    // Files app (the app carries none); the game looks for it here, the
-    // current folder
-    if (stat("srally2.zip", &st) != 0) printf("[files] no srally2.zip in %s yet\n", work.c_str());
+    // The ROM: the player's own srally2.zip, copied into the rom folder here
+    // with the Files app (the app carries none)
+    if (stat("rom/srally2.zip", &st) == 0) {
+        std::string zip = work + "/rom/srally2.zip";
+        setenv("SR2_ROM_ZIP", zip.c_str(), 0);
+    } else {
+        printf("[files] no rom/srally2.zip in %s yet\n", work.c_str());
+    }
     printf("[files] working folder %s, game files %s\n", work.c_str(), game.c_str());
 }
