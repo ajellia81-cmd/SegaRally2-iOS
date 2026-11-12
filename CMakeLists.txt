@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(SegaRally2Native C CXX)
+if(APPLE)
+    enable_language(OBJCXX)   # iOS port: platform/ios_lifecycle.mm
+endif()
 
 # Ninja learns each file's headers from cl's /showIncludes lines. With a
 # Visual Studio in another language they are translated ("Nota: inclusión
@@ -241,7 +244,6 @@ else()
         platform/image_io_stb.cpp platform/vk_presenter_sdl.cpp platform/compat/win_compat.cpp
         platform/touch_controls.cpp platform/platform_files.cpp)
     if(APPLE)
-        enable_language(OBJCXX)
         list(APPEND SR2_PLATFORM_SOURCES platform/ios_lifecycle.mm)
     endif()
 endif()
