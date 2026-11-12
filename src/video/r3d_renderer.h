@@ -83,6 +83,8 @@ public:
     // How far in from the 3D view's edges the race HUD's corners stop, in 2D
     // pixels (iOS port: the screen's safe area)
     void set_hud_inset(float px) { hud_inset_ = px > 0 ? px : 0; }
+    // The internal 3D resolution as a share of the target's (iOS port: RESOLUTION)
+    void set_supersample(float s) { supersample_ = s < 0.5f ? 0.5f : s > 4.0f ? 4.0f : s; }
     // false while the top of the 2D screen is a picture rather than a HUD
     void set_hud_band(bool hud) { hud_band_ = hud; }
     // Position between the previous (0) and the current (1) game frame

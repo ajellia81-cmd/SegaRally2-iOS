@@ -468,6 +468,10 @@ int main(int argc, char** argv) {
     }
     renderer.set_max_aspect(g_opt.max_aspect);
 #ifndef _WIN32
+    renderer.set_supersample(float(ini.render_scale) / 100.0f);   // RESOLUTION, FRAME RATE (iOS port)
+    presenter.set_min_interval(ini.frame_rate >= 120 ? 0.0 : 1.0 / 60.0);
+#endif
+#ifndef _WIN32
     // The race HUD's corners stop at the safe area (the rounded corners and
     // the camera cut-out), not at the screen's edge
     auto hud_inset = [&] {
@@ -1133,6 +1137,10 @@ int main(int argc, char** argv) {
                         renderer.set_back_shift(0.0f);
                     }
                     renderer.set_picture(s.saturation / 100.0f, s.gamma / 100.0f);
+#ifndef _WIN32
+                    renderer.set_supersample(float(s.render_scale) / 100.0f);
+                    presenter.set_min_interval(s.frame_rate >= 120 ? 0.0 : 1.0 / 60.0);
+#endif
                     g_pad_rumble = s.vibration;
                     save_settings(s);
                     break;

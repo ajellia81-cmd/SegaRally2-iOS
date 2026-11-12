@@ -239,6 +239,8 @@ void FrontendSettings::load(const char* path) {
         else if (k == "menu_music") menu_music = on;
         else if (k == "check_updates") check_updates = on;
         else if (k == "news_seen") news_seen = std::max(0, atoi(value));
+        else if (k == "render_scale") render_scale = std::clamp(atoi(value), 50, 100);
+        else if (k == "frame_rate") frame_rate = atoi(value) <= 60 ? 60 : 120;
     }
     fclose(f);
 }
@@ -260,6 +262,8 @@ std::string FrontendSettings::text() const {
             splash, menu_music);
     out += buf;
     snprintf(buf, sizeof(buf), "check_updates = %d\nnews_seen = %d\nrt_reflections = %d\nglobal_illumination = %s\ndust = %s\n", check_updates, news_seen, reflections, gi == 2 ? "high" : gi ? "low" : "off", dust ? "enhanced" : "original");
+    out += buf;
+    snprintf(buf, sizeof(buf), "render_scale = %d\nframe_rate = %d\n", render_scale, frame_rate);
     out += buf;
     if (!lost_world_path.empty()) out += "lost_world_path = " + lost_world_path + "\n";
     if (!star_wars_path.empty()) out += "star_wars_path = " + star_wars_path + "\n";
@@ -510,8 +514,13 @@ std::vector<Frontend::Item> Frontend::items() const {
             L"Sun shadows traced through the world: every car and tree, soft with distance",
             L"Also the ambient occlusion: corners and the ground under things, even off screen"};
         std::wstring pads = gamepads.empty() ? L"No gamepad connected" : L"Connected: " + gamepads;
+#ifdef _WIN32
         std::vector<Item> all = {{OPT_DISPLAY, L"DISPLAY", settings.fullscreen ? L"FULLSCREEN" : L"WINDOW",
                  pad_prompts ? L"Window or full screen" : L"Window or full screen (also F11 or Alt+Enter)"},
+#else
+        std::vector<Item> all = {{OPT_DISPLAY, L"RESOLUTION", std::to_wstring(settings.render_scale) + L"%",
+                 L"The 3D drawn at this share of the screen's resolution: lower is faster and cooler"},
+#endif
                 {OPT_MOTION, L"MOTION", settings.smooth ? L"SMOOTH" : L"ORIGINAL",
                  L"Smooth: the 3D is also drawn between the game's 57.5 frames, at your monitor's refresh rate"},
                 {OPT_VOLUME, L"EFFECTS", std::to_wstring(settings.volume), L"Volume of the sound effects and voices"},
@@ -557,8 +566,13 @@ std::vector<Frontend::Item> Frontend::items() const {
                 {OPT_GAMMA, L"GAMMA", gamma_text, L"Brightness of the mid-tones (1.00 = original)"},
                 {OPT_SHARPEN, L"SHARPEN", on_off(settings.sharpen),
                  L"Brings back texture detail after the edge smoothing, without halos"},
+#ifdef _WIN32
                 {OPT_UPDATES, L"CHECK FOR UPDATES", on_off(settings.check_updates),
                  L"At launch, look on GitHub for a new version and show what is new in it"},
+#else
+                {OPT_UPDATES, L"FRAME RATE", settings.frame_rate >= 120 ? L"120 FPS" : L"60 FPS",
+                 L"120: the screen's own (SMOOTH motion); 60 halves the GPU's work, for longer play"},
+#endif
                 {OPT_TEXT, L"HD TEXT", on_off(settings.hd_text),
                  L"Sharp fonts for menus, captions and times instead of the original pixels"},
                 {OPT_VIBRATION, L"VIBRATION", BLOOM_LEVELS[settings.vibration],
@@ -658,7 +672,18 @@ void Frontend::activate(const Item& it, int dir) {
     case BACK: back(); break;
     case RESUME: push(Action::Resume); break;
     case SETTINGS: options_from_pause_ = true; tab_ = 0; open(Screen::Options); break;
+#ifdef _WIN32
     case OPT_DISPLAY: push(Action::ToggleFullscreen); break;
+#else
+    case OPT_DISPLAY: {
+        static const int SCALES[] = {50, 67, 75, 85, 100};
+        int i = 0;
+        while (i < 4 && SCALES[i] < settings.render_scale) i++;
+        settings.render_scale = SCALES[(i + (dir < 0 ? 4 : 1)) % 5];
+        push(Action::SettingsChanged);
+        break;
+    }
+#endif
     case OPT_QUALITY: {
         int q = settings.quality();
         settings.set_quality(q == FrontendSettings::CUSTOM ? (dir > 0 ? FrontendSettings::LOW : FrontendSettings::ULTRA)
@@ -674,7 +699,11 @@ void Frontend::activate(const Item& it, int dir) {
         settings.music = dir > 0 && settings.music == 10 && wrap_ ? 0 : std::clamp(settings.music + dir, 0, 10);
         push(Action::SettingsChanged);
         break;
+#ifdef _WIN32
     case OPT_UPDATES: settings.check_updates = !settings.check_updates; push(Action::SettingsChanged); break;
+#else
+    case OPT_UPDATES: settings.frame_rate = settings.frame_rate >= 120 ? 60 : 120; push(Action::SettingsChanged); break;
+#endif
     case OPT_MENU_MUSIC: settings.menu_music = !settings.menu_music; push(Action::SettingsChanged); break;
     case OPT_SPEAKERS: settings.speakers = (settings.speakers + dir + 3) % 3; push(Action::SettingsChanged); break;
     case OPT_REAR: settings.rear_boost = (settings.rear_boost + 3 * dir + 15) % 15; push(Action::SettingsChanged); break;
