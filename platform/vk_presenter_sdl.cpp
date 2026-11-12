@@ -589,11 +589,6 @@ void VkPresenter::frame(const RecordFn& record) {
         return;
     }
     if (device_lost_) return;
-    if (min_interval_ > 0) {   // FRAME RATE 60: every other refresh of a 120 Hz screen
-        double target = last_frame_ + min_interval_ - 0.002, now = seconds();
-        if (now < target) SDL_DelayPrecise(Uint64((target - now) * 1e9));
-        last_frame_ = seconds();
-    }
     if (resized_) {
         vkDeviceWaitIdle(device_);
         if (!create_swapchain()) {

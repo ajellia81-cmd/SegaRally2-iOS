@@ -128,13 +128,6 @@ private:
     SafeArea safe_{};
     float density_ = 1;
     bool device_lost_ = false;
-    double min_interval_ = 0, last_frame_ = 0;
-
-public:
-    // iOS port: at least this long between images (FRAME RATE 60: 1/60 s; 0: every refresh)
-    void set_min_interval(double s) { min_interval_ = s; }
-
-private:
     int pixel_w_ = 0, pixel_h_ = 0;
 #endif
     bool quit_ = false, resized_ = false, fullscreen_ = false, show_cursor_ = false;

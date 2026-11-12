@@ -53,10 +53,8 @@ struct FrontendSettings {
     std::string lost_world_path;   // MORE RECOMPS: where The Lost World is (its folder or LostWorld.exe; "" = look for it)
     std::string star_wars_path;    // MORE RECOMPS: where Star Wars Trilogy is (its folder or StarWarsTrilogy.exe; "" = look for it)
     bool check_updates = true;
-    // iOS port: the 3D's resolution (percent of the screen's) and the frame
-    // rate cap (120: the screen's own; 60), in place of DISPLAY and CHECK FOR UPDATES
-    int render_scale = 100;
-    int frame_rate = 120;     // at launch, news.txt on GitHub: a window with what is new and UPDATE NOW
+    // iOS port: the 3D's resolution (percent of the screen's), in place of DISPLAY
+    int render_scale = 100;     // at launch, news.txt on GitHub: a window with what is new and UPDATE NOW
     int news_seen = 0;             // the newest news.txt entry the player closed with LATER
 
     // save/settings.ini; missing keys keep their current value

@@ -240,7 +240,6 @@ void FrontendSettings::load(const char* path) {
         else if (k == "check_updates") check_updates = on;
         else if (k == "news_seen") news_seen = std::max(0, atoi(value));
         else if (k == "render_scale") render_scale = std::clamp(atoi(value), 50, 100);
-        else if (k == "frame_rate") frame_rate = atoi(value) <= 60 ? 60 : 120;
     }
     fclose(f);
 }
@@ -263,7 +262,7 @@ std::string FrontendSettings::text() const {
     out += buf;
     snprintf(buf, sizeof(buf), "check_updates = %d\nnews_seen = %d\nrt_reflections = %d\nglobal_illumination = %s\ndust = %s\n", check_updates, news_seen, reflections, gi == 2 ? "high" : gi ? "low" : "off", dust ? "enhanced" : "original");
     out += buf;
-    snprintf(buf, sizeof(buf), "render_scale = %d\nframe_rate = %d\n", render_scale, frame_rate);
+    snprintf(buf, sizeof(buf), "render_scale = %d\n", render_scale);
     out += buf;
     if (!lost_world_path.empty()) out += "lost_world_path = " + lost_world_path + "\n";
     if (!star_wars_path.empty()) out += "star_wars_path = " + star_wars_path + "\n";
@@ -396,7 +395,10 @@ const wchar_t* const Frontend::TAB_NAMES[Frontend::TAB_COUNT] = {L"DISPLAY", L"G
 // Tabs past VISIBLE_OPTIONS rows scroll.
 const Frontend::OptionTab Frontend::OPTION_TABS[] = {
     {OPT_QUALITY, DISPLAY_TAB}, {OPT_DISPLAY, DISPLAY_TAB}, {OPT_MOTION, DISPLAY_TAB}, {OPT_AA, DISPLAY_TAB},
-    {OPT_SAT, DISPLAY_TAB}, {OPT_GAMMA, DISPLAY_TAB}, {OPT_SHARPEN, DISPLAY_TAB}, {OPT_UPDATES, DISPLAY_TAB},
+    {OPT_SAT, DISPLAY_TAB}, {OPT_GAMMA, DISPLAY_TAB}, {OPT_SHARPEN, DISPLAY_TAB},
+#ifdef _WIN32
+    {OPT_UPDATES, DISPLAY_TAB},   // (iOS port: no updates to check for)
+#endif
     {OPT_SUN, LIGHTING_TAB}, {OPT_SHADOWS, LIGHTING_TAB}, {OPT_RT, LIGHTING_TAB}, {OPT_REFLECT, LIGHTING_TAB}, {OPT_GI, LIGHTING_TAB}, {OPT_HDR, LIGHTING_TAB},
     {OPT_AO, LIGHTING_TAB}, {OPT_BLOOM, LIGHTING_TAB}, {OPT_HAZE, LIGHTING_TAB}, {OPT_DUST, LIGHTING_TAB},
     {OPT_VOLUME, AUDIO_TAB}, {OPT_MUSIC, AUDIO_TAB}, {OPT_SPEAKERS, AUDIO_TAB}, {OPT_REAR, AUDIO_TAB}, {OPT_SAMPLES, AUDIO_TAB}, {OPT_MENU_MUSIC, AUDIO_TAB},
@@ -566,13 +568,8 @@ std::vector<Frontend::Item> Frontend::items() const {
                 {OPT_GAMMA, L"GAMMA", gamma_text, L"Brightness of the mid-tones (1.00 = original)"},
                 {OPT_SHARPEN, L"SHARPEN", on_off(settings.sharpen),
                  L"Brings back texture detail after the edge smoothing, without halos"},
-#ifdef _WIN32
                 {OPT_UPDATES, L"CHECK FOR UPDATES", on_off(settings.check_updates),
                  L"At launch, look on GitHub for a new version and show what is new in it"},
-#else
-                {OPT_UPDATES, L"FRAME RATE", settings.frame_rate >= 120 ? L"120 FPS" : L"60 FPS",
-                 L"120: the screen's own (SMOOTH motion); 60 halves the GPU's work, for longer play"},
-#endif
                 {OPT_TEXT, L"HD TEXT", on_off(settings.hd_text),
                  L"Sharp fonts for menus, captions and times instead of the original pixels"},
                 {OPT_VIBRATION, L"VIBRATION", BLOOM_LEVELS[settings.vibration],
@@ -699,11 +696,7 @@ void Frontend::activate(const Item& it, int dir) {
         settings.music = dir > 0 && settings.music == 10 && wrap_ ? 0 : std::clamp(settings.music + dir, 0, 10);
         push(Action::SettingsChanged);
         break;
-#ifdef _WIN32
     case OPT_UPDATES: settings.check_updates = !settings.check_updates; push(Action::SettingsChanged); break;
-#else
-    case OPT_UPDATES: settings.frame_rate = settings.frame_rate >= 120 ? 60 : 120; push(Action::SettingsChanged); break;
-#endif
     case OPT_MENU_MUSIC: settings.menu_music = !settings.menu_music; push(Action::SettingsChanged); break;
     case OPT_SPEAKERS: settings.speakers = (settings.speakers + dir + 3) % 3; push(Action::SettingsChanged); break;
     case OPT_REAR: settings.rear_boost = (settings.rear_boost + 3 * dir + 15) % 15; push(Action::SettingsChanged); break;
