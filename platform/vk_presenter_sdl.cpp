@@ -516,7 +516,11 @@ void VkPresenter::handle_event(const SDL_Event& e) {
         if (e.type == SDL_EVENT_FINGER_DOWN) {   // debugging aid: three fingers cycle the 3D debug views
             int n = 0;
             if (SDL_Finger** f = SDL_GetTouchFingers(e.tfinger.touchID, &n)) SDL_free(f);
-            if (n == 3) {
+            // (once per gesture: the three fingers' touches can each see all three)
+            static bool gesture = false;
+            if (n < 3) gesture = false;
+            if (n == 3 && !gesture) {
+                gesture = true;
                 int v = (g_sr2_debug_view.load() + 1) % 17;
                 g_sr2_debug_view = v;
                 printf("[debug] 3D view %d\n", v);
