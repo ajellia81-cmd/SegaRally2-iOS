@@ -1547,7 +1547,7 @@ int main(int argc, char** argv) {
             extern std::atomic<int> g_sr2_debug_view;
             static int checked_view = 0, frames_since = 0;
             int view = g_sr2_debug_view.load();
-            if (view != checked_view || ++frames_since >= 600) {
+            if (view != checked_view) {
                 frames_since = 0;
                 checked_view = view;
                 std::vector<uint16_t> cpu;

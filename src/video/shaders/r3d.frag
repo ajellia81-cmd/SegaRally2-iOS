@@ -468,6 +468,16 @@ void main() {
     gl_SampleMask[0] = -1;   // a statically written mask must be set on every path
     vec4 col = color;
     int dbg = int(atm.axes[0].w + 0.5);
+    // 17: no shine layer (the cars' see-through self-lit layer); 18: the
+    // same, and the texture pack's pictures as they are, unlit (iOS port)
+    if ((dbg == 17 || dbg == 18) && (flags & (LUMINOUS | TEX_ALPHA)) == (LUMINOUS | TEX_ALPHA)) discard;
+    if (dbg == 18 && replace != 0u) {
+        out_color = vec4(textureGrad(replacements[nonuniformEXT(replace & 0xFFFFu)], uv, dFdx(uv), dFdy(uv)).rgb, 1.0);
+        out_glow = vec4(0.0, 0.0, 0.0, 1.0);
+        out_motion = vec2(0.0);
+        gl_SampleMask[0] = -1;
+        return;
+    }
     vec3 d_light = vec3(-1.0);
     vec4 d_lit = vec4(0.0), d_coat = vec4(0.0);
     if ((flags & DUST) != 0u) {   // only in the translucent pass
@@ -760,7 +770,7 @@ void main() {
     // Debugging aid (iOS port): a three-finger tap cycles what is drawn (atm.axes[0].w):
     // 1 vertex colour, 2 texture, 3 light, 4 lit, 5 after the clear coat, 6 final,
     // 7 normal, 8 shade/fog/spec. NaN magenta, infinity cyan
-    if (dbg > 0) {
+    if (dbg > 0 && dbg < 17) {
         vec4 v = dbg == 1 ? vec4(col.rgb, 1.0) : dbg == 2 ? vec4(t.rgb, 1.0) : dbg == 3 ? vec4(d_light * 0.5, 1.0)
                : dbg == 4 ? d_lit : dbg == 5 ? d_coat : dbg == 6 ? c
                : dbg == 7 ? vec4(normal * 0.5 + 0.5, 1.0) : dbg == 8 ? vec4(params, 1.0)
