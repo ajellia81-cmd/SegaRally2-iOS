@@ -305,7 +305,7 @@ if(GAME_IN_SOURCE_DIR)
 endif()
 if(NOT WIN32)
     # first: <windows.h> and the rest of the compatibility layer
-    target_include_directories(SegaRally2 BEFORE PRIVATE platform/compat platform third_party/stb)
+    target_include_directories(SegaRally2 BEFORE PRIVATE platform/compat platform third_party/stb src/audio src/ui)
 endif()
 target_include_directories(SegaRally2 PRIVATE
     ${SHADER_OUT}

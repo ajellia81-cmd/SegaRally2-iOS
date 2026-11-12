@@ -195,6 +195,16 @@ inline int gmtime_s(struct tm* out, const time_t* t) { return gmtime_r(t, out) ?
 #define _TRUNCATE ((size_t)-1)
 #endif
 
+inline BOOL PtInRect(const RECT* r, POINT p) {
+    return p.x >= r->left && p.x < r->right && p.y >= r->top && p.y < r->bottom;
+}
+inline BOOL SetRect(RECT* r, int l, int t, int rr, int b) {
+    r->left = l, r->top = t, r->right = rr, r->bottom = b;
+    return TRUE;
+}
+extern "C" char** environ;
+#define _environ environ
+
 // ---- Files and folders ----
 BOOL CreateDirectoryA(const char* path, void* security);
 BOOL CreateDirectoryW(const wchar_t* path, void* security);

@@ -16,3 +16,6 @@ third_party/menu/
 
 # The ROM
 *.zip
+
+# iOS port: the ROM is fetched at build time (a release asset), never committed
+rom/

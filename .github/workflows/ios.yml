@@ -1,0 +1,59 @@
+# Builds the unsigned SegaRally2.ipa on a macOS runner. The ROM is the owner's
+# own: a release asset (tag "rom", file srally2.zip) of this private
+# repository, fetched at build time and never committed. The IPA is an
+# artifact of this private repository, for the owner's own device only.
+name: iOS build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          brew install ninja || true
+          cmake --version
+          xcodebuild -version
+          python3 --version
+
+      - name: ROM (release asset "rom" of this private repository)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p rom
+          gh release download rom --repo "$GITHUB_REPOSITORY" --pattern 'srally2.zip' --dir rom --clobber
+          ls -la rom
+
+      - name: Cache downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/downloads
+            build/moltenvk
+          key: deps-${{ hashFiles('third_party/deps.txt', 'platform/ios/build.sh') }}
+
+      - name: Build
+        run: platform/ios/build.sh
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: SegaRally2-ipa
+          path: build/SegaRally2.ipa
+          retention-days: 7
+          compression-level: 0
