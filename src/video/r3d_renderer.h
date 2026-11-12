@@ -80,6 +80,9 @@ public:
     void set_smooth_2d(bool smooth) { smooth_2d_ = smooth; }
     // true: HUD elements at the sides go to the edges of a widescreen window
     void set_hud_edges(bool edges) { hud_edges_ = edges; }
+    // How far in from the 3D view's edges the race HUD's corners stop, in 2D
+    // pixels (iOS port: the screen's safe area)
+    void set_hud_inset(float px) { hud_inset_ = px > 0 ? px : 0; }
     // false while the top of the 2D screen is a picture rather than a HUD
     void set_hud_band(bool hud) { hud_band_ = hud; }
     // Position between the previous (0) and the current (1) game frame
@@ -316,6 +319,7 @@ private:
     float max_aspect_ = 16.0f / 9.0f;
     bool smooth_2d_ = true;
     bool hud_edges_ = true, hud_band_ = true;
+    float hud_inset_ = 0;
     float interp_ = 1.0f;
     // Where the world viewport's camera stood (world axes in view space, camera
     // position, direction of the sun) in the latest game frame and the one

@@ -7,6 +7,9 @@
 #include <cstdio>
 
 #include <SDL3/SDL.h>
+#ifndef _WIN32
+#include "sdl_events.h"
+#endif
 
 namespace {
 
@@ -85,7 +88,11 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
     rumble_ = rumble;
     double now = double(SDL_GetTicksNS()) * 1e-9;
     SDL_Event e;
+#ifdef _WIN32
     while (SDL_PollEvent(&e)) {
+#else
+    while (sr2_take_device_event(&e)) {   // iOS port: vk_presenter_sdl.cpp reads the events
+#endif
         switch (e.type) {
         case SDL_EVENT_GAMEPAD_ADDED: open(e.gdevice.which); break;
         case SDL_EVENT_GAMEPAD_REMOVED: close(e.gdevice.which); break;

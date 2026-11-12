@@ -11,9 +11,13 @@
 #include <thread>
 
 #include <shellapi.h>
+#ifdef _WIN32
 #include <winhttp.h>
 
 #include <wincodec.h>
+#else
+#include "../video/image_io.h"   // iOS port: pictures through stb_image
+#endif
 
 namespace {
 
@@ -95,6 +99,13 @@ std::wstring widen(const std::string& s) {   // UTF-8
     return w;
 }
 
+#ifndef _WIN32
+// iOS port: no news or update check (there is nothing to update in place)
+bool https_get(const wchar_t*, const wchar_t*, std::string& body) {
+    body.clear();
+    return false;
+}
+#else
 #ifndef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
 #define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4   // Windows 8.1 and later
 #endif
@@ -135,6 +146,7 @@ bool https_get(const wchar_t* host, const wchar_t* path, std::string& body) {
     if (!ok) body.clear();
     return ok;
 }
+#endif  // _WIN32
 
 const wchar_t* const FACES[3] = {L"Saira ExtraCondensed ExCond", L"Barlow Condensed", L"Share Tech Mono"};
 
@@ -309,6 +321,24 @@ bool Frontend::init(const std::string& font_dir) {
 }
 
 // Any picture format Windows can read (WIC), as BGRA with straight alpha
+#ifndef _WIN32
+bool Frontend::load_image(const std::wstring& path, std::vector<uint32_t>& px, int& w_out, int& h_out) {
+    std::vector<uint8_t> rgba;
+    int w = 0, h = 0;
+    if (!png_load(std::string(path.begin(), path.end()), w, h, rgba) || w <= 0 || h <= 0) {
+        px.clear();
+        w_out = h_out = 0;
+        return false;
+    }
+    px.resize(size_t(w) * size_t(h));
+    for (size_t i = 0; i < px.size(); i++)
+        px[i] = uint32_t(rgba[i * 4 + 2]) | uint32_t(rgba[i * 4 + 1]) << 8 | uint32_t(rgba[i * 4]) << 16 |
+                uint32_t(rgba[i * 4 + 3]) << 24;
+    w_out = w;
+    h_out = h;
+    return true;
+}
+#else
 bool Frontend::load_image(const std::wstring& path, std::vector<uint32_t>& px, int& w_out, int& h_out) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IWICImagingFactory* wic = nullptr;
@@ -339,6 +369,7 @@ bool Frontend::load_image(const std::wstring& path, std::vector<uint32_t>& px, i
     h_out = int(h);
     return true;
 }
+#endif
 
 void Frontend::shutdown() {
     video_.close();

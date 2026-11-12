@@ -28,6 +28,11 @@ extern int g_pad_rumble;    // the pads' vibration: 0 off, 1 low, 2 medium, 3 hi
 void poll_keyboard(HWND hwnd);
 bool poll_gamepads(HWND hwnd);   // true: a pad asked for the pause menu
 
+#ifndef _WIN32
+class TouchControls;
+extern TouchControls g_touch;   // iOS port: on-screen controls (platform/touch_controls.h; app.cpp)
+#endif
+
 // app_files.cpp
 bool load_game_rom(std::vector<uint8_t>& sound_program, std::vector<uint8_t>& sound_samples,
                    std::vector<uint8_t>& dsb_program, std::vector<uint8_t>& dsb_mpeg);

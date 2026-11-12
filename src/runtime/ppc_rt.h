@@ -5,9 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#ifdef _WIN32
 #include <intrin.h>   // _BitScanReverse: MSVC knows it without this, clang for Windows does not
-#endif
 
 union FPR {
     double d;

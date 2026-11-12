@@ -12,10 +12,19 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
 #ifndef VK_USE_PLATFORM_WIN32_KHR
 #define VK_USE_PLATFORM_WIN32_KHR
 #endif
+#endif
 #include "volk.h"
+
+#ifndef _WIN32
+// iOS port: an SDL window with a Metal layer (MoltenVK) instead of a Win32
+// window (platform/vk_presenter_sdl.cpp). The rest of the interface is the same.
+struct SDL_Window;
+union SDL_Event;
+#endif
 
 class VkPresenter {
 public:
@@ -91,12 +100,35 @@ public:
     // frame(). Returns when it saw that image go out (seconds()), 0 if it did not wait
     double limit_queue(int depth, uint64_t timeout_ns);
 
+#ifndef _WIN32
+    // Touches (and mouse buttons of a pointer) go here first, in window pixels;
+    // returning true keeps them from becoming the menus' clicks (touch_controls.cpp)
+    std::function<bool(const SDL_Event& e, float x, float y)> touch_hook;
+    // The part of the window clear of the screen's rounded corners and its
+    // camera cut-out, in window pixels
+    struct SafeArea {
+        int left = 0, top = 0, right = 0, bottom = 0;   // insets from each edge
+    };
+    SafeArea safe_area() const { return safe_; }
+    float pixel_density() const { return density_; }
+    SDL_Window* window() const { return window_; }
+#endif
+
 private:
     bool create_swapchain();
     void destroy_swapchain();
     static LRESULT CALLBACK wndproc(HWND, UINT, WPARAM, LPARAM);
 
     HWND hwnd_ = nullptr;
+#ifndef _WIN32
+    void handle_event(const SDL_Event& e);
+    void update_size();
+    SDL_Window* window_ = nullptr;
+    void* metal_view_ = nullptr;
+    SafeArea safe_{};
+    float density_ = 1;
+    int pixel_w_ = 0, pixel_h_ = 0;
+#endif
     bool quit_ = false, resized_ = false, fullscreen_ = false, show_cursor_ = false;
     WINDOWPLACEMENT placement_{sizeof(WINDOWPLACEMENT)};
 

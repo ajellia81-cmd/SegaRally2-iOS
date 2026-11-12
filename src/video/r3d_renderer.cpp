@@ -1766,7 +1766,7 @@ R3DRenderer::ComposePush R3DRenderer::compose_push(const Frame& f) const {
                    .window = {W, H},
                    .layer2d = {lay.game_x0 / lay.view_w, SCREEN_W / lay.view_w},
                    .filter2d = {smooth_2d_ ? 1.0f : 0.0f, lay.scale},
-                   .hud = {sr2_on ? lay.game_x0 : 0.0f, hdr_ ? 1.0f : 0.0f,
+                   .hud = {sr2_on ? std::max(0.0f, lay.game_x0 - hud_inset_) : 0.0f, hdr_ ? 1.0f : 0.0f,
                            overlay_brightness_, extend_back ? 1.0f : 0.0f},
                    .sky = {0, 0, 0, sr2_between_screens() ? 4.0f : 0.0f},
                    .effects = {bloom_strength_, saturation_, gamma_, 0},

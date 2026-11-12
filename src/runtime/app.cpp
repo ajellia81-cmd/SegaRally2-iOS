@@ -55,6 +55,14 @@
 #include "app_internal.h"
 #include "settings_bridge.h"
 
+#ifndef _WIN32
+// iOS port: SDL starts the app (SDL_main), the files' folders, touch controls
+#include <SDL3/SDL_main.h>
+#include "platform_files.h"
+#include "touch_controls.h"
+TouchControls g_touch;
+#endif
+
 Options g_opt;   // command line and menu settings (options.h)
 
 // When the image being recorded will be on screen: with vsync the images go
@@ -225,6 +233,11 @@ static void attach_parent_console() {
 }
 
 int main(int argc, char** argv) {
+#ifndef _WIN32
+    platform_prepare_files();
+    // The 3D view as wide as the screen (2868 x 1320 on an iPhone 18 Pro Max: 2.17:1)
+    g_opt.max_aspect = 3.0f;
+#endif
     attach_parent_console();
     setvbuf(stdout, nullptr, _IONBF, 0);   // keep logs even if the process dies
     // The menus (and the settings they save) are left out of test runs, so
@@ -325,6 +338,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     printf("GPU: %s\n", presenter.device_name().c_str());
+#ifndef _WIN32
+    {   // the 3D view fills the screen; settings.ini may not narrow it
+        RECT rc;
+        GetClientRect(presenter.hwnd(), &rc);
+        if (rc.bottom > 0) g_opt.max_aspect = std::max(g_opt.max_aspect, float(rc.right) / float(rc.bottom));
+    }
+#endif
     g_pads.init();
     timeBeginPeriod(1);
     QueryPerformanceFrequency(&g_qpf);
@@ -378,6 +398,20 @@ int main(int argc, char** argv) {
         return 1;
     }
     renderer.set_max_aspect(g_opt.max_aspect);
+#ifndef _WIN32
+    // The race HUD's corners stop at the safe area (the rounded corners and
+    // the camera cut-out), not at the screen's edge
+    auto hud_inset = [&] {
+        RECT rc;
+        GetClientRect(presenter.hwnd(), &rc);
+        VkPresenter::SafeArea sa = presenter.safe_area();
+        if (rc.bottom <= 0) return;
+        ScreenLayout lay = compute_layout(float(rc.right), float(rc.bottom), g_opt.max_aspect);
+        float inset = float(std::max(sa.left, sa.right)) - lay.ox;
+        renderer.set_hud_inset(inset > 0 && lay.scale > 0 ? inset / lay.scale : 0.0f);
+    };
+    hud_inset();
+#endif
     renderer.set_smooth_2d(!g_opt.pixel_2d);
     renderer.set_hud_edges(!g_opt.hud_centre);
     renderer.set_distance_haze(g_opt.haze);
@@ -601,6 +635,13 @@ int main(int argc, char** argv) {
     std::vector<uint32_t> toast_pixels;
     bool toast_shown = toast.init("third_party/fonts") && toast_layer.init(presenter);
     toast.set_volume(g_opt.volume);
+#ifndef _WIN32
+    // Touch controls, over everything
+    UiOverlay touch_layer;
+    std::vector<uint32_t> touch_pixels;
+    bool touch_shown = touch_layer.init(presenter);
+    presenter.touch_hook = [&](const SDL_Event& e, float x, float y) { return g_touch.on_event(e, x, y); };
+#endif
 
     // Composes the 2D layers of a vblank (out.frame, its layer memory in
     // out.vram) for the renderer. One composition at a time (prep_mutex): the
@@ -1119,6 +1160,32 @@ int main(int argc, char** argv) {
                 pad_in_menu = true;
             }
         }
+#ifndef _WIN32
+        {   // touch controls: hidden while a controller is connected; pause and BACK act as Esc
+            bool any_pad = false;
+            for (int i = 0; i < Gamepads::MAX; i++) any_pad = any_pad || g_pads.pad(i).connected;
+            Frontend::Screen sc = frontend.screen();
+            bool back = sc == Frontend::Screen::Options || sc == Frontend::Screen::Records ||
+                        sc == Frontend::Screen::More || sc == Frontend::Screen::Debug || sc == Frontend::Screen::Pause;
+            RECT rc;
+            GetClientRect(presenter.hwnd(), &rc);
+            VkPresenter::SafeArea sa = presenter.safe_area();
+            static VkPresenter::SafeArea last_sa{};
+            if (sa.left != last_sa.left || sa.right != last_sa.right) last_sa = sa, hud_inset();
+            g_touch.set_window(rc.right, rc.bottom, {sa.left, sa.top, sa.right, sa.bottom});
+            // (nothing over the unseen run to SELECT GAME nor the splash)
+            g_touch.set_state(frontend.active() || g_boot_skip, back, any_pad);
+            if (g_touch.take_escape()) {
+                if (frontend.active()) frontend.key(VK_ESCAPE);
+                else if (g_opt.menu) {
+                    frontend.open(Frontend::Screen::Pause);
+                    g_menu_open = g_hold = true;
+                }
+            }
+            int tw = 0, th = 0;
+            if (touch_shown && g_touch.draw(touch_pixels, tw, th)) touch_layer.set_image(touch_pixels.data(), uint32_t(tw), uint32_t(th));
+        }
+#endif
         if (pad_pause && g_opt.menu && !frontend.active()) {
             frontend.open(Frontend::Screen::Pause);
             pad_in_menu = true;
@@ -1424,6 +1491,9 @@ int main(int argc, char** argv) {
             renderer.record(cmd, view, extent);
             ui.record(cmd, view, extent);
             if (toast_shown) toast_layer.record(cmd, view, extent);   // over the menus too: their backdrop is opaque
+#ifndef _WIN32
+            if (touch_shown) touch_layer.record(cmd, view, extent);
+#endif
         });
         if (g_frame_log) {
             const VkPresenter::LastFrame& f = presenter.last_frame();
@@ -1491,6 +1561,9 @@ int main(int argc, char** argv) {
     fflush(stdout);
     ui.shutdown();
     if (toast_shown) toast_layer.shutdown();
+#ifndef _WIN32
+    if (touch_shown) touch_layer.shutdown();
+#endif
     toast.shutdown();
     frontend.shutdown();
     renderer.shutdown();

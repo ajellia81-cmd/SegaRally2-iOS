@@ -11,9 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
-#ifdef _WIN32
 #include <intrin.h>   // __popcnt: MSVC knows it without this, clang for Windows does not
-#endif
 
 namespace {
 
