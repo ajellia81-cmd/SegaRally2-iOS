@@ -974,41 +974,61 @@ void R3DRenderer::upload_slot(VkDescriptorSet set, uint32_t binding, VkSampler s
         img.w = uint32_t(w);
         img.h = uint32_t(h);
 
-        Buffer staging;
-        if (!create_buffer(staging, rgba.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) return;
-        memcpy(staging.mapped, rgba.data(), rgba.size());
-        vk_->run_once([&](VkCommandBuffer cmd) {
-            auto barrier = [&](uint32_t level, VkImageLayout from, VkImageLayout to) {
-                VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-                b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-                b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-                b.oldLayout = from;
-                b.newLayout = to;
-                b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                b.image = img.image;
-                b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
-                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
-                                     nullptr, 0, nullptr, 1, &b);
-            };
-            barrier(0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            VkBufferImageCopy c{};
-            c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            c.imageExtent = {img.w, img.h, 1};
-            vkCmdCopyBufferToImage(cmd, staging.buffer, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
-            // Mip chain: each level is a filtered blit of the previous one
-            for (uint32_t l = 1; l < mips; l++) {
-                barrier(l - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-                barrier(l, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-                VkImageBlit blit{};
-                blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l - 1, 0, 1};
-                blit.srcOffsets[1] = {int32_t(std::max(1u, img.w >> (l - 1))), int32_t(std::max(1u, img.h >> (l - 1))), 1};
-                blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
-                blit.dstOffsets[1] = {int32_t(std::max(1u, img.w >> l)), int32_t(std::max(1u, img.h >> l)), 1};
-                vkCmdBlitImage(cmd, img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, img.image,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-                barrier(l - 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        // The mip chain made here, each level a 2x2 box average of the one
+        // above (iOS port: MoltenVK's image blits left the levels of some
+        // pictures black, and the cars' paint with them), all levels copied
+        // in from one staging buffer
+        std::vector<VkBufferImageCopy> copies;
+        std::vector<uint8_t> chain(rgba.begin(), rgba.end());
+        {
+            size_t offset = 0;
+            uint32_t lw = img.w, lh = img.h;
+            for (uint32_t l = 0; l < mips; l++) {
+                VkBufferImageCopy c{};
+                c.bufferOffset = offset;
+                c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
+                c.imageExtent = {lw, lh, 1};
+                copies.push_back(c);
+                if (l + 1 == mips) break;
+                uint32_t nw = std::max(1u, lw / 2), nh = std::max(1u, lh / 2);
+                size_t next = chain.size();
+                chain.resize(next + size_t(nw) * nh * 4);
+                const uint8_t* src = chain.data() + offset;
+                uint8_t* dst = chain.data() + next;
+                for (uint32_t y = 0; y < nh; y++)
+                    for (uint32_t x = 0; x < nw; x++) {
+                        uint32_t x0 = std::min(2 * x, lw - 1), x1 = std::min(2 * x + 1, lw - 1);
+                        uint32_t y0 = std::min(2 * y, lh - 1), y1 = std::min(2 * y + 1, lh - 1);
+                        for (int k = 0; k < 4; k++) {
+                            uint32_t sum = src[(size_t(y0) * lw + x0) * 4 + k] + src[(size_t(y0) * lw + x1) * 4 + k] +
+                                           src[(size_t(y1) * lw + x0) * 4 + k] + src[(size_t(y1) * lw + x1) * 4 + k];
+                            dst[(size_t(y) * nw + x) * 4 + k] = uint8_t((sum + 2) / 4);
+                        }
+                    }
+                offset = next;
+                lw = nw, lh = nh;
             }
-            barrier(mips - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        Buffer staging;
+        if (!create_buffer(staging, chain.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) return;
+        memcpy(staging.mapped, chain.data(), chain.size());
+        vk_->run_once([&](VkCommandBuffer cmd) {
+            VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = img.image;
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1};
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr,
+                                 0, nullptr, 1, &b);
+            vkCmdCopyBufferToImage(cmd, staging.buffer, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   uint32_t(copies.size()), copies.data());
+            b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr,
+                                 0, nullptr, 1, &b);
         });
         destroy_buffer(staging);
         img.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
