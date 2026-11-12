@@ -751,6 +751,19 @@ void main() {
                // 11: which texture (red: texture pack, green: with the game's dirt over it, blue: textured at all)
                : dbg == 11 ? vec4(replace != 0u ? 1.0 : 0.0, (replace >> 16) != 0u ? 1.0 : 0.0, (flags & TEXTURED) != 0u ? 1.0 : 0.0, 1.0)
                // 12: the texture pack's picture alone (no dirt); 13: the dirt layer's colour, 14: its opacity
+               // 15: the texture RAM texel under the pixel, level 0, no filtering; 16: level 0 filtered
+               : dbg == 15 ? ((flags & TEXTURED) != 0u && replace == 0u
+                              ? vec4(fetch(ivec2(int(tex & 2047u), int((tex >> 11) & 2047u)),
+                                           ivec2(32 << int((tex >> 22) & 7u), 32 << int((tex >> 25) & 7u)),
+                                           ivec2(floor(uv * vec2(ivec2(32 << int((tex >> 22) & 7u), 32 << int((tex >> 25) & 7u))))),
+                                           (tex >> 28) & 15u).rgb, 1.0)
+                              : vec4(0.0, 0.0, 0.3, 1.0))
+               : dbg == 16 ? ((flags & TEXTURED) != 0u && replace == 0u
+                              ? vec4(bilinear(ivec2(int(tex & 2047u), int((tex >> 11) & 2047u)),
+                                              ivec2(32 << int((tex >> 22) & 7u), 32 << int((tex >> 25) & 7u)),
+                                              uv * vec2(ivec2(32 << int((tex >> 22) & 7u), 32 << int((tex >> 25) & 7u))), 0,
+                                              (tex >> 28) & 15u).rgb, 1.0)
+                              : vec4(0.0, 0.0, 0.3, 1.0))
                : dbg == 12 ? (replace != 0u ? vec4(textureGrad(replacements[nonuniformEXT(replace & 0xFFFFu)], uv, duv_dx, duv_dy).rgb, 1.0) : vec4(0.0, 0.0, 0.3, 1.0))
                : dbg == 13 ? ((replace >> 16) != 0u ? vec4(textureGrad(replacements[nonuniformEXT(replace >> 16)], uv, duv_dx, duv_dy).rgb, 1.0) : vec4(0.0, 0.0, 0.3, 1.0))
                : ((replace >> 16) != 0u ? vec4(vec3(textureGrad(replacements[nonuniformEXT(replace >> 16)], uv, duv_dx, duv_dy).a), 1.0) : vec4(0.0, 0.0, 0.3, 1.0));

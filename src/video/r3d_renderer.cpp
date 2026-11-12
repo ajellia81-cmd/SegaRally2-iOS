@@ -186,7 +186,9 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
         if (counts & s) samples_ = VkSampleCountFlagBits(s);
 
     const VkImageUsageFlags sampled = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    if (!create_image(texture_ram_, 2048, 2048, VK_FORMAT_R16_UINT, sampled, VK_IMAGE_ASPECT_COLOR_BIT)) return false;
+    if (!create_image(texture_ram_, 2048, 2048, VK_FORMAT_R16_UINT, sampled | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                      VK_IMAGE_ASPECT_COLOR_BIT))
+        return false;
     if (!create_image(back_, BACK_W, SCREEN_H, VK_FORMAT_B8G8R8A8_UNORM, sampled, VK_IMAGE_ASPECT_COLOR_BIT)) return false;
     if (!create_image(front_, SCREEN_W, SCREEN_H, VK_FORMAT_B8G8R8A8_UNORM, sampled, VK_IMAGE_ASPECT_COLOR_BIT)) return false;
     if (!create_buffer(texture_staging_, 2048 * 2048 * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) return false;
@@ -801,6 +803,66 @@ void R3DRenderer::set_sky_coords(const uint32_t* coords) {
 void R3DRenderer::set_text_atlas(const TextHD& text) {
     if (text.atlas_rgba.empty()) return;
     upload_slot(compose_set_, 5, overlay_sampler_, 0, text.atlas_w, text.atlas_h, text.atlas_rgba);
+}
+
+void R3DRenderer::verify_texture_ram(const std::vector<uint16_t>& cpu) {
+    if (tex_y0_ < tex_y1_ || cpu.size() != 2048u * 2048u) {
+        printf("[texcheck] skipped (uploads pending)\n");
+        return;
+    }
+    Buffer rb;
+    if (!create_buffer(rb, 2048 * 2048 * 2, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+        printf("[texcheck] no read back buffer\n");
+        return;
+    }
+    vk_->run_once([&](VkCommandBuffer cmd) {
+        transition(cmd, texture_ram_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        VkBufferImageCopy c{};
+        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        c.imageExtent = {2048, 2048, 1};
+        vkCmdCopyImageToBuffer(cmd, texture_ram_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb.buffer, 1, &c);
+        transition(cmd, texture_ram_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    const uint16_t* gpu = static_cast<const uint16_t*>(rb.mapped);
+    const uint16_t* stg = static_cast<const uint16_t*>(texture_staging_.mapped);
+    // Per 128x128 tile: texels where the GPU differs from the staging copy, and the staging copy from the CPU
+    int gpu_bad = 0, stg_bad = 0, gpu_zero_tiles = 0;
+    std::string tiles;
+    for (int ty = 0; ty < 16; ty++)
+        for (int tx = 0; tx < 16; tx++) {
+            int g = 0, s = 0, gz = 0, cz = 0;
+            for (int y = ty * 128; y < ty * 128 + 128; y++)
+                for (int x = tx * 128; x < tx * 128 + 128; x++) {
+                    size_t i = size_t(y) * 2048 + x;
+                    g += gpu[i] != stg[i];
+                    s += stg[i] != cpu[i];
+                    gz += gpu[i] == 0;
+                    cz += cpu[i] == 0;
+                }
+            gpu_bad += g, stg_bad += s;
+            if (gz == 128 * 128 && cz < 128 * 128) gpu_zero_tiles++;
+            if (g || s) {
+                char b[64];
+                snprintf(b, sizeof(b), " %d,%d:%d/%d", tx * 128, ty * 128, g, s);
+                tiles += b;
+            }
+        }
+    printf("[texcheck] gpu!=uploaded %d texels, uploaded!=cpu %d texels, gpu-empty tiles %d%s\n", gpu_bad, stg_bad,
+           gpu_zero_tiles, tiles.empty() ? "" : " | tiles x,y:gpu/cpu");
+    if (!tiles.empty()) printf("[texcheck]%s\n", tiles.c_str());
+    int shown = 0;
+    for (size_t i = 0; i < cpu.size() && shown < 8; i++)
+        if (gpu[i] != stg[i] || stg[i] != cpu[i]) {
+            printf("[texcheck] at %zu,%zu gpu %04x uploaded %04x cpu %04x\n", i % 2048, i / 2048, gpu[i], stg[i], cpu[i]);
+            shown++;
+        }
+    if (gpu_bad) {   // the uploaded copy again, whole
+        tex_y0_ = 0;
+        tex_y1_ = 2048;
+        printf("[texcheck] the whole texture RAM goes up again\n");
+    }
+    fflush(stdout);
+    destroy_buffer(rb);
 }
 
 void R3DRenderer::upload_texture_rows(const std::vector<uint16_t>& rows, int y0, int y1) {

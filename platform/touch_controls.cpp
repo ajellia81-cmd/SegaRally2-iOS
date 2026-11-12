@@ -277,8 +277,10 @@ bool TouchControls::draw(std::vector<uint32_t>& px, int& w, int& h) {
     px.assign(size_t(w) * size_t(h), 0);
     Canvas cv{px, w, h};
     if (shown_debug_ > 0) {
-        static const char* NAMES[15] = {"", "VERTEX COLOR", "TEXTURE", "LIGHT", "LIT", "COAT", "FINAL", "NORMAL", "PARAMS",
-                                        "VP PUSH", "VP PASSED", "TEX SLOTS", "PACK ONLY", "DIRT COLOR", "DIRT ALPHA"};
+        static const char* NAMES[17] = {"", "VERTEX COLOR", "TEXTURE", "LIGHT", "LIT", "COAT", "FINAL", "NORMAL", "PARAMS",
+                                        "VP PUSH", "VP PASSED", "TEX SLOTS", "PACK ONLY", "DIRT COLOR", "DIRT ALPHA",
+                                        "RAW TEXEL", "BILINEAR"};
+        if (shown_debug_ >= 17) shown_debug_ = 0;
         char label[48];
         snprintf(label, sizeof label, "DEBUG %d %s", shown_debug_, NAMES[shown_debug_]);
         cv.rect(float(w) * 0.5f - 200, 4, float(w) * 0.5f + 200, 30, 0x000000, 0.7f);

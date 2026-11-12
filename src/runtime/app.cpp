@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <map>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -361,6 +362,11 @@ int main(int argc, char** argv) {
                 last = st->frame;
                 R3DScene sc;
                 sb.build(*st, sc);
+                {
+                    char path[64];
+                    snprintf(path, sizeof(path), "out/texram_%llu.bin", (unsigned long long)st->frame);
+                    g_texture_ram.dump(path);
+                }
                 printf("[scene] frame %llu: %zu viewports, %zu vertices\n", (unsigned long long)st->frame, sc.viewports.size(), sc.vertices.size());
                 for (const R3DViewport& v : sc.viewports) {
                     uint32_t count = v.opaque_count + v.trans_count;
@@ -383,6 +389,70 @@ int main(int argc, char** argv) {
                     };
                     add(v.opaque_first, v.opaque_count);
                     add(v.trans_first, v.trans_count);
+                    if (true) {   // its texture RAM textures, decoded as the shader does
+                        std::map<uint32_t, int> texs;
+                        auto count_tex = [&](uint32_t first, uint32_t cnt) {
+                            for (uint32_t i = first; i < first + cnt && i < sc.vertices.size(); i++)
+                                if ((sc.vertices[i].flags & 1) && !sc.vertices[i].replace) texs[sc.vertices[i].tex]++;
+                        };
+                        count_tex(v.opaque_first, v.opaque_count);
+                        count_tex(v.trans_first, v.trans_count);
+                        std::vector<uint16_t> ram;
+                        g_texture_ram.copy_all(ram);
+                        for (auto& [tex, cnt] : texs) {
+                            int bx = tex & 2047, by = (tex >> 11) & 2047;
+                            int w = 32 << ((tex >> 22) & 7), h = 32 << ((tex >> 25) & 7);
+                            unsigned fmt = (tex >> 28) & 15;
+                            double sr = 0, sg = 0, sb = 0, sa = 0;
+                            int k = 0;
+                            std::vector<std::pair<int, int>> pts;
+                            float umin = 1e9, umax = -1e9, vmin = 1e9, vmax = -1e9;
+                            uint32_t fany = 0, fall = ~0u;
+                            for (const R3DVertex& q : sc.vertices)
+                                if (q.tex == tex) {
+                                    fany |= q.flags, fall &= q.flags;
+                                    int x = int(std::floor(q.uv[0] * w)), y = int(std::floor(q.uv[1] * h));
+                                    umin = std::min(umin, q.uv[0]), umax = std::max(umax, q.uv[0]);
+                                    vmin = std::min(vmin, q.uv[1]), vmax = std::max(vmax, q.uv[1]);
+                                    pts.push_back({((x % w) + w) % w, ((y % h) + h) % h});
+                                }
+                            printf("    uv %.2f..%.2f %.2f..%.2f flags any %06x all %06x\n", umin, umax, vmin, vmax, fany, fall);
+                            {   // the texture itself, raw texels, for a look
+                                char path[96];
+                                snprintf(path, sizeof(path), "out/tex_%08x.bin", tex);
+                                if (FILE* f = fopen(path, "wb")) {
+                                    for (int y = 0; y < h; y++)
+                                        for (int x = 0; x < w; x++) {
+                                            uint16_t t = ram[size_t((by & 1024) | ((by + y) & 1023)) * 2048 + ((bx + x) & 2047)];
+                                            fwrite(&t, 2, 1, f);
+                                        }
+                                    fclose(f);
+                                }
+                            }
+                            for (auto [x, y] : pts) {
+                                    int px = (bx + x) & 2047, py = (by & 1024) | ((by + y) & 1023);
+                                    unsigned t = ram[size_t(py) * 2048 + px];
+                                    float r, g, b, a;
+                                    switch (fmt) {
+                                    case 0: r = ((t >> 10) & 31) / 31.f, g = ((t >> 5) & 31) / 31.f, b = (t & 31) / 31.f, a = (t & 0x8000) ? 0 : 1; break;
+                                    case 7: r = ((t >> 12) & 15) / 15.f, g = ((t >> 8) & 15) / 15.f, b = ((t >> 4) & 15) / 15.f, a = (t & 15) / 15.f; break;
+                                    case 1: r = g = b = (t & 15) / 15.f, a = ((t >> 4) & 15) / 15.f; break;
+                                    case 2: r = g = b = ((t >> 4) & 15) / 15.f, a = (t & 15) / 15.f; break;
+                                    case 3: r = g = b = ((t >> 8) & 15) / 15.f, a = ((t >> 12) & 15) / 15.f; break;
+                                    case 4: r = g = b = ((t >> 12) & 15) / 15.f, a = ((t >> 8) & 15) / 15.f; break;
+                                    case 5: r = g = b = (t & 255) / 255.f, a = (t & 255) == 255 ? 0 : 1; break;
+                                    case 6: r = g = b = ((t >> 8) & 255) / 255.f, a = ((t >> 8) & 255) == 255 ? 0 : 1; break;
+                                    default: {
+                                        unsigned n = (t >> (4 * (fmt - 8))) & 15;
+                                        r = g = b = n / 15.f, a = n == 15 ? 0 : 1;
+                                    }
+                                    }
+                                    sr += r, sg += g, sb += b, sa += a, k++;
+                                }
+                            printf("    tex %08x fmt %u at %d,%d %dx%d: %d verts, mean rgba %.2f %.2f %.2f %.2f\n", tex, fmt, bx,
+                                   by, w, h, cnt, sr / k, sg / k, sb / k, sa / k);
+                        }
+                    }
                     if (!m) continue;
                     printf("  vp %.0f,%.0f %.0fx%.0f world %d: %zu verts flags any %06x all %06x  rgb %.0f %.0f %.0f  "
                            "shade %.2f fog %.2f spec %.2f replaced %zu z %.1f |n| %.2f fa %.2f | sun %.2f %.2f %.2f x%.2f ambient %.2f fog %.2f %.2f %.2f d%.4f s%.2f\n",
@@ -1473,6 +1543,17 @@ int main(int argc, char** argv) {
             }
         }
         int y0, y1, tex_dirty_rows = 0;
+        {   // Debugging aid (iOS port): each debug view change checks the GPU's texture RAM
+            extern std::atomic<int> g_sr2_debug_view;
+            static int checked_view = 0;
+            int view = g_sr2_debug_view.load();
+            if (view != checked_view) {
+                checked_view = view;
+                std::vector<uint16_t> cpu;
+                g_texture_ram.copy_all(cpu);
+                renderer.verify_texture_ram(cpu);
+            }
+        }
         if (g_texture_ram.take_dirty(tex_rows, y0, y1)) {
             renderer.upload_texture_rows(tex_rows, y0, y1);
             tex_dirty_rows = y1 - y0;
