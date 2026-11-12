@@ -216,6 +216,25 @@ const float ATLAS_SLOT = 80.0;       // (8 + 2 * PAD) * SCALE
 const float ATLAS_PAD = 8.0;         // PAD * SCALE
 const float ATLAS_CELL = 64.0;       // 8 * SCALE
 
+vec4 front_layer(vec2 q);
+
+// Beside the 4:3 picture the foreground's outermost column is repeated; on a
+// screen as wide as a phone's (2.17:1) a picture's edge (a stage's title card)
+// came out as long streaks. It is repeated only where that column is one
+// colour from top to bottom (the fades, plain backdrops), otherwise nothing
+// is drawn there (the backdrop shows). iOS port
+vec4 side_front(vec2 q, bool inside_43) {
+    vec4 f = front_layer(q);
+    if (inside_43) return f;
+    vec4 lo = vec4(1.0), hi = vec4(0.0);
+    for (int i = 0; i < 16; i++) {
+        vec4 s = textureLod(layer2d_front, vec2(q.x, (float(i) + 0.5) / 16.0), 0.0);
+        lo = min(lo, s);
+        hi = max(hi, s);
+    }
+    return all(lessThan(hi - lo, vec4(0.06))) ? f : vec4(0.0);
+}
+
 vec4 front_layer(vec2 q) {
     vec4 f = layer(layer2d_front, q, SIZE_2D);
     vec2 pos = q * vec2(SIZE_2D) / 8.0;
@@ -345,7 +364,7 @@ void main() {
             float to_right = row < 128.0 ? float(split >> 8 & 0xFFu) * 2.0 : bottom ? to_left : 0.0;
             if (to_right <= 0.0) to_right = 496.0;
             if (to_left <= 0.0 && to_right >= 496.0) {
-                front = front_layer(q);
+                front = side_front(q, inside_43);
             } else if (xl >= 0.0 && xl < to_left) {
                 front = front_layer(vec2(max(xl, 0.5) / 496.0, q.y));
                 pic_pos = vec2(xl, row);
@@ -359,7 +378,7 @@ void main() {
                 pic_pos = vec2(-1.0);
             }
         } else {
-            front = front_layer(q);
+            front = side_front(q, inside_43);
         }
         // The original's scroll fog veils the 2D layers behind the 3D image
         vec2 ndc_view = p * 2.0 - 1.0;

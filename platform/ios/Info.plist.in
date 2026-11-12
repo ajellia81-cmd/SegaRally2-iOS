@@ -60,9 +60,8 @@
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
-    <!-- ProMotion: up to 120 Hz -->
-    <key>CADisableMinimumFrameDurationOnPhone</key>
-    <true/>
+    <!-- (no CADisableMinimumFrameDurationOnPhone: 60 Hz, half the GPU work of 120;
+         the game itself makes 57.5 frames a second) -->
     <key>UIApplicationSupportsIndirectInputEvents</key>
     <true/>
     <key>GCSupportsControllerUserInteraction</key>

@@ -60,7 +60,11 @@ struct AtmosphereUniform {
 // The cars, stands and poles are a few units big, so the map covers little
 // ground at a fine texel (at 220 units and 2048 texels the shadows without
 // ray tracing were blotchy and thin ones vanished)
+#ifdef __APPLE__
+constexpr uint32_t SHADOW_SIZE = 2048;   // shadow map, square (iOS port: a quarter of the PC's)
+#else
 constexpr uint32_t SHADOW_SIZE = 4096;   // shadow map, square
+#endif
 constexpr float SHADOW_RANGE = 100.0f;   // how far in front of the camera shadows are drawn (view units)
 
 VkShaderModule make_module(VkDevice dev, const uint32_t* code, size_t bytes) {
@@ -1520,9 +1524,11 @@ void R3DRenderer::record_world(const Frame& f) {
                         const int* s = sr2_split_;
                         bool top = v.y + v.h <= SR2_HUD_TOP_ROWS, bottom = v.y >= SR2_HUD_BOTTOM_ROW - 8;
                         bool top_left = v.y + v.h <= SR2_HUD_LEFT_ROWS;
-                        if ((top_left && v.x + v.w <= s[0]) || (bottom && s[2] > 0 && v.x + v.w <= s[2])) vx = v.x;
+                        // (as far as the 2D HUD moves: up to the safe area's inset, iOS port)
+                        float moved = std::max(0.0f, lay.game_x0 - hud_inset_);
+                        if ((top_left && v.x + v.w <= s[0]) || (bottom && s[2] > 0 && v.x + v.w <= s[2])) vx = v.x + lay.game_x0 - moved;
                         else if ((top && s[1] > 0 && v.x >= s[1]) || (bottom && s[2] > 0 && v.x >= s[2]))
-                            vx = v.x + 2.0f * lay.game_x0;
+                            vx = v.x + lay.game_x0 + moved;
                     }
                     VkViewport viewport{vx * sx + jitter_x, v.y * sy + jitter_y, vw * sx, v.h * sy, 0.0f, 1.0f};
                     vkCmdSetViewport(cmd, 0, 1, &viewport);

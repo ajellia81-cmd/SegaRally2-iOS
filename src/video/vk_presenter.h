@@ -127,6 +127,7 @@ private:
     void* metal_view_ = nullptr;
     SafeArea safe_{};
     float density_ = 1;
+    bool device_lost_ = false;
     int pixel_w_ = 0, pixel_h_ = 0;
 #endif
     bool quit_ = false, resized_ = false, fullscreen_ = false, show_cursor_ = false;

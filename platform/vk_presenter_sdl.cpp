@@ -173,6 +173,15 @@ bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) 
         return false;
     }
     hwnd_ = reinterpret_cast<HWND>(window_);
+    // iOS: the app going to the background is told at once (an event watch,
+    // not the queue): GPU work sent after that loses the device for good
+    SDL_AddEventWatch(
+        [](void*, SDL_Event* e) -> bool {
+            if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND || e->type == SDL_EVENT_DID_ENTER_BACKGROUND) compat_set_focus(false);
+            else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND) compat_set_focus(true);
+            return true;
+        },
+        nullptr);
     update_size();
     printf("[video] window %dx%d pixels (x%.2f), safe area insets L%d T%d R%d B%d\n", pixel_w_, pixel_h_, density_,
            safe_.left, safe_.top, safe_.right, safe_.bottom);
@@ -182,6 +191,10 @@ bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) 
 #ifdef __APPLE__
     // MoltenVK: Metal argument buffers carry the texture pack's descriptor array
     setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
+    // Metal's fast math assumes no NaN and no infinity; the shaders' guards
+    // against them were dropped and some models (the cars of the selection
+    // screens, the countdown) came out black
+    setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
     {
         // MoltenVK is a framework inside the app (Frameworks/), loaded here: linked
         // statically, its vkXxx functions took the place of volk's pointers of the same names
@@ -562,6 +575,7 @@ void VkPresenter::frame(const RecordFn& record) {
         SDL_Delay(16);
         return;
     }
+    if (device_lost_) return;
     if (resized_) {
         vkDeviceWaitIdle(device_);
         if (!create_swapchain()) {
@@ -632,7 +646,11 @@ void VkPresenter::frame(const RecordFn& record) {
     si.pCommandBuffers = &cmd_;
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores = &rendered_[index];
-    vkQueueSubmit(queue_, 1, &si, fence_);
+    if (vkQueueSubmit(queue_, 1, &si, fence_) == VK_ERROR_DEVICE_LOST) {
+        fprintf(stderr, "[vulkan] device lost: nothing more is drawn\n");
+        device_lost_ = true;
+        return;
+    }
 
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
