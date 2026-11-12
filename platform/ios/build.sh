@@ -51,7 +51,7 @@ GAME=$PAY/SegaRally2.app/game
 mkdir -p "$GAME/third_party"
 cp -R res textures "$GAME/"
 cp -R third_party/fonts "$GAME/third_party/"
-cp "$ROM" "$GAME/srally2.zip"
+# (no ROM in the app: the player copies their own srally2.zip into its folder)
 # The icon: the PNG files, and an asset catalog compiled with actool
 cp platform/ios/AppIcon/AppIcon[0-9]*.png "$PAY/SegaRally2.app/"
 XCA=build/ipa_assets/Assets.xcassets

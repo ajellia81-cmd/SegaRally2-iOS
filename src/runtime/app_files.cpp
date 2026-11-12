@@ -258,9 +258,16 @@ bool load_game_rom(std::vector<uint8_t>& sound_program, std::vector<uint8_t>& so
         error = "Cannot find the Star Wars Trilogy ROM (srally2.zip). Looked in:\n";
         for (const std::string& l : looked) error += "  " + l + "\n";
     }
+#ifdef __APPLE__
+    // iOS port: the app carries no ROM; the player's own goes in its folder
+    error += "\nCopy your srally2.zip into this app's folder with the Files app\n"
+             "(LiveContainer: On My iPhone > LiveContainer > Data > Application > ... > Documents,\n"
+             "the folder that holds out/log.txt), then start the game again.";
+#else
     error += "\nPut srally2.zip next to SegaRally2.exe, or give its path with\n"
              "  SegaRally2.exe --rom D:\\roms\\srally2.zip\n"
              "or in the SR2_ROM_ZIP environment variable.";
+#endif
     fprintf(stderr, "%s\n", error.c_str());
     if (!g_opt.headless) MessageBoxA(nullptr, error.c_str(), "Sega Rally 2 Native", MB_OK | MB_ICONERROR);
     return false;

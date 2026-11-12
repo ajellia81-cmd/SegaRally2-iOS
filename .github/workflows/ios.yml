@@ -1,7 +1,18 @@
-# Builds the unsigned SegaRally2.ipa on a macOS runner. The ROM is the owner's
-# own: a release asset (tag "rom", file srally2.zip) of this private
-# repository, fetched at build time and never committed. The IPA is an
-# artifact of this private repository, for the owner's own device only.
+# Builds the unsigned SegaRally2.ipa on a macOS runner.
+#
+# This repository is public: it holds the port's source only. The ROM and the
+# built IPA never touch it. The ROM is the owner's own, a release asset (tag
+# "rom", file srally2.zip) of a separate PRIVATE repository; the build reads it
+# (the code is recompiled from it) and puts the IPA in that private
+# repository's release "ipa", for the owner's own device only. The IPA carries
+# no ROM, but it does carry code recompiled from it: it is never uploaded here
+# (no artifact, no release), and its build log prints nothing of the ROM.
+#
+# Needs two settings of this repository (Settings > Secrets and variables > Actions):
+#   secret   PRIVATE_REPO_TOKEN  a fine-grained token with Contents read and
+#                                write on the private repository only
+#   variable PRIVATE_REPO        owner/name of the private repository
+#                                (default: <owner>/SegaRally2-iOS-private)
 name: iOS build
 
 on:
@@ -11,7 +22,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # the IPA goes to the private release "ipa"
+  contents: read
 
 concurrency:
   group: ios-build
@@ -19,10 +30,27 @@ concurrency:
 
 jobs:
   ipa:
+    # The owner's runs only (never a fork's)
+    if: github.repository_owner == 'ajellia81-cmd'
     runs-on: macos-15
     timeout-minutes: 60
+    env:
+      PRIVATE_REPO: ${{ vars.PRIVATE_REPO || format('{0}/SegaRally2-iOS-private', github.repository_owner) }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Settings
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::The secret PRIVATE_REPO_TOKEN is not set (see the top of this file)"
+            exit 1
+          fi
+          gh api "repos/$PRIVATE_REPO" --jq '.private' | grep -qx true || {
+            echo "::error::$PRIVATE_REPO is not a private repository this token can read"
+            exit 1
+          }
 
       - name: Tools
         run: |
@@ -31,20 +59,19 @@ jobs:
           xcodebuild -version
           python3 --version
 
-      - name: ROM (release asset "rom" of this private repository)
+      - name: ROM (from the private repository; never kept here)
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         run: |
           mkdir -p rom
-          # srally2.zip whole, or in parts (srally2.zip.part0, part1, ...: the web's
-          # upload limit), put back together in order
-          gh release download rom --repo "$GITHUB_REPOSITORY" --pattern 'srally2.zip*' --dir rom --clobber
+          # srally2.zip whole, or in parts (srally2.zip.part0, part1, ...), put
+          # back together in order
+          gh release download rom --repo "$PRIVATE_REPO" --pattern 'srally2.zip*' --dir rom --clobber
           if [ ! -f rom/srally2.zip ]; then
             cat $(ls rom/srally2.zip.part* | sort -V) > rom/srally2.zip
             rm -f rom/srally2.zip.part*
           fi
           ls -la rom
-          shasum -a 256 rom/srally2.zip
 
       - name: Cache downloads
         uses: actions/cache@v4
@@ -55,21 +82,21 @@ jobs:
           key: deps-${{ hashFiles('third_party/deps.txt', 'platform/ios/build.sh') }}
 
       - name: Build
-        run: platform/ios/build.sh
+        run: platform/ios/build.sh > build.log 2>&1 || { tail -60 build.log; exit 1; }
 
-      - name: Upload IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: SegaRally2-ipa
-          path: build/SegaRally2.ipa
-          retention-days: 7
-          compression-level: 0
+      - name: Build log (the end)
+        if: always()
+        run: tail -25 build.log || true
 
-      - name: IPA to the private release "ipa" (for the owner's phone)
+      - name: IPA to the private repository's release "ipa"
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         run: |
-          gh release view ipa --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create ipa --repo "$GITHUB_REPOSITORY" --title "SegaRally2.ipa (private build)" \
+          gh release view ipa --repo "$PRIVATE_REPO" >/dev/null 2>&1 || \
+            gh release create ipa --repo "$PRIVATE_REPO" --title "SegaRally2.ipa (private build)" \
               --notes "The latest build, for the owner's own device (LiveContainer). Not for distribution."
-          gh release upload ipa build/SegaRally2.ipa --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload ipa build/SegaRally2.ipa --repo "$PRIVATE_REPO" --clobber
+
+      - name: Clean up (ROM and build output off the runner)
+        if: always()
+        run: rm -rf rom build data
