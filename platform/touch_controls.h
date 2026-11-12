@@ -72,4 +72,5 @@ private:
     bool up_edge_ = false, down_edge_ = false, escape_ = false;
     bool dirty_ = true;
     int last_steer_px_ = 0;
+    int shown_debug_ = 0;
 };

@@ -436,6 +436,9 @@ void main() {
     out_motion = (clip_before.xy / clip_before.w - ndc) * px_per_ndc;
     gl_SampleMask[0] = -1;   // a statically written mask must be set on every path
     vec4 col = color;
+    int dbg = int(atm.axes[0].w + 0.5);
+    vec3 d_light = vec3(-1.0);
+    vec4 d_lit = vec4(0.0), d_coat = vec4(0.0);
     if ((flags & DUST) != 0u) {   // only in the translucent pass
         if (vp.quality.x <= -1000.0 || vp.quality.x > 0.0 || vp.fog_color.w < 0.0) discard;
         bool puff = (tex & 3u) == 0u;
@@ -598,6 +601,7 @@ void main() {
         // The spotlight: a flat lobe, as in the original
         if ((flags & WORLD) != 0u && atm.spot.z > 0.0) light += atm.spot_color.rgb * spotlight().x;
         c.rgb *= light;
+        d_light = light;
         if ((flags & SPECULAR) != 0u) {
             uint shin = (flags >> 10) & 3u;
             float powers[4] = float[](8.0, 16.0, 32.0, 64.0);
@@ -607,6 +611,7 @@ void main() {
             c.rgb += f;
         }
     }
+    d_lit = c;
     // Sega Rally 2 (not in the original): clear coat on the cars' paint, and
     // their glass. The game marks both specular; the cars are the player's
     // (CAR: its own viewport) and the others (ACTOR), whose paint is
@@ -680,6 +685,7 @@ void main() {
     // The original clips the light at white; with HDR lighting the highlights
     // (sunlit surfaces, fire, specular) keep going and the composition's tone
     // curve rolls them off
+    d_coat = c;
     c.rgb = min(c.rgb, vec3(atm.soft.z > 0.5 ? 8.0 : 1.0));
 
     float fog = params.y * clamp(vp.params.z + (-view_pos.z) * vp.params.y, 0.0, 1.0);
@@ -720,6 +726,19 @@ void main() {
     }
     // A NaN or an infinity left by the lighting: the PC's GPUs happened to
     // draw it as light, Apple's as black. The unlit colour instead (iOS port)
+    // Debugging aid (iOS port): a three-finger tap cycles what is drawn (atm.axes[0].w):
+    // 1 vertex colour, 2 texture, 3 light, 4 lit, 5 after the clear coat, 6 final,
+    // 7 normal, 8 shade/fog/spec. NaN magenta, infinity cyan
+    if (dbg > 0) {
+        vec4 v = dbg == 1 ? vec4(col.rgb, 1.0) : dbg == 2 ? vec4(t.rgb, 1.0) : dbg == 3 ? vec4(d_light * 0.5, 1.0)
+               : dbg == 4 ? d_lit : dbg == 5 ? d_coat : dbg == 6 ? c
+               : dbg == 7 ? vec4(normal * 0.5 + 0.5, 1.0) : vec4(params * vec3(1.0, 1.0, 1.0), 1.0);
+        bool bad_nan = any(isnan(v)) || (dbg == 7 && any(isnan(normal)));
+        bool bad_inf = any(isinf(v));
+        out_color = bad_nan ? vec4(1.0, 0.0, 1.0, 1.0) : bad_inf ? vec4(0.0, 1.0, 1.0, 1.0) : vec4(clamp(v.rgb, 0.0, 1.0), 1.0);
+        out_glow = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
     if (any(isnan(c)) || any(isinf(c))) c = vec4(clamp(t.rgb * col.rgb, 0.0, 1.0), isnan(c.a) ? 1.0 : clamp(c.a, 0.0, 1.0));
     out_color = c;
     // Bloom source: fire, explosions and lights are drawn unlit (luminous);

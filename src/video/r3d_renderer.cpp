@@ -1,5 +1,7 @@
 #include "r3d_renderer.h"
 
+#include <atomic>
+
 #include <algorithm>
 #include <mutex>
 #include <cmath>
@@ -17,6 +19,10 @@
 #include "r3d.vert.h"
 #include "r3d_rt.vert.h"
 #include "tilegen.h"
+
+// Debugging aid (iOS port): what r3d.frag draws instead (0: the picture; a
+// three-finger tap cycles it, platform/vk_presenter_sdl.cpp)
+std::atomic<int> g_sr2_debug_view{0};
 
 namespace {
 
@@ -1020,6 +1026,7 @@ void R3DRenderer::update_atmosphere(const ScreenLayout& lay, uint32_t target_w, 
         for (int k = 0; k < 3; k++)
             for (int i = 0; i < 3; i++) u.axes[k * 4 + i] = k == i ? 1.0f : 0.0f;
     }
+    u.axes[3] = float(g_sr2_debug_view.load());
     if (w) {
         // Game time (about 57.5 frames per second), so a replay drifts the same way
         float time = (float(scene_->frame % 100000) + interp_) / 57.5f;

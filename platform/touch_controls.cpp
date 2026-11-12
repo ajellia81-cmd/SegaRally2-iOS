@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <atomic>
+#include <cstdio>
 #include <cstring>
 
 #include "inputs.h"
@@ -257,13 +259,23 @@ bool TouchControls::take_escape() {
 }
 
 bool TouchControls::draw(std::vector<uint32_t>& px, int& w, int& h) {
+    extern std::atomic<int> g_sr2_debug_view;
+    int dbg = g_sr2_debug_view.load();
+    if (dbg != shown_debug_) dirty_ = true, shown_debug_ = dbg;
     if (!dirty_ || w_ <= 0) return false;
     dirty_ = false;
     w = std::max(1, w_ / 2);
     h = std::max(1, h_ / 2);
     px.assign(size_t(w) * size_t(h), 0);
-    if (!shown()) return true;   // an empty picture
     Canvas cv{px, w, h};
+    if (shown_debug_ > 0) {
+        static const char* NAMES[9] = {"", "VERTEX COLOR", "TEXTURE", "LIGHT", "LIT", "COAT", "FINAL", "NORMAL", "PARAMS"};
+        char label[48];
+        snprintf(label, sizeof label, "DEBUG %d %s", shown_debug_, NAMES[shown_debug_]);
+        cv.rect(float(w) * 0.5f - 160, 4, float(w) * 0.5f + 160, 30, 0x000000, 0.7f);
+        cv.text(label, float(w) * 0.5f, 17, 2.0f, 0xFFFF00, 1.0f);
+    }
+    if (!shown()) return true;   // nothing else
     const float k = 0.5f;   // window pixels -> picture pixels
     auto button = [&](int b, const char* label, uint32_t tint) {
         const Circle& c = c_[b];

@@ -22,6 +22,9 @@
 #include <vector>
 
 #include "dlss.h"
+
+#include <atomic>
+extern std::atomic<int> g_sr2_debug_view;   // r3d_renderer.cpp
 #include "sdl_events.h"
 
 #ifdef __APPLE__
@@ -498,6 +501,16 @@ void VkPresenter::handle_event(const SDL_Event& e) {
     case SDL_EVENT_FINGER_UP:
     case SDL_EVENT_FINGER_CANCELED: {
         float x = e.tfinger.x * float(pixel_w_), y = e.tfinger.y * float(pixel_h_);
+        if (e.type == SDL_EVENT_FINGER_DOWN) {   // debugging aid: three fingers cycle the 3D debug views
+            int n = 0;
+            if (SDL_Finger** f = SDL_GetTouchFingers(e.tfinger.touchID, &n)) SDL_free(f);
+            if (n == 3) {
+                int v = (g_sr2_debug_view.load() + 1) % 9;
+                g_sr2_debug_view = v;
+                printf("[debug] 3D view %d\n", v);
+                break;
+            }
+        }
         if (touch_hook && touch_hook(e, x, y)) break;
         // Otherwise a tap is the menus' click, a drag moves their highlight
         if (!input_hook) break;
