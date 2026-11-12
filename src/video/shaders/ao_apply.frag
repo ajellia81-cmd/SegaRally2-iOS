@@ -49,5 +49,8 @@ void main() {
         bounce /= bounce_weight;
         factor = ao.gi.x < 0.0 ? bounce * -ao.gi.x : factor * (1.0 + ao.gi.x * bounce);
     }
-    out_factor = vec4(factor, 1.0);
+    // (never NaN, infinite or below nothing: a NaN multiplied into the colour
+    // showed black on Apple's GPUs, the cars and the countdown; iOS port)
+    if (any(isnan(factor)) || any(isinf(factor))) factor = vec3(1.0);
+    out_factor = vec4(max(factor, vec3(0.0)), 1.0);
 }

@@ -1627,7 +1627,7 @@ void R3DRenderer::record_world(const Frame& f) {
     ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     // The ambient occlusion splits the 3D pass in two: the first part must keep everything
-    bool ao_on = (ao_strength_ > 0 || rt_gi_) && scene_ &&
+    bool ao_on = (ao_strength_ > 0 || rt_gi_) && scene_ && g_sr2_debug_view.load() != 21 &&   // debug view 21: none
                  std::any_of(scene_->viewports.begin(), scene_->viewports.end(), [](const R3DViewport& v) { return v.world; });
     // Soft particles need the world's depth too, so they split it as well
     bool split = ao_on || (soft_particles_ && scene_ &&

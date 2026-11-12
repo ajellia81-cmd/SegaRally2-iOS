@@ -128,6 +128,9 @@ void main() {
     vec3 dx = abs(px1.z - p.z) < abs(p.z - px0.z) ? px1 - p : p - px0;
     vec3 dy = abs(py1.z - p.z) < abs(p.z - py0.z) ? py1 - p : p - py0;
     vec3 n = normalize(cross(dy, dx));
+    // (no NaN from a degenerate normal: Apple's GPUs carried it into the
+    // occlusion and the colour, and close-up models came out black; iOS port)
+    if (any(isnan(n)) || any(isinf(n))) n = vec3(0.0, 0.0, 1.0);
     if (dot(n, p) > 0.0) n = -n;   // towards the camera
 
     // Rotated per pixel (and per frame with DLAA, which averages it out)
@@ -192,5 +195,6 @@ void main() {
         occlusion += horizon;
     }
     float open = 1.0 - clamp(occlusion / float(DIRECTIONS) * 2.4, 0.0, 1.0);
+    if (isnan(open) || isinf(open)) open = 1.0;
     out_ao = vec4(bounce, mix(1.0, open, 1.0 - fog));
 }
