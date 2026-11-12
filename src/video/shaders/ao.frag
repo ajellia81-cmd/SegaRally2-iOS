@@ -19,7 +19,11 @@
 // The 3D pass's descriptor set, as set 1: the texture RAM and the texture pack
 // for the cut-out triangles, the acceleration structure and the cut-outs
 layout(set = 1, binding = 0) uniform usampler2D texture_ram;
-layout(set = 1, binding = 1) uniform sampler2D replacements[4096];
+// texture pack, RGBA8 with mips: the pictures and one sampler for them all
+// (iOS port: 4096 samplers are more than Metal's argument buffers hold, and
+// the pictures read as black)
+layout(set = 1, binding = 1) uniform texture2D replacement_tex[4096];
+layout(set = 1, binding = 3) uniform sampler replacement_smp;
 #define RT_SET 1
 #include "raytrace.glsl"
 #define ATMOSPHERE_SET 1

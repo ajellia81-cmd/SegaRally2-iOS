@@ -27,7 +27,7 @@ vec4 surface_texel(Cutout c, vec2 bary, int level) {
     if (c.replace != 0u) {
         if ((c.flags & MIRROR_U) != 0u) { float m = mod(uv.x, 2.0); uv.x = m > 1.0 ? 2.0 - m : m; }
         if ((c.flags & MIRROR_V) != 0u) { float m = mod(uv.y, 2.0); uv.y = m > 1.0 ? 2.0 - m : m; }
-        return textureLod(replacements[nonuniformEXT(c.replace & 0xFFFFu)], uv, float(level));
+        return textureLod(sampler2D(replacement_tex[nonuniformEXT(c.replace & 0xFFFFu)], replacement_smp), uv, float(level));
     }
     ivec2 base = ivec2(int(c.tex & 2047u), int((c.tex >> 11) & 2047u));
     ivec2 size = ivec2(32 << int((c.tex >> 22) & 7u), 32 << int((c.tex >> 25) & 7u));
@@ -66,7 +66,7 @@ float cutout_solid(uint index, vec2 bary, int level) {
     if (c.replace != 0u) {
         if ((c.flags & MIRROR_U) != 0u) { float m = mod(uv.x, 2.0); uv.x = m > 1.0 ? 2.0 - m : m; }
         if ((c.flags & MIRROR_V) != 0u) { float m = mod(uv.y, 2.0); uv.y = m > 1.0 ? 2.0 - m : m; }
-        a = textureLod(replacements[nonuniformEXT(c.replace & 0xFFFFu)], uv, float(level)).a;
+        a = textureLod(sampler2D(replacement_tex[nonuniformEXT(c.replace & 0xFFFFu)], replacement_smp), uv, float(level)).a;
     } else {
         ivec2 base = ivec2(int(c.tex & 2047u), int((c.tex >> 11) & 2047u));
         ivec2 size = ivec2(32 << int((c.tex >> 22) & 7u), 32 << int((c.tex >> 25) & 7u));

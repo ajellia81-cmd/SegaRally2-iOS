@@ -258,19 +258,22 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     // (what the traced rays need is also the vertex shader's: it traces the
     // light of each puff of dust, r3d.vert)
     const VkShaderStageFlags rt_stages = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT;
-    VkDescriptorSetLayoutBinding b0[7] = {
+    VkDescriptorSetLayoutBinding b0[8] = {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, rt_stages},
-        {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, TexturePack::MAX_SLOTS, rt_stages},
+        // the texture pack's pictures and their one sampler (iOS port: not
+        // 4096 combined samplers, more than Metal's argument buffers hold)
+        {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, TexturePack::MAX_SLOTS, rt_stages},
         {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, rt_stages},
+        {3, VK_DESCRIPTOR_TYPE_SAMPLER, 1, rt_stages},
         {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},   // sun shadow map (no 3)
         {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},   // world depth (soft particles)
         {6, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, rt_stages},   // ray tracing: the world
         {7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, rt_stages},   // ray tracing: cut-out triangles
     };
-    const uint32_t r3d_bindings = rt_.ready() ? 7 : 5;
+    const uint32_t r3d_bindings = rt_.ready() ? 8 : 6;
     // Replacement slots are filled while earlier frames may still be in flight
-    VkDescriptorBindingFlags bflags[7] = {
-        0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT, 0, 0, 0, 0, 0};
+    VkDescriptorBindingFlags bflags[8] = {
+        0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT, 0, 0, 0, 0, 0, 0};
     VkDescriptorSetLayoutBindingFlagsCreateInfo bfi{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
     bfi.bindingCount = r3d_bindings;
     bfi.pBindingFlags = bflags;
@@ -312,15 +315,17 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     li.bindingCount = 2;
     vkCreateDescriptorSetLayout(dev_, &li, nullptr, &ao_set_layout_);
 
-    VkDescriptorPoolSize ps[4] = {
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 36 + TexturePack::MAX_SLOTS + Pack2D::MAX_SLOTS},
+    VkDescriptorPoolSize ps[6] = {
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 36 + Pack2D::MAX_SLOTS},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, TexturePack::MAX_SLOTS},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 2},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
     };
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.maxSets = 10;
-    pi.poolSizeCount = rt_.ready() ? 4 : 2;
+    pi.poolSizeCount = rt_.ready() ? 6 : 4;
     pi.pPoolSizes = ps;
     vkCreateDescriptorPool(dev_, &pi, nullptr, &pool_);
     VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -328,6 +333,16 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &r3d_set_layout_;
     vkAllocateDescriptorSets(dev_, &ai, &r3d_set_);
+    {
+        VkDescriptorImageInfo smp{replace_sampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+        VkWriteDescriptorSet sw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        sw.dstSet = r3d_set_;
+        sw.dstBinding = 3;
+        sw.descriptorCount = 1;
+        sw.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+        sw.pImageInfo = &smp;
+        vkUpdateDescriptorSets(dev_, 1, &sw, 0, nullptr);
+    }
     ai.pSetLayouts = &compose_set_layout_;
     vkAllocateDescriptorSets(dev_, &ai, &compose_set_);
     ai.pSetLayouts = &bloom_set_layout_;
@@ -1042,6 +1057,10 @@ void R3DRenderer::upload_slot(VkDescriptorSet set, uint32_t binding, VkSampler s
         wr.dstArrayElement = slot;
         wr.descriptorCount = 1;
         wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        if (set == r3d_set_ && binding == 1) {   // the texture pack: pictures only (their sampler is binding 3)
+            wr.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            info.sampler = VK_NULL_HANDLE;
+        }
         wr.pImageInfo = &info;
         if (replace) {   // the slot's previous picture is no longer needed
             auto old = overlay_images_.find(slot);

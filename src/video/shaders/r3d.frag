@@ -21,7 +21,11 @@ layout(location = 9) in vec4 clip_before;
 layout(location = 10) in vec4 dust_light;   // DUST: the light bounced onto it (rgb) and how much of the sun reaches it (a), r3d.vert
 
 layout(set = 0, binding = 0) uniform usampler2D texture_ram;   // 2048x2048 R16_UINT
-layout(set = 0, binding = 1) uniform sampler2D replacements[4096];   // texture pack, RGBA8 with mips
+// texture pack, RGBA8 with mips: the pictures and one sampler for them all
+// (iOS port: 4096 samplers are more than Metal's argument buffers hold, and
+// the pictures read as black)
+layout(set = 0, binding = 1) uniform texture2D replacement_tex[4096];
+layout(set = 0, binding = 3) uniform sampler replacement_smp;
 
 layout(push_constant) uniform Viewport {
     mat4 proj;
@@ -297,10 +301,10 @@ vec4 sample_texture(vec2 duv_dx, vec2 duv_dy) {
         vec2 u = uv;
         if ((flags & MIRROR_U) != 0u) { float m = mod(u.x, 2.0); u.x = m > 1.0 ? 2.0 - m : m; }
         if ((flags & MIRROR_V) != 0u) { float m = mod(u.y, 2.0); u.y = m > 1.0 ? 2.0 - m : m; }
-        vec4 c = textureGrad(replacements[nonuniformEXT(replace & 0xFFFFu)], u, duv_dx, duv_dy);
+        vec4 c = textureGrad(sampler2D(replacement_tex[nonuniformEXT(replace & 0xFFFFu)], replacement_smp), u, duv_dx, duv_dy);
         uint dirt = replace >> 16;   // the game's dirt over it (texture_pack.h): colour and amount
         if (dirt != 0u) {
-            vec4 d = textureGrad(replacements[nonuniformEXT(dirt)], u, duv_dx, duv_dy);
+            vec4 d = textureGrad(sampler2D(replacement_tex[nonuniformEXT(dirt)], replacement_smp), u, duv_dx, duv_dy);
             c.rgb = mix(c.rgb, d.rgb, d.a);
         }
         return c;
@@ -472,7 +476,7 @@ void main() {
     // same, and the texture pack's pictures as they are, unlit (iOS port)
     if ((dbg == 17 || dbg == 18) && (flags & (LUMINOUS | TEX_ALPHA)) == (LUMINOUS | TEX_ALPHA)) discard;
     if (dbg == 18 && replace != 0u) {
-        out_color = vec4(textureGrad(replacements[nonuniformEXT(replace & 0xFFFFu)], uv, dFdx(uv), dFdy(uv)).rgb, 1.0);
+        out_color = vec4(textureGrad(sampler2D(replacement_tex[nonuniformEXT(replace & 0xFFFFu)], replacement_smp), uv, dFdx(uv), dFdy(uv)).rgb, 1.0);
         out_glow = vec4(0.0, 0.0, 0.0, 1.0);
         out_motion = vec2(0.0);
         gl_SampleMask[0] = -1;
@@ -791,9 +795,9 @@ void main() {
                                               uv * vec2(ivec2(32 << int((tex >> 22) & 7u), 32 << int((tex >> 25) & 7u))), 0,
                                               (tex >> 28) & 15u).rgb, 1.0)
                               : vec4(0.0, 0.0, 0.3, 1.0))
-               : dbg == 12 ? (replace != 0u ? vec4(textureGrad(replacements[nonuniformEXT(replace & 0xFFFFu)], uv, duv_dx, duv_dy).rgb, 1.0) : vec4(0.0, 0.0, 0.3, 1.0))
-               : dbg == 13 ? ((replace >> 16) != 0u ? vec4(textureGrad(replacements[nonuniformEXT(replace >> 16)], uv, duv_dx, duv_dy).rgb, 1.0) : vec4(0.0, 0.0, 0.3, 1.0))
-               : ((replace >> 16) != 0u ? vec4(vec3(textureGrad(replacements[nonuniformEXT(replace >> 16)], uv, duv_dx, duv_dy).a), 1.0) : vec4(0.0, 0.0, 0.3, 1.0));
+               : dbg == 12 ? (replace != 0u ? vec4(textureGrad(sampler2D(replacement_tex[nonuniformEXT(replace & 0xFFFFu)], replacement_smp), uv, duv_dx, duv_dy).rgb, 1.0) : vec4(0.0, 0.0, 0.3, 1.0))
+               : dbg == 13 ? ((replace >> 16) != 0u ? vec4(textureGrad(sampler2D(replacement_tex[nonuniformEXT(replace >> 16)], replacement_smp), uv, duv_dx, duv_dy).rgb, 1.0) : vec4(0.0, 0.0, 0.3, 1.0))
+               : ((replace >> 16) != 0u ? vec4(vec3(textureGrad(sampler2D(replacement_tex[nonuniformEXT(replace >> 16)], replacement_smp), uv, duv_dx, duv_dy).a), 1.0) : vec4(0.0, 0.0, 0.3, 1.0));
         bool bad_nan = any(isnan(v)) || (dbg == 7 && any(isnan(normal)));
         bool bad_inf = any(isinf(v));
         out_color = bad_nan ? vec4(1.0, 0.0, 1.0, 1.0) : bad_inf ? vec4(0.0, 1.0, 1.0, 1.0) : vec4(clamp(v.rgb, 0.0, 1.0), 1.0);

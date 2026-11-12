@@ -51,7 +51,11 @@ layout(location = 14) flat out vec4 vpo_quality;
 
 #ifdef RAY_TRACING
 layout(set = 0, binding = 0) uniform usampler2D texture_ram;
-layout(set = 0, binding = 1) uniform sampler2D replacements[4096];
+// texture pack, RGBA8 with mips: the pictures and one sampler for them all
+// (iOS port: 4096 samplers are more than Metal's argument buffers hold, and
+// the pictures read as black)
+layout(set = 0, binding = 1) uniform texture2D replacement_tex[4096];
+layout(set = 0, binding = 3) uniform sampler replacement_smp;
 #define ATMOSPHERE_BINDING 2
 #include "atmosphere.glsl"
 #define RT_SET 0
