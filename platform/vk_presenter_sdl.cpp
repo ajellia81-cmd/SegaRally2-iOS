@@ -210,6 +210,10 @@ bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) 
     // against them were dropped and some models (the cars of the selection
     // screens, the countdown) came out black
     setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
+    // Images and buffers in Metal heaps, made resident as a whole: the texture
+    // pack's pictures, reached only through the argument buffer, were not
+    // always resident and read as black (the cars' paint, the countdown)
+    setenv("MVK_CONFIG_USE_MTLHEAP", "1", 0);
     {
         // MoltenVK is a framework inside the app (Frameworks/), loaded here: linked
         // statically, its vkXxx functions took the place of volk's pointers of the same names

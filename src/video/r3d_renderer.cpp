@@ -865,6 +865,7 @@ void R3DRenderer::verify_texture_ram(const std::vector<uint16_t>& cpu) {
     if (scene_) {
         struct Use {
             int n = 0;
+            uint32_t rep = 0;
             float u0 = 1e9f, u1 = -1e9f, v0 = 1e9f, v1 = -1e9f;
         };
         std::map<std::pair<uint32_t, uint32_t>, Use> used;
@@ -872,6 +873,7 @@ void R3DRenderer::verify_texture_ram(const std::vector<uint16_t>& cpu) {
             if (v.flags & R3D_TEXTURED) {
                 Use& u = used[{v.tex, v.flags | (v.replace ? 0x80000000u : 0u)}];
                 u.n++;
+                u.rep = v.replace;
                 u.u0 = std::min(u.u0, v.uv[0]), u.u1 = std::max(u.u1, v.uv[0]);
                 u.v0 = std::min(u.v0, v.uv[1]), u.v1 = std::max(u.v1, v.uv[1]);
             }
@@ -909,8 +911,8 @@ void R3DRenderer::verify_texture_ram(const std::vector<uint16_t>& cpu) {
                     }
                     }
                 }
-            printf("[texuse] tex %08x fmt %u %d,%d %dx%d flags %08x verts %d uv %.2f..%.2f %.2f..%.2f | bit15 %.2f data %08x\n",
-                   tex, fmt, bx, by, w, h, key.second, use.n, use.u0, use.u1, use.v0, use.v1, double(b15) / (w * h),
+            printf("[texuse] tex %08x fmt %u %d,%d %dx%d flags %08x replace %08x verts %d uv %.2f..%.2f %.2f..%.2f | bit15 %.2f data %08x\n",
+                   tex, fmt, bx, by, w, h, key.second, use.rep, use.n, use.u0, use.u1, use.v0, use.v1, double(b15) / (w * h),
                    uint32_t(sum));
             if (dumped[tex]++ < 3) {
                 char path[96];
@@ -1057,8 +1059,11 @@ void R3DRenderer::upload_slot(VkDescriptorSet set, uint32_t binding, VkSampler s
 }
 
 void R3DRenderer::add_replacements(const std::vector<RgbaImage>& images) {
-    for (const RgbaImage& src : images)
+    for (const RgbaImage& src : images) {
+        size_t before = replacements_.size();
         upload_slot(r3d_set_, 1, replace_sampler_, src.slot, src.w, src.h, src.rgba);
+        printf("[pack] slot %u %dx%d %s\n", src.slot, src.w, src.h, replacements_.size() > before ? "uploaded" : "FAILED");
+    }
 }
 
 void R3DRenderer::add_overlays(const std::vector<RgbaImage>& images) {
