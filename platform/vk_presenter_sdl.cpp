@@ -525,7 +525,7 @@ void VkPresenter::handle_event(const SDL_Event& e) {
             if (n < 3) gesture = false;
             if (n == 3 && !gesture) {
                 gesture = true;
-                int v = (g_sr2_debug_view.load() + 1) % 20;
+                int v = (g_sr2_debug_view.load() + 1) % 21;
                 g_sr2_debug_view = v;
                 printf("[debug] 3D view %d\n", v);
                 break;

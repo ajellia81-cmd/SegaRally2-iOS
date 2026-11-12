@@ -1772,9 +1772,17 @@ void R3DRenderer::record_world(const Frame& f) {
                         return (x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) == (R3D_WORLD | R3D_LUMINOUS) &&
                                (x.color & 0x00FFFFFFu) == 0 && (x.color >> 24) < 255;
                     };
-                    auto draw_runs = [&](VkPipeline other, VkPipeline blob) {
+                    // (the push constants again after each pipeline bound: with
+                    // MoltenVK a draw could see the previous ones, the depth
+                    // pre-pass's or another moment's positions; iOS port)
+                    auto draw_runs = [&](VkPipeline other, VkPipeline blob, const ViewportPush& push) {
+                        auto bind = [&](VkPipeline p) {
+                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+                            vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                               0, sizeof(push), &push);
+                        };
                         if (!v.world) {
-                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, other);
+                            bind(other);
                             vkCmdDraw(cmd, count, 1, v.trans_first, 0);
                             return;
                         }
@@ -1784,7 +1792,7 @@ void R3DRenderer::record_world(const Frame& f) {
                             uint32_t b = a + 3;
                             while (b < end && is_blob(b) == here) b += 3;
                             b = std::min(b, end);
-                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, here ? blob : other);
+                            bind(here ? blob : other);
                             vkCmdDraw(cmd, b - a, 1, a, 0);
                             a = b;
                         }
@@ -1794,7 +1802,8 @@ void R3DRenderer::record_world(const Frame& f) {
                         pd.quality[0] = -1000.0f;
                         vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                            0, sizeof(pd), &pd);
-                        draw_runs(trans_depth_, blob_depth_);
+                        if (g_sr2_debug_view.load() != 20)   // debug view 20: no depth pre-pass
+                            draw_runs(trans_depth_, blob_depth_, pd);
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, translucent_);
                     }
                     vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -1803,7 +1812,7 @@ void R3DRenderer::record_world(const Frame& f) {
                         vkCmdDraw(cmd, count, 1, v.opaque_first, 0);
                         continue;
                     }
-                    draw_runs(translucent_, blob_);
+                    draw_runs(translucent_, blob_, pc);
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, translucent_);
                 }
             }
