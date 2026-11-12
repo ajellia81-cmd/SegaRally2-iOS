@@ -52,6 +52,21 @@ mkdir -p "$GAME/third_party"
 cp -R res textures "$GAME/"
 cp -R third_party/fonts "$GAME/third_party/"
 cp "$ROM" "$GAME/srally2.zip"
+# The icon: the PNG files, and an asset catalog compiled with actool
+cp platform/ios/AppIcon/AppIcon[0-9]*.png "$PAY/SegaRally2.app/"
+XCA=build/ipa_assets/Assets.xcassets
+rm -rf build/ipa_assets && mkdir -p "$XCA/AppIcon.appiconset"
+cp platform/ios/AppIcon/AppIcon-1024.png "$XCA/AppIcon.appiconset/"
+cat > "$XCA/Contents.json" <<'JSON'
+{ "info" : { "author" : "xcode", "version" : 1 } }
+JSON
+cat > "$XCA/AppIcon.appiconset/Contents.json" <<'JSON'
+{ "images" : [ { "filename" : "AppIcon-1024.png", "idiom" : "universal", "platform" : "ios", "size" : "1024x1024" } ],
+  "info" : { "author" : "xcode", "version" : 1 } }
+JSON
+xcrun actool "$XCA" --compile "$PAY/SegaRally2.app" --platform iphoneos --minimum-deployment-target 17.0 \
+    --app-icon AppIcon --target-device iphone --target-device ipad \
+    --output-partial-info-plist build/ipa_assets/partial.plist >/dev/null || echo "actool failed: the PNG icons only"
 # MoltenVK, loaded by the game at run time (vk_presenter_sdl.cpp)
 mkdir -p "$PAY/SegaRally2.app/Frameworks"
 cp -R "$MVK_FW" "$PAY/SegaRally2.app/Frameworks/"
