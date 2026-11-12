@@ -3,6 +3,7 @@
 #include <atomic>
 
 #include <algorithm>
+#include <map>
 #include <mutex>
 #include <cmath>
 #include <cstdio>
@@ -856,6 +857,31 @@ void R3DRenderer::verify_texture_ram(const std::vector<uint16_t>& cpu) {
             printf("[texcheck] at %zu,%zu gpu %04x uploaded %04x cpu %04x\n", i % 2048, i / 2048, gpu[i], stg[i], cpu[i]);
             shown++;
         }
+    // What the scene's textured polygons use: texture word, flags, texels
+    if (scene_) {
+        std::map<std::pair<uint32_t, uint32_t>, int> used;
+        for (const R3DVertex& v : scene_->vertices)
+            if ((v.flags & R3D_TEXTURED) && !v.replace) used[{v.tex, v.flags}]++;
+        int listed = 0;
+        for (auto& [key, n] : used) {
+            if (listed++ >= 60) break;
+            uint32_t tex = key.first;
+            int bx = tex & 2047, by = (tex >> 11) & 2047, w = 32 << ((tex >> 22) & 7), h = 32 << ((tex >> 25) & 7);
+            int b15 = 0, cnt = 0;
+            double r = 0, g = 0, b = 0, lo = 0, hi = 0;
+            for (int y = 0; y < h; y += 2)
+                for (int x = 0; x < w; x += 2) {
+                    uint16_t t = gpu[size_t((by & 1024) | ((by + y) & 1023)) * 2048 + ((bx + x) & 2047)];
+                    b15 += t >> 15;
+                    r += (t >> 10) & 31, g += (t >> 5) & 31, b += t & 31;
+                    lo += t & 15, hi += t >> 12;
+                    cnt++;
+                }
+            printf("[texuse] tex %08x fmt %u %d,%d %dx%d flags %06x verts %d | bit15 %.2f rgb555 %.0f %.0f %.0f nib lo %.1f hi %.1f\n",
+                   tex, tex >> 28, bx, by, w, h, key.second, n, double(b15) / cnt, r / cnt, g / cnt, b / cnt, lo / cnt,
+                   hi / cnt);
+        }
+    }
     if (gpu_bad) {   // the uploaded copy again, whole
         tex_y0_ = 0;
         tex_y1_ = 2048;
