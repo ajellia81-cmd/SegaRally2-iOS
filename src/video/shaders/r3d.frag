@@ -249,14 +249,18 @@ vec4 fetch(ivec2 base, ivec2 size, ivec2 c, uint fmt) {
 }
 
 // Mip level positions inside a texture page (spec 6.4)
-const int MIP_X[12] = int[](0, 1024, 1536, 1792, 1920, 1984, 2016, 2032, 2040, 2044, 2046, 2047);
-const int MIP_Y[11] = int[](0, 512, 768, 896, 960, 992, 1008, 1016, 1020, 1022, 1023);
+// (0, 1024, 1536, ... 2047 across and 0, 512, 768, ... 1023 down: worked out
+// rather than looked up in a constant table, which Apple's GPUs read wrongly
+// when indexed by a variable; iOS port)
+int mip_x(int level) { return 2048 - (2048 >> level); }
+int mip_y(int level) { return 1024 - (1024 >> level); }
 
 // Bilinear sample of one mip level; st in level-0 texels. Premultiplied
 // result: the colour of transparent texels (often sky blue in the texture
 // data) must not bleed into the edges of foliage.
 vec4 bilinear(ivec2 base, ivec2 size, vec2 st, int level, uint fmt) {
-    ivec2 b = ivec2(MIP_X[level] + (base.x >> level), (base.y & 1024) | (MIP_Y[level] + ((base.y & 1023) >> level)));
+    level = clamp(level, 0, 10);
+    ivec2 b = ivec2(mip_x(level) + (base.x >> level), (base.y & 1024) | (mip_y(level) + ((base.y & 1023) >> level)));
     ivec2 s = max(size >> level, ivec2(1));
     vec2 p = st / float(1 << level) - 0.5;
     ivec2 i0 = ivec2(floor(p));
@@ -265,14 +269,17 @@ vec4 bilinear(ivec2 base, ivec2 size, vec2 st, int level, uint fmt) {
     // Axes without wrap smoothing (and all of an alpha-tested texture) repeat
     // without blending across the edge: both taps stay in the repetition the
     // sample falls in (spec 6.6)
-    bvec2 smooth_edge = bvec2((flags & SMOOTH_U) != 0u, (flags & SMOOTH_V) != 0u);
-    if ((flags & ALPHA_TEST) != 0u) smooth_edge = bvec2(false);
+    bool alpha_test = (flags & ALPHA_TEST) != 0u;
     ivec2 first = ivec2(floor((p + 0.5) / vec2(s))) * s;
-    for (int k = 0; k < 2; k++)
-        if (!smooth_edge[k]) {
-            i0[k] = clamp(i0[k], first[k], first[k] + s[k] - 1);
-            i1[k] = clamp(i1[k], first[k], first[k] + s[k] - 1);
-        }
+    // (axis by axis, without indexing a vector by a variable: iOS port)
+    if (alpha_test || (flags & SMOOTH_U) == 0u) {
+        i0.x = clamp(i0.x, first.x, first.x + s.x - 1);
+        i1.x = clamp(i1.x, first.x, first.x + s.x - 1);
+    }
+    if (alpha_test || (flags & SMOOTH_V) == 0u) {
+        i0.y = clamp(i0.y, first.y, first.y + s.y - 1);
+        i1.y = clamp(i1.y, first.y, first.y + s.y - 1);
+    }
     vec4 a = fetch(b, s, i0, fmt);
     vec4 bb = fetch(b, s, ivec2(i1.x, i0.y), fmt);
     vec4 c = fetch(b, s, ivec2(i0.x, i1.y), fmt);
@@ -312,16 +319,21 @@ vec4 sample_texture(vec2 duv_dx, vec2 duv_dy) {
         vec2 dx = duv_dx * vec2(size), dy = duv_dy * vec2(size);
         float lx = length(dx), ly = length(dy);
         float pmax = max(lx, ly), pmin = max(min(lx, ly), 1e-6);
-        float taps = clamp(ceil(pmax / pmin), 1.0, max_aniso);
+        // (no NaN or infinity past here: Apple's GPUs make a loop of none
+        // of them, and the texture black; iOS port)
+        if (isnan(pmax) || isinf(pmax)) pmax = 1.0;
+        if (isnan(pmin) || isinf(pmin)) pmin = 1.0;
+        float taps = clamp(ceil(min(pmax / pmin, 64.0)), 1.0, max(max_aniso, 1.0));
         // Levels are stored while both sides are >= 4 before halving
         int max_level = max(findMSB(min(size.x, size.y)) - 1, 0);
         float lod = clamp(log2(max(pmax / taps, 1e-6)), 0.0, float(max_level));
-        int l0 = int(floor(lod));
+        int l0 = clamp(int(floor(lod)), 0, max_level);
         int l1 = min(l0 + 1, max_level);
         float lf = lod - float(l0);
         vec2 axis = lx > ly ? dx : dy;
         sum = vec4(0.0);
-        int n = int(taps);
+        int n = clamp(int(taps), 1, 16);
+        taps = float(n);
         for (int i = 0; i < n; i++) {
             vec2 p = st + axis * ((float(i) + 0.5) / taps - 0.5);
             vec4 s = bilinear(base, size, p, l0, fmt);
@@ -329,6 +341,11 @@ vec4 sample_texture(vec2 duv_dx, vec2 duv_dy) {
             sum += s;
         }
         sum /= taps;
+    }
+    // Nothing came out (iOS port): the texel under the pixel, unfiltered
+    if (!(sum.a > 0.0) || any(isnan(sum))) {
+        sum = fetch(base, size, ivec2(floor(st)), fmt);
+        sum.rgb *= sum.a;
     }
     sum.rgb = sum.a > 0.0 ? sum.rgb / sum.a : vec3(0.0);
     return sum;
