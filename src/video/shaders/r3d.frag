@@ -29,7 +29,20 @@ layout(push_constant) uniform Viewport {
     vec4 fog_color;
     vec4 params;
     vec4 quality;
-} vp;
+} vp_pc;
+// The same values as the vertex shader read them (iOS port: MoltenVK gave the
+// fragment stage zeros for some viewports; r3d.vert)
+layout(location = 11) flat in vec4 vpo_sun;
+layout(location = 12) flat in vec4 vpo_fog_color;
+layout(location = 13) flat in vec4 vpo_params;
+layout(location = 14) flat in vec4 vpo_quality;
+struct ViewportValues {
+    vec4 sun;
+    vec4 fog_color;
+    vec4 params;
+    vec4 quality;
+};
+ViewportValues vp;
 
 layout(set = 0, binding = 4) uniform sampler2D shadow_map;     // sun shadows (depth seen from the sun)
 layout(set = 0, binding = 5) uniform sampler2D scene_depth;    // the opaque world's depth (soft particles)
@@ -425,6 +438,7 @@ vec4 dust() {
 }
 
 void main() {
+    vp = ViewportValues(vpo_sun, vpo_fog_color, vpo_params, vpo_quality);
     // (quality.z: with DLSS upscaling, the size of the 3D image over that of
     // the picture it makes: the textures are filtered for the latter)
     float lod_scale = vp.quality.z > 0.0 ? vp.quality.z : 1.0;
@@ -732,7 +746,8 @@ void main() {
     if (dbg > 0) {
         vec4 v = dbg == 1 ? vec4(col.rgb, 1.0) : dbg == 2 ? vec4(t.rgb, 1.0) : dbg == 3 ? vec4(d_light * 0.5, 1.0)
                : dbg == 4 ? d_lit : dbg == 5 ? d_coat : dbg == 6 ? c
-               : dbg == 7 ? vec4(normal * 0.5 + 0.5, 1.0) : vec4(params * vec3(1.0, 1.0, 1.0), 1.0);
+               : dbg == 7 ? vec4(normal * 0.5 + 0.5, 1.0) : dbg == 8 ? vec4(params, 1.0)
+               : dbg == 9 ? vec4(vp_pc.params.x, vp_pc.sun.w, 0.0, 1.0) : vec4(vp.params.x, vp.sun.w, 0.0, 1.0);
         bool bad_nan = any(isnan(v)) || (dbg == 7 && any(isnan(normal)));
         bool bad_inf = any(isinf(v));
         out_color = bad_nan ? vec4(1.0, 0.0, 1.0, 1.0) : bad_inf ? vec4(0.0, 1.0, 1.0, 1.0) : vec4(clamp(v.rgb, 0.0, 1.0), 1.0);

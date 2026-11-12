@@ -505,7 +505,7 @@ void VkPresenter::handle_event(const SDL_Event& e) {
             int n = 0;
             if (SDL_Finger** f = SDL_GetTouchFingers(e.tfinger.touchID, &n)) SDL_free(f);
             if (n == 3) {
-                int v = (g_sr2_debug_view.load() + 1) % 9;
+                int v = (g_sr2_debug_view.load() + 1) % 11;
                 g_sr2_debug_view = v;
                 printf("[debug] 3D view %d\n", v);
                 break;

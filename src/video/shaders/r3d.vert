@@ -41,6 +41,13 @@ layout(location = 7) flat out uint replace;
 layout(location = 8) out vec4 clip_now;    // this image and the previous one, for motion vectors
 layout(location = 9) out vec4 clip_before;
 layout(location = 10) out vec4 dust_light; // DUST: the light bounced onto it (rgb), how much of the sun reaches it (a)
+// The viewport's values for the fragment shader (iOS port: MoltenVK left the
+// fragment stage's push constants at zero for some viewports, the selection
+// screens' cars: unlit, black; the vertex stage reads them right)
+layout(location = 11) flat out vec4 vpo_sun;
+layout(location = 12) flat out vec4 vpo_fog_color;
+layout(location = 13) flat out vec4 vpo_params;
+layout(location = 14) flat out vec4 vpo_quality;
 
 #ifdef RAY_TRACING
 layout(set = 0, binding = 0) uniform usampler2D texture_ram;
@@ -91,6 +98,10 @@ vec4 traced_dust_light(vec3 pos) {
 invariant gl_Position;
 
 void main() {
+    vpo_sun = vp.sun;
+    vpo_fog_color = vp.fog_color;
+    vpo_params = vp.params;
+    vpo_quality = vp.quality;
     // Displays faster than the game: positions in between its frames
     vec3 pos = mix(in_prev, in_pos, vp.quality.w);
     view_pos = pos;
