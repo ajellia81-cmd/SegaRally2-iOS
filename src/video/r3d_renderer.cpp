@@ -1,4 +1,6 @@
 #include "r3d_renderer.h"
+#include "image_io.h"
+#include <windows.h>
 
 #include <atomic>
 
@@ -857,29 +859,64 @@ void R3DRenderer::verify_texture_ram(const std::vector<uint16_t>& cpu) {
             printf("[texcheck] at %zu,%zu gpu %04x uploaded %04x cpu %04x\n", i % 2048, i / 2048, gpu[i], stg[i], cpu[i]);
             shown++;
         }
-    // What the scene's textured polygons use: texture word, flags, texels
+    // What the scene's textured polygons use: texture word, flags, texels,
+    // the range of their texture coordinates; each texture once as a picture
+    // in out/texuse/ (as the GPU has it)
     if (scene_) {
-        std::map<std::pair<uint32_t, uint32_t>, int> used;
+        struct Use {
+            int n = 0;
+            float u0 = 1e9f, u1 = -1e9f, v0 = 1e9f, v1 = -1e9f;
+        };
+        std::map<std::pair<uint32_t, uint32_t>, Use> used;
         for (const R3DVertex& v : scene_->vertices)
-            if ((v.flags & R3D_TEXTURED) && !v.replace) used[{v.tex, v.flags}]++;
+            if (v.flags & R3D_TEXTURED) {
+                Use& u = used[{v.tex, v.flags | (v.replace ? 0x80000000u : 0u)}];
+                u.n++;
+                u.u0 = std::min(u.u0, v.uv[0]), u.u1 = std::max(u.u1, v.uv[0]);
+                u.v0 = std::min(u.v0, v.uv[1]), u.v1 = std::max(u.v1, v.uv[1]);
+            }
+        static std::map<uint32_t, int> dumped;   // texture word -> times seen changed
+        CreateDirectoryA("out/texuse", nullptr);
         int listed = 0;
-        for (auto& [key, n] : used) {
-            if (listed++ >= 60) break;
+        for (auto& [key, use] : used) {
+            if (listed++ >= 80) break;
             uint32_t tex = key.first;
             int bx = tex & 2047, by = (tex >> 11) & 2047, w = 32 << ((tex >> 22) & 7), h = 32 << ((tex >> 25) & 7);
-            int b15 = 0, cnt = 0;
-            double r = 0, g = 0, b = 0, lo = 0, hi = 0;
-            for (int y = 0; y < h; y += 2)
-                for (int x = 0; x < w; x += 2) {
+            uint32_t fmt = tex >> 28;
+            std::vector<uint8_t> rgba(size_t(w) * h * 4);
+            uint64_t sum = 1469598103934665603ull;
+            int b15 = 0;
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
                     uint16_t t = gpu[size_t((by & 1024) | ((by + y) & 1023)) * 2048 + ((bx + x) & 2047)];
+                    sum = (sum ^ t) * 1099511628211ull;
                     b15 += t >> 15;
-                    r += (t >> 10) & 31, g += (t >> 5) & 31, b += t & 31;
-                    lo += t & 15, hi += t >> 12;
-                    cnt++;
+                    uint8_t* o = &rgba[(size_t(y) * w + x) * 4];
+                    switch (fmt) {
+                    case 0: o[0] = ((t >> 10) & 31) * 255 / 31, o[1] = ((t >> 5) & 31) * 255 / 31, o[2] = (t & 31) * 255 / 31,
+                            o[3] = (t & 0x8000) ? 0 : 255; break;
+                    case 7: o[0] = ((t >> 12) & 15) * 17, o[1] = ((t >> 8) & 15) * 17, o[2] = ((t >> 4) & 15) * 17,
+                            o[3] = (t & 15) * 17; break;
+                    case 1: o[0] = o[1] = o[2] = (t & 15) * 17, o[3] = ((t >> 4) & 15) * 17; break;
+                    case 2: o[0] = o[1] = o[2] = ((t >> 4) & 15) * 17, o[3] = (t & 15) * 17; break;
+                    case 3: o[0] = o[1] = o[2] = ((t >> 8) & 15) * 17, o[3] = ((t >> 12) & 15) * 17; break;
+                    case 4: o[0] = o[1] = o[2] = ((t >> 12) & 15) * 17, o[3] = ((t >> 8) & 15) * 17; break;
+                    case 5: o[0] = o[1] = o[2] = t & 255, o[3] = (t & 255) == 255 ? 0 : 255; break;
+                    case 6: o[0] = o[1] = o[2] = t >> 8, o[3] = (t >> 8) == 255 ? 0 : 255; break;
+                    default: {
+                        unsigned n = (t >> (4 * (fmt - 8))) & 15;
+                        o[0] = o[1] = o[2] = n * 17, o[3] = n == 15 ? 0 : 255;
+                    }
+                    }
                 }
-            printf("[texuse] tex %08x fmt %u %d,%d %dx%d flags %06x verts %d | bit15 %.2f rgb555 %.0f %.0f %.0f nib lo %.1f hi %.1f\n",
-                   tex, tex >> 28, bx, by, w, h, key.second, n, double(b15) / cnt, r / cnt, g / cnt, b / cnt, lo / cnt,
-                   hi / cnt);
+            printf("[texuse] tex %08x fmt %u %d,%d %dx%d flags %08x verts %d uv %.2f..%.2f %.2f..%.2f | bit15 %.2f data %08x\n",
+                   tex, fmt, bx, by, w, h, key.second, use.n, use.u0, use.u1, use.v0, use.v1, double(b15) / (w * h),
+                   uint32_t(sum));
+            if (dumped[tex]++ < 3) {
+                char path[96];
+                snprintf(path, sizeof(path), "out/texuse/%08x_%08x.png", tex, uint32_t(sum));
+                png_save(path, w, h, rgba.data());
+            }
         }
     }
     if (gpu_bad) {   // the uploaded copy again, whole

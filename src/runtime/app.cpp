@@ -1545,9 +1545,10 @@ int main(int argc, char** argv) {
         int y0, y1, tex_dirty_rows = 0;
         {   // Debugging aid (iOS port): each debug view change checks the GPU's texture RAM
             extern std::atomic<int> g_sr2_debug_view;
-            static int checked_view = 0;
+            static int checked_view = 0, frames_since = 0;
             int view = g_sr2_debug_view.load();
-            if (view != checked_view) {
+            if (view != checked_view || ++frames_since >= 600) {
+                frames_since = 0;
                 checked_view = view;
                 std::vector<uint16_t> cpu;
                 g_texture_ram.copy_all(cpu);
