@@ -5,7 +5,9 @@
 
 #include <atomic>
 
-#include "windows.h"   // platform/compat: compat_set_focus
+// platform/compat/win_compat.cpp (not its windows.h: Objective-C has a BOOL of its own)
+void compat_set_focus(bool focused);
+void compat_release_keys();
 
 std::atomic<bool> g_sr2_backgrounded{false};   // set when it goes; app.cpp opens the pause menu
 
