@@ -102,6 +102,19 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
         }
     }
     wheels_poll(focused && !menu);
+#ifdef __APPLE__
+    // iOS port: a pad's haptics engine idle for a while is shut down by iOS,
+    // and SDL starts it again only for a rumble that fails: one that seems to
+    // go through after a quiet spell (a slow scrape along a fence, with no
+    // rumble from the wheel's motor before it) was silent. An imperceptible
+    // rumble every second keeps the engine running while rumble is on
+    if (rumble > 0 && focused)
+        for (int i = 0; i < MAX && i < 8; i++)
+            if (slot_[i].pad && SDL_GetTicks() - g_last_rumble[i] > 1000) {
+                g_last_rumble[i] = SDL_GetTicks();
+                SDL_RumbleGamepad(slot_[i].pad, 1, 0, 200);
+            }
+#endif
     for (int i = 0; i < MAX; i++) {
         Slot& s = slot_[i];
         PadState& st = state_[i];
@@ -191,8 +204,16 @@ std::vector<PadKey> Gamepads::take_keys() {
     return k;
 }
 
+#ifdef __APPLE__
+// iOS port: when each pad last rumbled (gamepad.cpp, poll's keep-alive)
+static Uint64 g_last_rumble[8] = {};
+#endif
+
 void Gamepads::rumble(int i, float low, float high, int ms) {
     if (!slot_[i].pad) return;
+#ifdef __APPLE__
+    if (i < 8) g_last_rumble[i] = SDL_GetTicks();
+#endif
     float k = RUMBLE_STRENGTH[std::clamp(rumble_, 0, 3)] * 65535.0f;
     bool ok = SDL_RumbleGamepad(slot_[i].pad, Uint16(std::clamp(low, 0.0f, 1.0f) * k),
                                 Uint16(std::clamp(high, 0.0f, 1.0f) * k), Uint32(ms));
