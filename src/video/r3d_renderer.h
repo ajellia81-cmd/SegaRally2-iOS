@@ -342,6 +342,7 @@ private:
     VkPipelineLayout r3d_layout_ = VK_NULL_HANDLE, compose_layout_ = VK_NULL_HANDLE;
     VkPipeline opaque_ = VK_NULL_HANDLE, translucent_ = VK_NULL_HANDLE, blob_ = VK_NULL_HANDLE, blob_depth_ = VK_NULL_HANDLE, compose_ = VK_NULL_HANDLE;
     VkPipeline early_z_ = VK_NULL_HANDLE;   // iOS: the solid surfaces' depth first
+    VkPipeline opaque_ez_ = VK_NULL_HANDLE;  // iOS: the opaque pass after it (no depth writes: tested early)
     VkPipeline trans_depth_ = VK_NULL_HANDLE;   // nearest translucent surface, depth only (spec 7.2)
     VkDescriptorSetLayout bloom_set_layout_ = VK_NULL_HANDLE;
     VkDescriptorSet bloom_sets_[4] = {};   // sources: glow_, bloom_a_, bloom_b_, bloom_c_

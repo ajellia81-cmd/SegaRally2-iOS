@@ -555,10 +555,12 @@ void main() {
     // depth laid down first, so that the costly shading after it runs about
     // once per pixel (a shader that can discard gets no hidden surface removal
     // on Apple's GPUs). Only what can never be see-through: the rest is left
-    // to the opaque pass as it was
+    // to the opaque pass as it was. The see-through texels of texture alpha
+    // and alpha test are left out below, after the texture (the trees and
+    // bushes, layer upon layer, were shaded in full at every layer)
     if (vp.quality.x <= -3000.0) {
-        if ((flags & (TEX_ALPHA | ALPHA_TEST | DUST)) != 0u || col.a < 1.0 / 32.0) discard;
-        return;
+        if ((flags & DUST) != 0u || col.a < 1.0 / 32.0) discard;
+        if ((flags & (TEX_ALPHA | ALPHA_TEST)) == 0u) return;
     }
 
     // Sun shadow pass (fog_color.w < 0): only what stands near the ground casts
@@ -571,6 +573,12 @@ void main() {
         if ((flags & INVERT_RGB) != 0u) t.rgb = 1.0 - t.rgb;
         if ((flags & (TEX_ALPHA | ALPHA_TEST)) == 0u) t.a = 1.0;
         if ((flags & ALPHA_TEST) != 0u && t.a < 32.0 / 255.0) discard;
+    }
+    // (early depth: the opaque pass's own tests on alpha, then no more)
+    if (vp.quality.x <= -3000.0) {
+        float a = t.a * col.a;
+        if (a < 1.0 / 32.0 || ((flags & TEX_ALPHA) != 0u && a < 1.0)) discard;
+        return;
     }
 
     float ambient = vp.params.x;

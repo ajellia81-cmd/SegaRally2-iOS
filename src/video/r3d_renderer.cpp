@@ -622,6 +622,12 @@ bool R3DRenderer::create_pipelines() {
         ez.bias = -8.0f;
         ez.slope_bias = -1.0f;
         early_z_ = make_pipeline(ez);
+        // The shading after it: the depth is all there, so none is written
+        // (with depth writes, a shader that can discard is tested late on
+        // Apple's GPUs: every layer of the foliage was shaded)
+        PipelineDesc oz = world;
+        oz.depth_write = false;
+        opaque_ez_ = make_pipeline(oz);
     }
 #endif
     shadow_ = make_pipeline({.vs = r3d_vs, .fs = r3d_fs, .layout = r3d_layout_, .color = VK_FORMAT_UNDEFINED,
@@ -667,7 +673,7 @@ uint32_t R3DRenderer::feature_mask() const {
 
 void R3DRenderer::destroy_pipelines() {
     for (VkPipeline* p : {&opaque_, &translucent_, &blob_, &blob_depth_, &trans_depth_, &shadow_, &compose_measure_, &compose_,
-                          &bloom_, &compose_glow_, &ao_pass_, &ao_apply_, &ao_apply_glow_, &early_z_})
+                          &bloom_, &compose_glow_, &ao_pass_, &ao_apply_, &ao_apply_glow_, &early_z_, &opaque_ez_})
         if (*p) vkDestroyPipeline(dev_, *p, nullptr), *p = VK_NULL_HANDLE;
 }
 
@@ -1876,7 +1882,7 @@ void R3DRenderer::record_world(const Frame& f) {
                 const bool early_z = pass == 0 && early_z_ != VK_NULL_HANDLE && prof_ != 3;
                 for (int sub = early_z ? 0 : 1; sub < 2; sub++) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                  sub == 0 ? early_z_ : pass == 0 ? opaque_ : translucent_);
+                                  sub == 0 ? early_z_ : pass == 0 ? (early_z ? opaque_ez_ : opaque_) : translucent_);
                 for (size_t k = i; k < j; k++) {
                     const R3DViewport& v = vps[k];
                     uint32_t count = pass == 0 ? v.opaque_count : v.trans_count;
@@ -2553,7 +2559,7 @@ void R3DRenderer::gpu_time_mark(VkCommandBuffer cmd, uint32_t index) {
 void R3DRenderer::shutdown() {
     if (!dev_) return;
     vkDeviceWaitIdle(dev_);
-    for (auto p : {opaque_, translucent_, blob_, blob_depth_, trans_depth_, shadow_, compose_measure_, compose_, bloom_, compose_glow_, ao_pass_, ao_apply_, ao_apply_glow_, early_z_})
+    for (auto p : {opaque_, translucent_, blob_, blob_depth_, trans_depth_, shadow_, compose_measure_, compose_, bloom_, compose_glow_, ao_pass_, ao_apply_, ao_apply_glow_, early_z_, opaque_ez_})
         if (p) vkDestroyPipeline(dev_, p, nullptr);
     dlaa_.shutdown();
     rt_.shutdown();
