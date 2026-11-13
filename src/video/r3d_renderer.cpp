@@ -583,15 +583,6 @@ bool R3DRenderer::create_pipelines() {
     translucent_ = make_pipeline(translucent);
     PipelineDesc trans_depth = world;
     trans_depth.depth_only = true;
-#ifdef __APPLE__
-    // iOS port: Metal compiles this depth-only pipeline's vertex stage apart
-    // from the colour pipeline's, and the depths came out a hair nearer than
-    // the colour pass's: see-through models (the car on the selection screen,
-    // the countdown's numbers) failed the depth test and were left black. The
-    // nearest depth goes a little farther, as for the blob shadows
-    trans_depth.bias = -4.0f;
-    trans_depth.slope_bias = -1.0f;
-#endif
     trans_depth_ = make_pipeline(trans_depth);
     // The game's dark patch under each car (its shadow), made of several
     // shapes laid over each other: blended over one another they came out
@@ -601,9 +592,19 @@ bool R3DRenderer::create_pipelines() {
     // pass, nearer than that, takes the pixel (blob_)
     PipelineDesc blob = translucent;
     blob.once = true;
-    blob_ = make_pipeline(blob);
     PipelineDesc blob_depth = trans_depth;
     blob_depth.bias = -1.0f;
+#ifdef __APPLE__
+    // iOS port: Metal compiles each pipeline's vertex stage on its own, and
+    // the patch's depths and the road's under it differ by a hair: the patch
+    // lost to the road in a ragged pattern of triangles. Both of its passes go
+    // a little nearer (the same amount, so the hair between them stays)
+    blob.bias = 8.0f;
+    blob.slope_bias = 1.0f;
+    blob_depth.bias = 8.0f - 1.0f;
+    blob_depth.slope_bias = 1.0f;
+#endif
+    blob_ = make_pipeline(blob);
     blob_depth_ = make_pipeline(blob_depth);
     shadow_ = make_pipeline({.vs = r3d_vs, .fs = r3d_fs, .layout = r3d_layout_, .color = VK_FORMAT_UNDEFINED,
                              .depth = true, .depth_write = true, .vertex_input = true});
