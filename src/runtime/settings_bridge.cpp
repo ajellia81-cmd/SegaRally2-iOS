@@ -28,6 +28,7 @@ void options_from_settings(Options& o, const FrontendSettings& ini) {
     o.dust = ini.dust;
     o.sharpen = ini.sharpen;
     o.classic_text = !ini.hd_text;
+    o.pixel_2d = !ini.smooth_2d;
     o.interp = ini.smooth;
     o.saturation = ini.saturation / 100.0f;
     o.gamma = ini.gamma / 100.0f;

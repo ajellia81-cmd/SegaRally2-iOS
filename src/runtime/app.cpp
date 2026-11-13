@@ -280,6 +280,13 @@ int main(int argc, char** argv) {
             ini.save("save/settings.ini");
             if (FILE* f = fopen("save/ios_profile_3", "w")) fclose(f);
         }
+        // The arcade's 2D as well (square pixels, no xBR: the composition
+        // costs about half), once; 2D FILTER in the options brings xBR back
+        if (GetFileAttributesA("save/ios_profile_4") == INVALID_FILE_ATTRIBUTES) {
+            ini.smooth_2d = false;
+            ini.save("save/settings.ini");
+            if (FILE* f = fopen("save/ios_profile_4", "w")) fclose(f);
+        }
         // Settings the iOS menu no longer has, kept where they belong
         ini.aa = 2;
         ini.ray_tracing = 0;
@@ -287,11 +294,10 @@ int main(int argc, char** argv) {
         ini.gi = 0;
         ini.rear_boost = 0;
         if (ini.speakers == 1) ini.speakers = 0;   // surround 4.0: stereo
-        // The arcade's texture filtering: trilinear, one tap (the textures are
-        // filtered in the shader, each anisotropic tap 4 to 8 more reads;
-        // at 460 pixels per inch it hardly shows, and the 3D pass costs a
-        // good part less)
-        g_opt.aniso = 1;
+        // The arcade's texture look: the base level, one bilinear sample (the
+        // textures are filtered in the shader; no level to pick, no second
+        // level to blend, as the Lost World port's defaults)
+        g_opt.aniso = 0;
 #endif
         options_from_settings(g_opt, ini);
         g_pad_rumble = ini.vibration;
@@ -1247,6 +1253,10 @@ int main(int argc, char** argv) {
                     renderer.set_global_illumination(g_opt.gi = s.gi);
                     r3d_set_sr2_dust(g_opt.dust = s.dust);
                     renderer.set_sharpen((g_opt.sharpen = s.sharpen) ? 0.5f : 0.0f);
+                    if (g_opt.pixel_2d != !s.smooth_2d) {
+                        renderer.set_smooth_2d(!(g_opt.pixel_2d = !s.smooth_2d));
+                        shown = ~0ull;
+                    }
                     if (g_opt.classic_text != !s.hd_text) {
                         g_opt.classic_text = !s.hd_text;
                         shown = ~0ull;   // compose the 2D layer again even while the game stands still

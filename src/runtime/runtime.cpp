@@ -3,6 +3,9 @@
 // window, the renderer and the menus are in app.cpp; runtime.h is the seam.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#ifdef __APPLE__
+#include <time.h>
+#endif
 #include <windows.h>
 
 #include <algorithm>
@@ -975,6 +978,16 @@ void pace_frame() {
         g_start_time.QuadPart = now.QuadPart - LONGLONG(target * double(g_qpf.QuadPart));
         return;
     }
+#ifdef __APPLE__
+    // iOS port: sleeps there are precise to well under a millisecond, so the
+    // spin at the end (heat on a phone) is a fraction of one (the Lost World port)
+    if (target - elapsed > 0.0006) {
+        timespec ts{0, long((target - elapsed - 0.0004) * 1e9)};
+        nanosleep(&ts, nullptr);
+        QueryPerformanceCounter(&now);
+        elapsed = double(now.QuadPart - g_start_time.QuadPart) / double(g_qpf.QuadPart);
+    }
+#endif
     while (elapsed < target) {
         if (target - elapsed > 0.002) Sleep(1);
         QueryPerformanceCounter(&now);
