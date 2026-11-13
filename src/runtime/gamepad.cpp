@@ -201,6 +201,13 @@ void Gamepads::rumble(int i, float low, float high, int ms) {
     // background, an idle spell, an audio interruption) is never started again
     // by SDL: the rumble stopped for good. Closing and opening the controller
     // again makes a new one
+    {   // (diagnosis, temporary: a rumble the pad refused, at most once a second)
+        static Uint64 logged = 0;
+        if (!ok && SDL_GetTicks() - logged > 1000) {
+            logged = SDL_GetTicks();
+            printf("[rumble] pad %d refused (%.2f, %.2f): %s\n", i, low, high, SDL_GetError());
+        }
+    }
     static Uint64 last_reopen[MAX] = {};   // at most every 2 s (a pad without haptics fails every time)
     if (!ok && (low > 0 || high > 0) && SDL_GetTicks() - last_reopen[i] > 2000) {
         last_reopen[i] = SDL_GetTicks();
