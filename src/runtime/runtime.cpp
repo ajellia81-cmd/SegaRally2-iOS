@@ -1249,7 +1249,7 @@ void midi_note(uint8_t b) {
             printf("[snd] frame %llu: %02X %02X %02X\n", (unsigned long long)g_frame, st, prm, g_midi_msg[2]);
     }
     if (g_midi_msg[0] == 0xA0 && g_midi_msg[1] == 0x14 && int32_t(rd32(SR2_SEQUENCE)) == 1) {
-        g_crash_rumble = 1.0f;
+        g_crash_rumble = 1.6f;   // (above 1: held at full for about a quarter of a second, then fading)
         printf("[crash] frame %llu (sound %02X)\n", (unsigned long long)g_frame, g_midi_msg[2]);
     }
 }
@@ -1274,8 +1274,11 @@ static void ffb_frame() {
     {
         float crash = g_crash_rumble.load();
         if (crash > 0.02f) {
-            shake = std::max(shake, crash * 0.4f);   // (x 2.5 for the pads: 1 at full)
-            g_crash_rumble = crash * 0.88f;
+            shake = std::max(shake, std::min(crash, 1.0f) * 0.4f);   // (x 2.5 for the pads: 1 at full)
+            // Held at full for some 15 frames, then fading over a quarter of a
+            // second: a few frames of it alone felt weaker than the menus'
+            // rumble on the phone
+            g_crash_rumble = crash > 1.0f ? crash - 0.04f : crash * 0.85f;
         }
     }
 #endif
