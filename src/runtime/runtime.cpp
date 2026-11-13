@@ -1227,19 +1227,23 @@ static void attract_guard_frame() {
 // (diagnosis, temporary: the sound commands the game sends, kept for the last
 // 40 frames and printed around a knock and now and then in a race, to find the
 // crash sounds' commands)
-// The game's sound commands are three bytes (Ax, a parameter, a value); the
-// engines' pitch and level (parameters 70, 75) go out every frame and are left
-// out: the rest, the one-off sounds, are printed during a race with their frame
+// A crash: the game's own crash sound. Its sound commands are three bytes
+// (Ax, a parameter, a value); A0 14 xx came with every knock on a wall on the
+// phone's log (the value: which of the crash sounds) and nowhere else. It sets
+// off a full rumble on the pads that fades over about a third of a second
+// (iOS port; the wheel's motor alone gave little or nothing as the car stopped)
 static uint8_t g_midi_msg[3];
 static int g_midi_len = 0;
+static std::atomic<float> g_crash_rumble{0.0f};
 void midi_note(uint8_t b) {
     if (b & 0x80) g_midi_len = 0;
     if (g_midi_len < 3) g_midi_msg[g_midi_len++] = b;
     if (g_midi_len != 3) return;
     g_midi_len = 0;
-    if (g_midi_msg[1] == 0x70 || g_midi_msg[1] == 0x75) return;
-    if (int32_t(rd32(SR2_SEQUENCE)) != 1) return;
-    printf("[snd] frame %llu: %02X %02X %02X\n", (unsigned long long)g_frame, g_midi_msg[0], g_midi_msg[1], g_midi_msg[2]);
+    if (g_midi_msg[0] == 0xA0 && g_midi_msg[1] == 0x14 && int32_t(rd32(SR2_SEQUENCE)) == 1) {
+        g_crash_rumble = 1.0f;
+        printf("[crash] frame %llu (sound %02X)\n", (unsigned long long)g_frame, g_midi_msg[2]);
+    }
 }
 #endif
 
@@ -1259,13 +1263,12 @@ static void ffb_frame() {
                int(g_inputs.steer));
     last[0] = m[0], last[1] = m[1];
 #ifdef __APPLE__
-    // (diagnosis, temporary: the speed twice a second in a race, to line the
-    // crashes up with their sound commands)
-    if (int32_t(rd32(SR2_SEQUENCE)) == 1 && g_frame % 30 == 0) {
-        uint32_t u = rd32(0x22F3A8);   // the player's speed, m/s (docs/game_ram.md)
-        float v;
-        memcpy(&v, &u, 4);
-        printf("[spd] frame %llu  %.1f m/s\n", (unsigned long long)g_frame, v);
+    {
+        float crash = g_crash_rumble.load();
+        if (crash > 0.02f) {
+            shake = std::max(shake, crash * 0.4f);   // (x 2.5 for the pads: 1 at full)
+            g_crash_rumble = crash * 0.88f;
+        }
     }
 #endif
     float was = g_ffb_shake.load();
