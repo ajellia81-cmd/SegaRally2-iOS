@@ -561,6 +561,7 @@ void main() {
     if (vp.quality.x <= -3000.0) {
         if ((flags & DUST) != 0u || col.a < 1.0 / 32.0) discard;
         if ((flags & (TEX_ALPHA | ALPHA_TEST)) == 0u) return;
+        if (vp.quality.x <= -3500.0) discard;   // (solid surfaces only: the opaque pass keeps its depth writes)
     }
 
     // Sun shadow pass (fog_color.w < 0): only what stands near the ground casts

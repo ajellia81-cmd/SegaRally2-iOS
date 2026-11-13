@@ -1805,10 +1805,11 @@ void R3DRenderer::record_world(const Frame& f) {
     vkCmdBeginRendering(cmd, &ri);
 
 #ifdef __APPLE__
-    {   // (profiling run, iOS port: 0 as it is, 1 no translucent pass, 2 no opaque
-        // shading (its depth only), 3 no early depth, 4 no 3D, 5 no translucent depth pre-pass)
-        static const bool prof = getenv("SR2_PROFILE") != nullptr;
-        prof_ = prof && scene_ && scene_->polygons > 5000 ? int((prof_frames_++ / 180) % 6) : 0;
+    {   // (measuring run, iOS port: the early depth with the alpha-tested
+        // surfaces (0) and without them (1), in turn every 1.5 s; the picture
+        // is the same)
+        static const bool prof = getenv("SR2_EZBENCH") != nullptr;
+        prof_ = prof && scene_ && scene_->polygons > 5000 ? int((prof_frames_++ / 180) % 2) : 0;
     }
 #endif
     if (vcount) {
@@ -1844,8 +1845,6 @@ void R3DRenderer::record_world(const Frame& f) {
             // Steps: opaque, the occlusion, translucent
             for (int step = 0; step < 3; step++) {
                 int pass = step == 2 ? 1 : 0;
-                if (prof_ == 4 && step != 1) continue;
-                if (prof_ == 1 && step == 2) continue;
                 // debug views 22 and 23: no translucent pass (22: as TEX ID)
                 if (step == 2 && (g_sr2_debug_view.load() == 22 || g_sr2_debug_view.load() == 23 ||
                                   g_sr2_debug_view.load() == 27 || g_sr2_debug_view.load() == 28))
@@ -1879,10 +1878,10 @@ void R3DRenderer::record_world(const Frame& f) {
                 }
                 if (step == 1) continue;
                 // (iOS: the opaque pass in two: the solid surfaces' depth, then the shading)
-                const bool early_z = pass == 0 && early_z_ != VK_NULL_HANDLE && prof_ != 3;
+                const bool early_z = pass == 0 && early_z_ != VK_NULL_HANDLE;
                 for (int sub = early_z ? 0 : 1; sub < 2; sub++) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                  sub == 0 ? early_z_ : pass == 0 ? (early_z ? opaque_ez_ : opaque_) : translucent_);
+                                  sub == 0 ? early_z_ : pass == 0 ? (early_z && prof_ == 0 ? opaque_ez_ : opaque_) : translucent_);
                 for (size_t k = i; k < j; k++) {
                     const R3DViewport& v = vps[k];
                     uint32_t count = pass == 0 ? v.opaque_count : v.trans_count;
@@ -2003,7 +2002,7 @@ void R3DRenderer::record_world(const Frame& f) {
                         pd.quality[0] = -1000.0f;
                         vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                            0, sizeof(pd), &pd);
-                        if (g_sr2_debug_view.load() != 20 && prof_ != 5)   // debug view 20: no depth pre-pass
+                        if (g_sr2_debug_view.load() != 20)   // debug view 20: no depth pre-pass
                             draw_runs(trans_depth_, blob_depth_, pd, true);
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, translucent_);
                     }
@@ -2011,14 +2010,14 @@ void R3DRenderer::record_world(const Frame& f) {
                                        sizeof(pc), &pc);
                     if (sub == 0) {
                         ViewportPush pz = pc;
-                        pz.quality[0] = -3000.0f;
+                        pz.quality[0] = prof_ == 1 ? -3500.0f : -3000.0f;
                         vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                                            sizeof(pz), &pz);
                         vkCmdDraw(cmd, count, 1, v.opaque_first, 0);
                         continue;
                     }
                     if (pass == 0) {
-                        if (prof_ != 2) vkCmdDraw(cmd, count, 1, v.opaque_first, 0);
+                        vkCmdDraw(cmd, count, 1, v.opaque_first, 0);
                         continue;
                     }
                     draw_runs(translucent_, blob_, pc, false);
@@ -2492,11 +2491,10 @@ void R3DRenderer::gpu_time_report(uint32_t out_w, uint32_t out_h) {
     if (prof_frames_ > 0 && total >= 0 && total < 1000.0) {
         int v = prof_pending_;
         if (v != prof_last_) {
-            if (v == 0 && prof_last_ == 5) {
+            if (v == 0 && prof_last_ == 1) {
                 auto avg = [&](int i) { return prof_n_[i] ? prof_sum_[i] / prof_n_[i] : 0.0; };
-                printf("[prof] GPU ms: as is %.1f | no translucent %.1f  opaque depth only %.1f  no early depth %.1f  "
-                       "no 3D %.1f  no translucent pre-pass %.1f  (%zu polygons)\n",
-                       avg(0), avg(1), avg(2), avg(3), avg(4), avg(5), scene_ ? scene_->polygons : size_t(0));
+                printf("[ezbench] GPU ms: alpha-tested in the early depth %.2f | solid only %.2f  (%zu polygons)\n",
+                       avg(0), avg(1), scene_ ? scene_->polygons : size_t(0));
                 fflush(stdout);
                 std::fill(std::begin(prof_sum_), std::end(prof_sum_), 0.0);
                 std::fill(std::begin(prof_n_), std::end(prof_n_), 0);

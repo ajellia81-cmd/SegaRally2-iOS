@@ -209,10 +209,9 @@ bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) 
 #ifdef __APPLE__
     // MoltenVK: Metal argument buffers carry the texture pack's descriptor array
     setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
-    // Metal's fast math assumes no NaN and no infinity; the shaders' guards
-    // against them were dropped and some models (the cars of the selection
-    // screens, the countdown) came out black
-    setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
+    // (Metal's fast math stays on: the black models it was once blamed for
+    // were the 3D set left unbound after a clear, r3d_renderer.cpp; without
+    // it the Lost World port's 3D pass took up to half as long again)
     // Images and buffers in Metal heaps, made resident as a whole: the texture
     // pack's pictures, reached only through the argument buffer, were not
     // always resident and read as black (the cars' paint, the countdown)
