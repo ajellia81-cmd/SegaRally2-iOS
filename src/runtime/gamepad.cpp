@@ -102,19 +102,6 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
         }
     }
     wheels_poll(focused && !menu);
-#ifdef __APPLE__
-    // iOS port: a pad's haptics engine idle for a while is shut down by iOS,
-    // and SDL starts it again only for a rumble that fails: one that seems to
-    // go through after a quiet spell (a slow scrape along a fence, with no
-    // rumble from the wheel's motor before it) was silent. An imperceptible
-    // rumble every second keeps the engine running while rumble is on
-    if (rumble > 0 && focused)
-        for (int i = 0; i < MAX && i < 8; i++)
-            if (slot_[i].pad && SDL_GetTicks() - g_last_rumble[i] > 1000) {
-                g_last_rumble[i] = SDL_GetTicks();
-                SDL_RumbleGamepad(slot_[i].pad, 1, 0, 200);
-            }
-#endif
     for (int i = 0; i < MAX; i++) {
         Slot& s = slot_[i];
         PadState& st = state_[i];
@@ -212,7 +199,25 @@ static Uint64 g_last_rumble[8] = {};
 void Gamepads::rumble(int i, float low, float high, int ms) {
     if (!slot_[i].pad) return;
 #ifdef __APPLE__
-    if (i < 8) g_last_rumble[i] = SDL_GetTicks();
+    // iOS port: a pad's haptics engine idle for a while is shut down by iOS,
+    // and SDL starts it again only for a rumble that fails: one that seemed
+    // to go through after a quiet spell (a slow scrape along a fence, with no
+    // rumble from the wheel's motor before it) was silent. The first rumble
+    // after 3 s without any opens the pad again, which makes a new engine
+    // (nothing runs while there is no rumble: no battery spent on it)
+    if (i < 8 && (low > 0 || high > 0)) {
+        Uint64 now_ms = SDL_GetTicks();
+        if (g_last_rumble[i] && now_ms - g_last_rumble[i] > 3000) {
+            SDL_JoystickID id = slot_[i].id;
+            SDL_CloseGamepad(slot_[i].pad);
+            slot_[i].pad = SDL_OpenGamepad(id);
+            if (!slot_[i].pad) {
+                slot_[i] = Slot{};
+                return;
+            }
+        }
+        g_last_rumble[i] = now_ms;
+    }
 #endif
     float k = RUMBLE_STRENGTH[std::clamp(rumble_, 0, 3)] * 65535.0f;
     bool ok = SDL_RumbleGamepad(slot_[i].pad, Uint16(std::clamp(low, 0.0f, 1.0f) * k),
