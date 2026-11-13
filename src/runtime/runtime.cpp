@@ -1227,21 +1227,19 @@ static void attract_guard_frame() {
 // (diagnosis, temporary: the sound commands the game sends, kept for the last
 // 40 frames and printed around a knock and now and then in a race, to find the
 // crash sounds' commands)
-static std::vector<uint8_t> g_midi_frames[40];
+// The game's sound commands are three bytes (Ax, a parameter, a value); the
+// engines' pitch and level (parameters 70, 75) go out every frame and are left
+// out: the rest, the one-off sounds, are printed during a race with their frame
+static uint8_t g_midi_msg[3];
+static int g_midi_len = 0;
 void midi_note(uint8_t b) {
-    std::vector<uint8_t>& f = g_midi_frames[g_frame % 40];
-    if (f.size() < 96) f.push_back(b);
-}
-static void midi_dump(const char* why, int frames_back) {
-    for (int k = frames_back; k >= 0; k--) {
-        if (g_frame < uint64_t(k)) continue;
-        const std::vector<uint8_t>& f = g_midi_frames[(g_frame - k) % 40];
-        if (f.empty()) continue;
-        std::string line;
-        char b[4];
-        for (uint8_t x : f) snprintf(b, sizeof b, "%02X ", x), line += b;
-        printf("[midi] %s frame %llu: %s\n", why, (unsigned long long)(g_frame - k), line.c_str());
-    }
+    if (b & 0x80) g_midi_len = 0;
+    if (g_midi_len < 3) g_midi_msg[g_midi_len++] = b;
+    if (g_midi_len != 3) return;
+    g_midi_len = 0;
+    if (g_midi_msg[1] == 0x70 || g_midi_msg[1] == 0x75) return;
+    if (int32_t(rd32(SR2_SEQUENCE)) != 1) return;
+    printf("[snd] frame %llu: %02X %02X %02X\n", (unsigned long long)g_frame, g_midi_msg[0], g_midi_msg[1], g_midi_msg[2]);
 }
 #endif
 
@@ -1288,23 +1286,8 @@ static void ffb_frame() {
         }
         shake = std::max(shake, impact * 0.4f);   // (x 2.5 for the pads: 1 at full)
 #ifdef __APPLE__
-        {   // (diagnosis: the sound commands from 20 frames before a knock to 20 after;
-            // and 20 frames of an ordinary moment every 10 s of a race)
-            static uint64_t knock_at = 0, after_until = 0;
-            bool racing = int32_t(rd32(SR2_SEQUENCE)) == 1;
-            if (impact > 0.3f && g_frame > knock_at + 120) {
-                knock_at = g_frame;
-                printf("[midi] --- knock at frame %llu ---\n", (unsigned long long)g_frame);
-                midi_dump("before", 20);
-                after_until = g_frame + 20;
-            } else if (g_frame <= after_until) {
-                midi_dump("after", 0);
-            } else if (racing && g_frame % 600 == 0) {
-                printf("[midi] --- ordinary, frame %llu ---\n", (unsigned long long)g_frame);
-                midi_dump("ordinary", 19);
-            }
-            g_midi_frames[(g_frame + 1) % 40].clear();   // the next frame's commands
-        }
+        // (diagnosis: the speed twice a second in a race, to line the crashes up with the sounds)
+        if (int32_t(rd32(SR2_SEQUENCE)) == 1 && g_frame % 30 == 0) printf("[spd] frame %llu  %.1f m/s\n", (unsigned long long)g_frame, prev);
 #endif
         impact *= 0.85f;
     }
