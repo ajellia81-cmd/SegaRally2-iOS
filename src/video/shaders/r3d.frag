@@ -472,12 +472,18 @@ void main() {
     gl_SampleMask[0] = -1;   // a statically written mask must be set on every path
     vec4 col = color;
     int dbg = int(atm.axes[0].w + 0.5);
+    // 24: every fragment red, before anything else (do they reach the image?)
+    if (dbg == 24) {
+        out_color = vec4(1.0, 0.0, 0.0, 1.0);
+        out_glow = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
     // 17: no shine layer (the cars' see-through self-lit layer); 18: the
     // same, and the texture pack's pictures as they are, unlit (iOS port)
-    if ((dbg == 17 || dbg == 18 || dbg == 19 || dbg == 22) && (flags & (LUMINOUS | TEX_ALPHA)) == (LUMINOUS | TEX_ALPHA)) discard;
+    if ((dbg == 17 || dbg == 18 || dbg == 19 || dbg == 22 || dbg == 25) && (flags & (LUMINOUS | TEX_ALPHA)) == (LUMINOUS | TEX_ALPHA)) discard;
     // 19: which texture each pixel shows, a colour per texture word (in both
     // passes, solid; untextured: magenta)
-    if (dbg == 19 || dbg == 22) {
+    if (dbg == 19 || dbg == 22 || dbg == 25) {
         uint h = tex * 2654435761u;
         out_color = (flags & TEXTURED) != 0u ? vec4(float((h >> 8) & 255u), float((h >> 16) & 255u), float((h >> 24) & 255u), 255.0) / 255.0
                                              : vec4(1.0, 0.0, 1.0, 1.0);

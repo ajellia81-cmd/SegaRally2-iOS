@@ -1670,7 +1670,7 @@ int main(int argc, char** argv) {
         {   // Debugging aid (iOS port): three fingers capture the 3D debug views one
             // after another, each to out/capture/<n>_<view>.png (n: the request)
             extern std::atomic<int> g_sr2_debug_view, g_sr2_capture_request;
-            static const int VIEWS[] = {0, 2, 11, 15, 16, 17, 18, 19, 20, 21, 22, 23};
+            static const int VIEWS[] = {0, 19, 22, 23, 24, 25, 26, 21, 2, 18};
             static int request = 0, step = -1, presents_in_step = 0;
             if (step < 0 && g_sr2_capture_request.load() > request) {
                 request = g_sr2_capture_request.load();

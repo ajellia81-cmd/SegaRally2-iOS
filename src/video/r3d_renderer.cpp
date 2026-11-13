@@ -1336,7 +1336,7 @@ void R3DRenderer::update_atmosphere(const ScreenLayout& lay, uint32_t target_w, 
             // the sun's shadows were faint, more so with the light the global
             // illumination puts back into them. SR2_SHADOW_DEPTH: debugging aid)
             static const float depth = getenv("SR2_SHADOW_DEPTH") ? float(atof(getenv("SR2_SHADOW_DEPTH"))) : 1.0f;
-            u.shadow[0] = std::min(shadow_strength_, 1.0f) * depth;
+            u.shadow[0] = g_sr2_debug_view.load() == 26 ? 0.0f : std::min(shadow_strength_, 1.0f) * depth;   // debug view 26: none
             u.shadow[1] = 1.0f / float(SHADOW_SIZE);
             u.shadow[2] = 2.5f * texel;   // normal offset
             u.shadow[3] = 1.5f * texel / zr;   // depth bias
@@ -1631,7 +1631,7 @@ void R3DRenderer::record_world(const Frame& f) {
     bool ao_on = (ao_strength_ > 0 || rt_gi_) && scene_ && g_sr2_debug_view.load() != 21 &&   // debug view 21: none
                  std::any_of(scene_->viewports.begin(), scene_->viewports.end(), [](const R3DViewport& v) { return v.world; });
     // Soft particles need the world's depth too, so they split it as well
-    bool split = ao_on || (soft_particles_ && scene_ &&
+    bool split = g_sr2_debug_view.load() != 25 && ao_on || (g_sr2_debug_view.load() != 25 && soft_particles_ && scene_ &&
                            std::any_of(scene_->viewports.begin(), scene_->viewports.end(),
                                        [](const R3DViewport& v) { return v.world; }));
     ca.storeOp = msaa && !split ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
