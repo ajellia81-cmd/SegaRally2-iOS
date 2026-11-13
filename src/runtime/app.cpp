@@ -294,10 +294,10 @@ int main(int argc, char** argv) {
         ini.gi = 0;
         ini.rear_boost = 0;
         if (ini.speakers == 1) ini.speakers = 0;   // surround 4.0: stereo
-        // The arcade's texture look: the base level, one bilinear sample (the
-        // textures are filtered in the shader; no level to pick, no second
-        // level to blend, as the Lost World port's defaults)
-        g_opt.aniso = 0;
+        // The arcade's texture filtering: trilinear, one tap. The Model 3 keeps
+        // each texture's mip levels in texture RAM (spec 6.4) and filters
+        // between them; the base level alone (0) would shimmer in the distance
+        g_opt.aniso = 1;
 #endif
         options_from_settings(g_opt, ini);
         g_pad_rumble = ini.vibration;
