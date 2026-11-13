@@ -214,7 +214,8 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
                (x.color & 0x00FFFFFFu) == 0 && (x.color >> 24) < 255;
     };
     std::unordered_set<uint32_t> set_down;   // the patches' vertices already lowered (two cars side by side)
-    auto settle = [&](const R3DViewport* car, float& car_lift_, uint32_t& car_lift_skips_, uint64_t& patch_seen) {
+    auto settle = [&](const R3DViewport* car, float& car_lift_, uint32_t& car_lift_skips_, uint64_t& patch_seen,
+                      float& clear_ref) {
     // The car's bodywork (not its glass, its dust): where it is, its lowest point
     double su = 0, sw = 0;
     size_t count = 0;
@@ -332,6 +333,13 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
         }
     }
     const float lift_before = car_lift_;
+    // The bodywork's own clearance over the road (its lowest point): it shows
+    // whether the car really moved when the patch's reading jumps
+    float clear = -1;
+    {
+        float g;
+        if (low[1] < 1e29f && road_at(low[0], low[1], low[2], g)) clear = low[1] - g;
+    }
     bool measured = raw > -0.1f && raw < 0.45f;
     if (measured) patch_seen = out.frame;
     else if (out.frame - patch_seen > 120) car_lift_ = -1;   // (kept through a jump, not for good)
@@ -340,10 +348,19 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
         if (car_lift_ < 0) {
             car_lift_ = raw;
             car_lift_skips_ = 0;
+            clear_ref = clear;
         } else if (std::fabs(raw - car_lift_) <= 0.1f) {
             car_lift_ += 0.15f * (raw - car_lift_);
             car_lift_skips_ = 0;
+            clear_ref = clear;
+        } else if (clear >= 0 && clear_ref >= 0 && std::fabs(clear - clear_ref) < 0.05f) {
+            // The patch's reading jumped but the bodywork did not move (the
+            // Corolla at the start: 25 cm, then 3 cm for half a second, then
+            // 25 cm again): taken after the wait, the car went up 22 cm for
+            // half a second and came down. The height stays (iOS port)
+            car_lift_skips_ = 0;
         } else if (++car_lift_skips_ >= 30) {
+            clear_ref = clear;
             // (a kerb, a bump under the patch is not followed, unless it stays)
             car_lift_ = raw;
             car_lift_skips_ = 0;
@@ -386,7 +403,7 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
         CarLift& lift = car_lifts_[v.node];
         if (out.frame - lift.frame > 30) lift.height = -1, lift.skips = 0;   // another race, another camera
         lift.frame = out.frame;
-        settle(&v, lift.height, lift.skips, lift.patch);
+        settle(&v, lift.height, lift.skips, lift.patch, lift.clear);
     }
     for (auto it = car_lifts_.begin(); it != car_lifts_.end();)
         it = out.frame - it->second.frame > 30 ? car_lifts_.erase(it) : std::next(it);

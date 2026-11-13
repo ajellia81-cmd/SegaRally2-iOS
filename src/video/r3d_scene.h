@@ -212,6 +212,7 @@ private:
         float height = -1;
         uint32_t skips = 0;
         uint64_t frame = 0, patch = 0;   // last seen, last measured by its patch
+        float clear = -1;   // the bodywork's lowest point over the road when the height was last taken
     };
     std::unordered_map<uint32_t, CarLift> car_lifts_;   // by the car's viewport
     float fov_widened_ = 1.0f;

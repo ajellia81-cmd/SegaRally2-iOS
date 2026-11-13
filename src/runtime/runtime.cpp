@@ -1243,7 +1243,10 @@ static void ffb_frame() {
             float v;
             memcpy(&v, &u, 4);
             if (!std::isfinite(v)) v = -1;
-            if (prev >= 0 && v >= 0 && prev - v > 0.5f) impact = std::max(impact, std::min(1.0f, (prev - v) / 4.0f));
+            // (a wall: about 1 m/s lost each frame for half a second, on the
+            // phone's log; the hardest braking, some 0.15)
+            if (prev >= 0 && v >= 0 && prev - v > 0.35f)
+                impact = std::max(impact, std::min(1.0f, (prev - v - 0.35f) / 0.6f));
 #ifdef __APPLE__
             // (diagnosis, temporary: every sharp loss of speed, for the knock's rumble)
             if (prev >= 0 && v >= 0 && prev - v > 0.2f)
