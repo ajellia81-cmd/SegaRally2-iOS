@@ -402,6 +402,10 @@ void dev_write8(uint32_t a, uint8_t v) {
     if (a == 0xF0080000) {   // MIDI byte to the sound board
         g_irq_state &= ~0x40;
         g_sound.midi_write(v);
+#ifdef __APPLE__
+        extern void midi_note(uint8_t b);
+        midi_note(uint8_t(v));
+#endif
     }
     if (a == 0xF0080004) {
         g_midi_ctrl = v;
@@ -1216,6 +1220,28 @@ static void attract_guard_frame() {
 // wheel to the middle (it follows the wheel); the quick changes on top are
 // the game's jolts and shakes (bumps, crashes), kept for the pads
 // (app_input.cpp). SR2_FFB_LOG prints the motors as they change
+#ifdef __APPLE__
+// (diagnosis, temporary: the sound commands the game sends, kept for the last
+// 40 frames and printed around a knock and now and then in a race, to find the
+// crash sounds' commands)
+static std::vector<uint8_t> g_midi_frames[40];
+void midi_note(uint8_t b) {
+    std::vector<uint8_t>& f = g_midi_frames[g_frame % 40];
+    if (f.size() < 96) f.push_back(b);
+}
+static void midi_dump(const char* why, int frames_back) {
+    for (int k = frames_back; k >= 0; k--) {
+        if (g_frame < uint64_t(k)) continue;
+        const std::vector<uint8_t>& f = g_midi_frames[(g_frame - k) % 40];
+        if (f.empty()) continue;
+        std::string line;
+        char b[4];
+        for (uint8_t x : f) snprintf(b, sizeof b, "%02X ", x), line += b;
+        printf("[midi] %s frame %llu: %s\n", why, (unsigned long long)(g_frame - k), line.c_str());
+    }
+}
+#endif
+
 static void ffb_frame() {
     static const bool log = getenv("SR2_FFB_LOG") != nullptr;
     static float slow[2] = {0, 0};
@@ -1258,6 +1284,25 @@ static void ffb_frame() {
             prev = -1;
         }
         shake = std::max(shake, impact * 0.4f);   // (x 2.5 for the pads: 1 at full)
+#ifdef __APPLE__
+        {   // (diagnosis: the sound commands from 20 frames before a knock to 20 after;
+            // and 20 frames of an ordinary moment every 10 s of a race)
+            static uint64_t knock_at = 0, after_until = 0;
+            bool racing = int32_t(rd32(SR2_SEQUENCE)) == 1;
+            if (impact > 0.3f && g_frame > knock_at + 120) {
+                knock_at = g_frame;
+                printf("[midi] --- knock at frame %llu ---\n", (unsigned long long)g_frame);
+                midi_dump("before", 20);
+                after_until = g_frame + 20;
+            } else if (g_frame <= after_until) {
+                midi_dump("after", 0);
+            } else if (racing && g_frame % 600 == 0) {
+                printf("[midi] --- ordinary, frame %llu ---\n", (unsigned long long)g_frame);
+                midi_dump("ordinary", 19);
+            }
+            g_midi_frames[(g_frame + 1) % 40].clear();   // the next frame's commands
+        }
+#endif
         impact *= 0.85f;
     }
     float was = g_ffb_shake.load();
