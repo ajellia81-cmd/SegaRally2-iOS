@@ -179,13 +179,21 @@ void FrontendSettings::set_quality(int q) {
     ao = l.ao;
     shadows = l.shadows;
     bloom = l.bloom;
+#ifdef __APPLE__
+    aa = 2;   // iOS port: anti-aliasing stays off (no option for it)
+#else
     if (aa != 1 && aa != 3) aa = l.msaa ? 0 : 2;
+#endif
 }
 
 int FrontendSettings::quality() const {
     for (int q = LOW; q <= ULTRA; q++) {
         const QualityLevel& l = QUALITY_LEVELS[q];
+#ifdef __APPLE__
+        bool aa_same = true;
+#else
         bool aa_same = aa == 1 || aa == 3 || aa == (l.msaa ? 0 : 2);
+#endif
         if (ray_tracing == l.ray_tracing && ao == l.ao && shadows == l.shadows && bloom == l.bloom && aa_same) return q;
     }
     return CUSTOM;
@@ -394,15 +402,24 @@ const wchar_t* const Frontend::TAB_NAMES[Frontend::TAB_COUNT] = {L"DISPLAY", L"G
 // (only the spectators' camera flashes) and HD TEXT (always on).
 // Tabs past VISIBLE_OPTIONS rows scroll.
 const Frontend::OptionTab Frontend::OPTION_TABS[] = {
+#ifdef __APPLE__
+    // iOS port: no anti-aliasing choice (off), no ray tracing (MoltenVK has
+    // none), no update check, and stereo or headphones only (no rear boost)
+    {OPT_QUALITY, DISPLAY_TAB}, {OPT_DISPLAY, DISPLAY_TAB}, {OPT_MOTION, DISPLAY_TAB},
+    {OPT_SAT, DISPLAY_TAB}, {OPT_GAMMA, DISPLAY_TAB}, {OPT_SHARPEN, DISPLAY_TAB},
+    {OPT_SUN, LIGHTING_TAB}, {OPT_SHADOWS, LIGHTING_TAB}, {OPT_HDR, LIGHTING_TAB},
+    {OPT_AO, LIGHTING_TAB}, {OPT_BLOOM, LIGHTING_TAB}, {OPT_HAZE, LIGHTING_TAB}, {OPT_DUST, LIGHTING_TAB},
+    {OPT_VOLUME, AUDIO_TAB}, {OPT_MUSIC, AUDIO_TAB}, {OPT_SPEAKERS, AUDIO_TAB}, {OPT_SAMPLES, AUDIO_TAB}, {OPT_MENU_MUSIC, AUDIO_TAB},
+    {OPT_VIBRATION, CONTROLS_TAB},
+#else
     {OPT_QUALITY, DISPLAY_TAB}, {OPT_DISPLAY, DISPLAY_TAB}, {OPT_MOTION, DISPLAY_TAB}, {OPT_AA, DISPLAY_TAB},
     {OPT_SAT, DISPLAY_TAB}, {OPT_GAMMA, DISPLAY_TAB}, {OPT_SHARPEN, DISPLAY_TAB},
-#ifdef _WIN32
-    {OPT_UPDATES, DISPLAY_TAB},   // (iOS port: no updates to check for)
-#endif
+    {OPT_UPDATES, DISPLAY_TAB},
     {OPT_SUN, LIGHTING_TAB}, {OPT_SHADOWS, LIGHTING_TAB}, {OPT_RT, LIGHTING_TAB}, {OPT_REFLECT, LIGHTING_TAB}, {OPT_GI, LIGHTING_TAB}, {OPT_HDR, LIGHTING_TAB},
     {OPT_AO, LIGHTING_TAB}, {OPT_BLOOM, LIGHTING_TAB}, {OPT_HAZE, LIGHTING_TAB}, {OPT_DUST, LIGHTING_TAB},
     {OPT_VOLUME, AUDIO_TAB}, {OPT_MUSIC, AUDIO_TAB}, {OPT_SPEAKERS, AUDIO_TAB}, {OPT_REAR, AUDIO_TAB}, {OPT_SAMPLES, AUDIO_TAB}, {OPT_MENU_MUSIC, AUDIO_TAB},
     {OPT_VIBRATION, CONTROLS_TAB},
+#endif
 };
 
 const wchar_t* const Frontend::RECORD_TAB_NAMES[Frontend::RECORD_TAB_COUNT] = {L"ACHIEVEMENTS", L"STATS"};
@@ -452,8 +469,10 @@ std::vector<Frontend::Item> Frontend::items() const {
         std::vector<Item> list = {{PLAY, L"PLAY", L"", L"The original arcade game"},
                                   {RECORDS, L"RECORDS", L"", L"Achievements and statistics"},
                                   {OPTIONS, L"OPTIONS", L"", L"Display, sound and controls"},
-                                  {MORE_GAMES, L"MORE RECOMPS", L"", L"Other arcade games recompiled for PC by snicolast"},
-                                  {QUIT, L"QUIT", L"", L"Close the game"}};
+                                  {MORE_GAMES, L"MORE RECOMPS", L"", L"Other arcade games recompiled for PC by snicolast"}};
+#ifndef __APPLE__   // (iOS port: an iPhone app does not quit itself)
+        list.push_back({QUIT, L"QUIT", L"", L"Close the game"});
+#endif
         // DEBUG is for testing only: hidden unless SR2_DEBUG_MENU is set
         // (kShowDebugMenu true shows it always)
         constexpr bool kShowDebugMenu = false;
@@ -698,7 +717,11 @@ void Frontend::activate(const Item& it, int dir) {
         break;
     case OPT_UPDATES: settings.check_updates = !settings.check_updates; push(Action::SettingsChanged); break;
     case OPT_MENU_MUSIC: settings.menu_music = !settings.menu_music; push(Action::SettingsChanged); break;
+#ifdef __APPLE__
+    case OPT_SPEAKERS: settings.speakers = settings.speakers == 2 ? 0 : 2; push(Action::SettingsChanged); break;   // stereo, headphones
+#else
     case OPT_SPEAKERS: settings.speakers = (settings.speakers + dir + 3) % 3; push(Action::SettingsChanged); break;
+#endif
     case OPT_REAR: settings.rear_boost = (settings.rear_boost + 3 * dir + 15) % 15; push(Action::SettingsChanged); break;
     case OPT_SAMPLES: settings.cubic_samples = !settings.cubic_samples; push(Action::SettingsChanged); break;
     case OPT_AA: {   // MSAA, DLAA, DLSS QUALITY, OFF

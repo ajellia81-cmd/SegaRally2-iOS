@@ -35,6 +35,7 @@ constexpr Glyph GLYPHS[] = {
     {'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}}, {'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}},
     {'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}},
     {'O', {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}}, {'T', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
+    {'.', {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C}},
 };
 
 const uint8_t* glyph(char c) {
@@ -285,6 +286,12 @@ bool TouchControls::draw(std::vector<uint32_t>& px, int& w, int& h) {
         snprintf(label, sizeof label, "DEBUG %d %s", shown_debug_, NAMES[shown_debug_]);
         cv.rect(float(w) * 0.5f - 200, 4, float(w) * 0.5f + 200, 30, 0x000000, 0.7f);
         cv.text(label, float(w) * 0.5f, 17, 2.0f, 0xFFFF00, 1.0f);
+    }
+    if (fps_on_ && !fps_.empty()) {   // the frame rate, top right inside the safe area
+        float scale = 2.0f, tw = 6.0f * scale * float(fps_.size()), th = 7.0f * scale;
+        float right = float(w_ - safe_.right) * 0.5f - 8.0f, top = float(safe_.top) * 0.5f + 8.0f;
+        cv.rect(right - tw - 12.0f, top, right, top + th + 10.0f, 0x000000, 0.6f);
+        cv.text(fps_.c_str(), right - 6.0f - tw * 0.5f, top + 5.0f + th * 0.5f, scale, 0xFFFFFF, 1.0f);
     }
     if (!shown()) return true;   // nothing else
     const float k = 0.5f;   // window pixels -> picture pixels

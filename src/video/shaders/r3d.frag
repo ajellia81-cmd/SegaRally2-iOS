@@ -540,6 +540,16 @@ void main() {
     }
     if ((flags & TRANSLATOR) != 0u) col.rgb *= 16.0;
 
+    // Early depth (quality -3000, record_world; iOS port): the solid surfaces'
+    // depth laid down first, so that the costly shading after it runs about
+    // once per pixel (a shader that can discard gets no hidden surface removal
+    // on Apple's GPUs). Only what can never be see-through: the rest is left
+    // to the opaque pass as it was
+    if (vp.quality.x <= -3000.0) {
+        if ((flags & (TEX_ALPHA | ALPHA_TEST | DUST)) != 0u || col.a < 1.0 / 32.0) discard;
+        return;
+    }
+
     // Sun shadow pass (fog_color.w < 0): only what stands near the ground casts
     // shadows; canopies and roofs high above would put whole scenes in the dark
     if (vp.fog_color.w < 0.0 && dot(view_pos, vp.sun.xyz) + vp.fog_color.x > vp.fog_color.y) discard;

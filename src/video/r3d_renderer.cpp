@@ -26,7 +26,8 @@
 // Debugging aid (iOS port): what r3d.frag draws instead (0: the picture; a
 // three-finger tap cycles it, platform/vk_presenter_sdl.cpp)
 std::atomic<int> g_sr2_debug_view{0};
-std::atomic<int> g_sr2_capture_request{0};   // iOS port: three fingers ask for the debug captures (app.cpp)
+std::atomic<int> g_sr2_capture_request{0};
+std::atomic<int> g_sr2_fps_toggle{0};   // iOS port: four fingers (vk_presenter_sdl.cpp)   // iOS port: three fingers ask for the debug captures (app.cpp)
 
 namespace {
 
@@ -606,6 +607,18 @@ bool R3DRenderer::create_pipelines() {
 #endif
     blob_ = make_pipeline(blob);
     blob_depth_ = make_pipeline(blob_depth);
+#ifdef __APPLE__
+    // The solid surfaces' depth first (r3d.frag, quality -3000), a hair
+    // farther than they draw so that the opaque pass then passes the test
+    // (the Lost World port's early-Z)
+    {
+        PipelineDesc ez = world;
+        ez.depth_only = true;
+        ez.bias = -8.0f;
+        ez.slope_bias = -1.0f;
+        early_z_ = make_pipeline(ez);
+    }
+#endif
     shadow_ = make_pipeline({.vs = r3d_vs, .fs = r3d_fs, .layout = r3d_layout_, .color = VK_FORMAT_UNDEFINED,
                              .depth = true, .depth_write = true, .vertex_input = true});
     // Full-screen passes: a triangle over the target, no vertex input
@@ -1815,7 +1828,11 @@ void R3DRenderer::record_world(const Frame& f) {
                                             nullptr);
                 }
                 if (step == 1) continue;
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pass == 0 ? opaque_ : translucent_);
+                // (iOS: the opaque pass in two: the solid surfaces' depth, then the shading)
+                const bool early_z = pass == 0 && early_z_ != VK_NULL_HANDLE;
+                for (int sub = early_z ? 0 : 1; sub < 2; sub++) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  sub == 0 ? early_z_ : pass == 0 ? opaque_ : translucent_);
                 for (size_t k = i; k < j; k++) {
                     const R3DViewport& v = vps[k];
                     uint32_t count = pass == 0 ? v.opaque_count : v.trans_count;
@@ -1922,12 +1939,21 @@ void R3DRenderer::record_world(const Frame& f) {
                     }
                     vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                                        sizeof(pc), &pc);
+                    if (sub == 0) {
+                        ViewportPush pz = pc;
+                        pz.quality[0] = -3000.0f;
+                        vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                           sizeof(pz), &pz);
+                        vkCmdDraw(cmd, count, 1, v.opaque_first, 0);
+                        continue;
+                    }
                     if (pass == 0) {
                         vkCmdDraw(cmd, count, 1, v.opaque_first, 0);
                         continue;
                     }
                     draw_runs(translucent_, blob_, pc);
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, translucent_);
+                }
                 }
             }
             i = j;
@@ -2389,6 +2415,7 @@ void R3DRenderer::gpu_time_report(uint32_t out_w, uint32_t out_h) {
         return;
     auto ms = [&](uint32_t from, uint32_t to) { return double(t[to] - t[from]) * timestamp_period_ * 1e-6; };
     double total = ms(GPU_START, GPU_COMPOSE);
+    if (total >= 0 && total < 1000.0) gpu_recent_ms_ += total, gpu_recent_n_++;   // (the frame rate on screen)
     if (total > gpu_worst_ms_ && total < 1000.0) {
         char text[320];
         snprintf(text, sizeof(text),
@@ -2441,7 +2468,7 @@ void R3DRenderer::gpu_time_mark(VkCommandBuffer cmd, uint32_t index) {
 void R3DRenderer::shutdown() {
     if (!dev_) return;
     vkDeviceWaitIdle(dev_);
-    for (auto p : {opaque_, translucent_, blob_, blob_depth_, trans_depth_, shadow_, compose_measure_, compose_, bloom_, compose_glow_, ao_pass_, ao_apply_, ao_apply_glow_})
+    for (auto p : {opaque_, translucent_, blob_, blob_depth_, trans_depth_, shadow_, compose_measure_, compose_, bloom_, compose_glow_, ao_pass_, ao_apply_, ao_apply_glow_, early_z_})
         if (p) vkDestroyPipeline(dev_, p, nullptr);
     dlaa_.shutdown();
     rt_.shutdown();

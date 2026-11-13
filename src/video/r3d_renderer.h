@@ -260,6 +260,17 @@ private:
     int gpu_frames_ = 0;
     bool gpu_pending_ = false;
     double gpu_worst_ms_ = 0;
+    double gpu_recent_ms_ = 0;   // the GPU's time per image since take_gpu_ms
+    int gpu_recent_n_ = 0;
+public:
+    // The GPU's time per image summed since the last call, and how many images (iOS port: on screen)
+    double take_gpu_ms(int& images) {
+        images = gpu_recent_n_;
+        double s = gpu_recent_ms_;
+        gpu_recent_ms_ = 0, gpu_recent_n_ = 0;
+        return s;
+    }
+private:
     std::string gpu_worst_;
     std::mutex gpu_worst_mutex_;
     bool gpu_ao_marked_ = false;       // this frame's ambient occlusion has its two marks
@@ -312,6 +323,7 @@ private:
     VkDescriptorSet r3d_set_ = VK_NULL_HANDLE, compose_set_ = VK_NULL_HANDLE;
     VkPipelineLayout r3d_layout_ = VK_NULL_HANDLE, compose_layout_ = VK_NULL_HANDLE;
     VkPipeline opaque_ = VK_NULL_HANDLE, translucent_ = VK_NULL_HANDLE, blob_ = VK_NULL_HANDLE, blob_depth_ = VK_NULL_HANDLE, compose_ = VK_NULL_HANDLE;
+    VkPipeline early_z_ = VK_NULL_HANDLE;   // iOS: the solid surfaces' depth first
     VkPipeline trans_depth_ = VK_NULL_HANDLE;   // nearest translucent surface, depth only (spec 7.2)
     VkDescriptorSetLayout bloom_set_layout_ = VK_NULL_HANDLE;
     VkDescriptorSet bloom_sets_[4] = {};   // sources: glow_, bloom_a_, bloom_b_, bloom_c_

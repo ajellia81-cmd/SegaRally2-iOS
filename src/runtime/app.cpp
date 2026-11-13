@@ -277,6 +277,13 @@ int main(int argc, char** argv) {
             ini.save("save/settings.ini");
             if (FILE* f = fopen("save/ios_profile_3", "w")) fclose(f);
         }
+        // Settings the iOS menu no longer has, kept where they belong
+        ini.aa = 2;
+        ini.ray_tracing = 0;
+        ini.reflections = false;
+        ini.gi = 0;
+        ini.rear_boost = 0;
+        if (ini.speakers == 1) ini.speakers = 0;   // surround 4.0: stereo
         // Up to 4 anisotropic taps instead of 8 (the textures are filtered in
         // the shader: each tap is 4 to 8 reads): at 460 pixels per inch no
         // difference shows, and the 3D pass costs a good part less
@@ -1374,6 +1381,14 @@ int main(int argc, char** argv) {
                 }
             }
             int tw = 0, th = 0;
+            {
+                extern std::atomic<int> g_sr2_fps_toggle;
+                static int toggles = 0;
+                if (g_sr2_fps_toggle.load() != toggles) {
+                    toggles = g_sr2_fps_toggle.load();
+                    g_touch.toggle_fps();
+                }
+            }
             if (touch_shown && g_touch.draw(touch_pixels, tw, th)) touch_layer.set_image(touch_pixels.data(), uint32_t(tw), uint32_t(th));
         }
 #endif
@@ -1769,6 +1784,17 @@ int main(int argc, char** argv) {
                      (unsigned long long)(presents * 1000 / (now - last_title)), (unsigned long long)(shown == ~0ull ? 0 : shown),
                      scene->polygons, game_ms, prep_ms, scene_ms, t.record * per, (t.gpu_wait + t.present) * per);
             SetWindowTextA(presenter.hwnd(), title);
+#ifdef __APPLE__
+            {   // the frame rate on screen (four fingers), with the GPU's time per image
+                int images = 0;
+                double gpu = renderer.take_gpu_ms(images);
+                char fps[64];
+                unsigned long long hz = (unsigned long long)(presents * 1000 / (now - last_title));
+                if (images > 0) snprintf(fps, sizeof fps, "%llu FPS  GPU %.1f MS", hz, gpu / images);
+                else snprintf(fps, sizeof fps, "%llu FPS", hz);
+                g_touch.set_fps(fps);
+            }
+#endif
             static ULONGLONG last_log = now;
             if (now - last_log >= 5000) {   // the same, in the log, every 5 s
                 last_log = now;

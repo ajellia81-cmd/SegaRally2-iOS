@@ -27,6 +27,7 @@
 #include <atomic>
 extern std::atomic<int> g_sr2_debug_view;   // r3d_renderer.cpp
 extern std::atomic<int> g_sr2_capture_request;
+extern std::atomic<int> g_sr2_fps_toggle;   // r3d_renderer.cpp
 #include "sdl_events.h"
 
 #ifdef __APPLE__
@@ -519,16 +520,15 @@ void VkPresenter::handle_event(const SDL_Event& e) {
     case SDL_EVENT_FINGER_UP:
     case SDL_EVENT_FINGER_CANCELED: {
         float x = e.tfinger.x * float(pixel_w_), y = e.tfinger.y * float(pixel_h_);
-        if (e.type == SDL_EVENT_FINGER_DOWN) {   // debugging aid: three fingers capture every 3D debug view
+        if (e.type == SDL_EVENT_FINGER_DOWN) {   // four fingers: the frame rate on screen on or off
             int n = 0;
             if (SDL_Finger** f = SDL_GetTouchFingers(e.tfinger.touchID, &n)) SDL_free(f);
-            // (once per gesture: the three fingers' touches can each see all three)
+            // (once per gesture: the fingers' touches can each see all four)
             static bool gesture = false;
-            if (n < 3) gesture = false;
-            if (n == 3 && !gesture) {
+            if (n < 4) gesture = false;
+            if (n == 4 && !gesture) {
                 gesture = true;
-                g_sr2_capture_request++;
-                printf("[debug] captures asked for\n");
+                g_sr2_fps_toggle++;
                 break;
             }
         }

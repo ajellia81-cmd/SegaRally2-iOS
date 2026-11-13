@@ -13,6 +13,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
 union SDL_Event;
@@ -41,6 +42,14 @@ public:
     bool driving() const { return enabled_ && !menu_ && !pad_; }
     bool shown() const { return enabled_ && (driving() || (menu_ && menu_back_)); }
     void set_enabled(bool on) { enabled_ = on; dirty_ = true; }
+    // The frame rate in the top right corner (four fingers turn it on and
+    // off), shown with a game controller too: the text, once a second
+    void toggle_fps() { fps_on_ = !fps_on_; fps_.clear(); dirty_ = true; }
+    bool fps_on() const { return fps_on_; }
+    void set_fps(const std::string& text) {
+        if (fps_on_ && text != fps_) fps_ = text, dirty_ = true;
+    }
+    bool overlay() const { return shown() || fps_on_; }
 
     // The picture, when it changed: w x h premultiplied BGRA (half the window)
     bool draw(std::vector<uint32_t>& px, int& w, int& h);
@@ -73,4 +82,6 @@ private:
     bool dirty_ = true;
     int last_steer_px_ = 0;
     int shown_debug_ = 0;
+    bool fps_on_ = false;
+    std::string fps_;
 };
