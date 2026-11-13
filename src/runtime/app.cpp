@@ -249,17 +249,33 @@ int main(int argc, char** argv) {
     if (g_opt.menu) {   // save/settings.ini, written by the options menu; command-line options win
         ini.load("save/settings.ini");
 #ifndef _WIN32
-        // iOS port: the full effects at the screen's own resolution, without
-        // MSAA (the menu can turn it on). Once (the marker file): an earlier
-        // build had turned ambient occlusion off and bloom down; put back
-        if (GetFileAttributesA("save/ios_profile_2") == INVALID_FILE_ATTRIBUTES) {
-            FrontendSettings defaults;
-            ini.ao = defaults.ao;
-            ini.bloom = defaults.bloom;
-            ini.shadows = defaults.shadows;
-            ini.aa = 2;   // MSAA off
+        // iOS port: the starting settings, once (the marker file; the options
+        // menu changes them after that): the 3D at the screen's full resolution
+        // and every refresh (SMOOTH motion, 120 Hz), everything else as the
+        // arcade had it: no edge smoothing, no added haze, glow, occlusion,
+        // sunlight, sun shadows, soft particles, HDR, sharpening or HD text,
+        // the game's own dust, the original colours
+        if (GetFileAttributesA("save/ios_profile_3") == INVALID_FILE_ATTRIBUTES) {
+            ini.render_scale = 100;
+            ini.smooth = true;
+            ini.aa = 2;   // off
+            ini.haze = false;
+            ini.bloom = 0;
+            ini.ao = false;
+            ini.sun = false;
+            ini.shadows = false;
+            ini.ray_tracing = 0;
+            ini.soft = false;
+            ini.hdr = false;
+            ini.reflections = false;
+            ini.gi = 0;
+            ini.dust = false;
+            ini.sharpen = false;
+            ini.hd_text = false;
+            ini.saturation = 100;
+            ini.gamma = 100;
             ini.save("save/settings.ini");
-            if (FILE* f = fopen("save/ios_profile_2", "w")) fclose(f);
+            if (FILE* f = fopen("save/ios_profile_3", "w")) fclose(f);
         }
         // Up to 4 anisotropic taps instead of 8 (the textures are filtered in
         // the shader: each tap is 4 to 8 reads): at 460 pixels per inch no
