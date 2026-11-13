@@ -645,7 +645,8 @@ void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t
     for (Image* img : {&glow_, &glow_ms_, &bloom_a_, &bloom_b_, &bloom_c_, &depth_resolved_, &ao_, &diff_a_, &diff_b_})
         destroy_image(*img);
     create_image(color_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
-                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                 VK_IMAGE_ASPECT_COLOR_BIT);
     VkImageViewCreateInfo avi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     avi.image = color_.image;
     avi.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -955,6 +956,57 @@ void R3DRenderer::verify_texture_ram(const std::vector<uint16_t>& cpu) {
                 snprintf(path, sizeof(path), "out/texuse/%08x_%08x.png", tex, uint32_t(sum));
                 png_save(path, w, h, rgba.data());
             }
+        }
+    }
+    // The 3D image itself as the last frame left it (before compose): colour,
+    // alpha, and NaN/infinite texels marked (iOS port: debug captures)
+    {
+        Buffer cb;
+        size_t bytes = size_t(color_.w) * color_.h * 8;
+        if (create_buffer(cb, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+            VkImageLayout was = color_.layout;
+            vk_->run_once([&](VkCommandBuffer cmd) {
+                transition(cmd, color_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                VkBufferImageCopy c{};
+                c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                c.imageExtent = {color_.w, color_.h, 1};
+                vkCmdCopyImageToBuffer(cmd, color_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, cb.buffer, 1, &c);
+                transition(cmd, color_, was == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : was);
+            });
+            auto half = [](uint16_t h) {
+                uint32_t s = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+                if (e == 31) return m ? NAN : (s ? -INFINITY : INFINITY);
+                float v = e ? std::ldexp(float(m | 1024), int(e) - 25) : std::ldexp(float(m), -24);
+                return s ? -v : v;
+            };
+            const uint16_t* px = static_cast<const uint16_t*>(cb.mapped);
+            uint32_t w = color_.w, h = color_.h;
+            std::vector<uint8_t> rgb(size_t(w) * h * 4), alpha(size_t(w) * h * 4);
+            int bad = 0;
+            for (size_t i = 0; i < size_t(w) * h; i++) {
+                float v[4];
+                bool nan = false;
+                for (int k = 0; k < 4; k++) {
+                    v[k] = half(px[i * 4 + k]);
+                    nan |= !std::isfinite(v[k]);
+                }
+                bad += nan;
+                for (int k = 0; k < 3; k++) rgb[i * 4 + k] = nan ? (k == 1 ? 255 : 0) : uint8_t(std::clamp(v[k], 0.0f, 1.0f) * 255.0f + 0.5f);
+                rgb[i * 4 + 3] = 255;
+                uint8_t a = nan ? 0 : uint8_t(std::clamp(v[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+                alpha[i * 4] = alpha[i * 4 + 1] = alpha[i * 4 + 2] = a;
+                alpha[i * 4 + 3] = 255;
+            }
+            static int n = 0;
+            n++;
+            char path[96];
+            CreateDirectoryA("out/capture", nullptr);
+            snprintf(path, sizeof(path), "out/capture/%02d_raw3d_rgb.png", n);
+            png_save(path, int(w), int(h), rgb.data());
+            snprintf(path, sizeof(path), "out/capture/%02d_raw3d_alpha.png", n);
+            png_save(path, int(w), int(h), alpha.data());
+            printf("[texcheck] 3D image %ux%u: %d NaN or infinite texels (green in the picture)\n", w, h, bad);
+            destroy_buffer(cb);
         }
     }
     if (gpu_bad) {   // the uploaded copy again, whole
