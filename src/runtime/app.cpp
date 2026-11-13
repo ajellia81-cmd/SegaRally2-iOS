@@ -280,13 +280,6 @@ int main(int argc, char** argv) {
             ini.save("save/settings.ini");
             if (FILE* f = fopen("save/ios_profile_3", "w")) fclose(f);
         }
-        // The arcade's 2D as well (square pixels, no xBR: the composition
-        // costs about half), once; 2D FILTER in the options brings xBR back
-        if (GetFileAttributesA("save/ios_profile_4") == INVALID_FILE_ATTRIBUTES) {
-            ini.smooth_2d = false;
-            ini.save("save/settings.ini");
-            if (FILE* f = fopen("save/ios_profile_4", "w")) fclose(f);
-        }
         // Settings the iOS menu no longer has, kept where they belong
         ini.aa = 2;
         ini.ray_tracing = 0;
@@ -1253,10 +1246,6 @@ int main(int argc, char** argv) {
                     renderer.set_global_illumination(g_opt.gi = s.gi);
                     r3d_set_sr2_dust(g_opt.dust = s.dust);
                     renderer.set_sharpen((g_opt.sharpen = s.sharpen) ? 0.5f : 0.0f);
-                    if (g_opt.pixel_2d != !s.smooth_2d) {
-                        renderer.set_smooth_2d(!(g_opt.pixel_2d = !s.smooth_2d));
-                        shown = ~0ull;
-                    }
                     if (g_opt.classic_text != !s.hd_text) {
                         g_opt.classic_text = !s.hd_text;
                         shown = ~0ull;   // compose the 2D layer again even while the game stands still
