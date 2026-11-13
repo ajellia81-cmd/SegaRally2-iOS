@@ -82,6 +82,17 @@ vec4 xbr(sampler2D layer, vec2 q, ivec2 size) {
     vec2 pos = q * vec2(size);
     ivec2 e0 = ivec2(floor(pos));
     vec2 fp = pos - vec2(e0);
+    // The result is always a mix of the centre texel and its four neighbours:
+    // where those five are alike (all transparent, or one flat colour) it is
+    // the centre itself, without the other sixteen reads (iOS port: compose
+    // was most of the GPU's time on the phone, the HUD's layer being mostly
+    // transparent and the backdrops flat)
+    {
+        vec4 E0 = texel(layer, size, e0), B0 = texel(layer, size, e0 + ivec2(0, -1));
+        vec4 D1 = texel(layer, size, e0 + ivec2(-1, 0)), F1 = texel(layer, size, e0 + ivec2(1, 0));
+        vec4 H1 = texel(layer, size, e0 + ivec2(0, 1));
+        if (all(equal(E0, B0)) && all(equal(E0, D1)) && all(equal(E0, F1)) && all(equal(E0, H1))) return E0;
+    }
     //    A1 B1 C1
     // A0 A  B  C  C4
     // D0 D  E  F  F4
@@ -224,15 +235,12 @@ vec4 front_layer(vec2 q);
 // colour from top to bottom (the fades, plain backdrops), otherwise nothing
 // is drawn there (the backdrop shows). iOS port
 vec4 side_front(vec2 q, bool inside_43) {
-    vec4 f = front_layer(q);
-    if (inside_43) return f;
-    vec4 lo = vec4(1.0), hi = vec4(0.0);
-    for (int i = 0; i < 16; i++) {
-        vec4 s = textureLod(layer2d_front, vec2(q.x, (float(i) + 0.5) / 16.0), 0.0);
-        lo = min(lo, s);
-        hi = max(hi, s);
-    }
-    return all(lessThan(hi - lo, vec4(0.06))) ? f : vec4(0.0);
+    if (inside_43) return front_layer(q);
+    // (whether each edge column is one colour: worked out on the CPU with the
+    // layer, pc.sky.x bit 0 the left, bit 1 the right)
+    uint plain = uint(pc.sky.x + 0.5);
+    bool left = q.x < 0.5;
+    return ((left ? plain & 1u : plain & 2u) != 0u) ? front_layer(q) : vec4(0.0);
 }
 
 vec4 front_layer(vec2 q) {
@@ -336,7 +344,8 @@ void main() {
         bool inside_43 = p.x >= pc.layer2d.x && p.x <= pc.layer2d.x + pc.layer2d.y;
         vec2 sky_dx = dFdx(qb * vec2(SIZE_BACK)) / 512.0, sky_dy = dFdy(qb * vec2(SIZE_BACK)) / 512.0;
         vec4 back = vec4(0.0);
-        if (pc.hud.w > 0.5 || inside_43) {
+        // (not where the 3D image covers it: it would be multiplied by 0)
+        if ((pc.hud.w > 0.5 || inside_43) && s.a < 1.0) {
             back = layer(layer2d_back, qb, SIZE_BACK);
             sky_layer(qb, sky_dx, sky_dy, back);
         }

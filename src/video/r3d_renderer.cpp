@@ -796,6 +796,24 @@ void R3DRenderer::set_layers(const uint32_t* back, const uint32_t* front) {
     memcpy(dst, back, BACK_W * SCREEN_H * 4);
     memcpy(dst + BACK_W * SCREEN_H * 4, front, SCREEN_W * SCREEN_H * 4);
     layers_dirty_ = true;
+    // Whether the foreground's outermost columns are each one colour (within
+    // 6%): compose repeats them beside the 4:3 picture only then (iOS port)
+    front_edges_plain_ = 0;
+    for (int side = 0; side < 2; side++) {
+        int x = side ? SCREEN_W - 1 : 0;
+        uint32_t lo[4] = {255, 255, 255, 255}, hi[4] = {0, 0, 0, 0};
+        for (int y = 0; y < SCREEN_H; y++) {
+            uint32_t p = front[y * SCREEN_W + x];
+            for (int k = 0; k < 4; k++) {
+                uint32_t v = (p >> (8 * k)) & 255;
+                lo[k] = std::min(lo[k], v);
+                hi[k] = std::max(hi[k], v);
+            }
+        }
+        bool plain = true;
+        for (int k = 0; k < 4; k++) plain &= hi[k] - lo[k] < 16;
+        if (plain) front_edges_plain_ |= 1 << side;
+    }
     // Average colour of each row of the back layer, for the horizon colour
     for (int y = 0; y < SCREEN_H; y++) {
         float sum[3] = {0, 0, 0}, n = 0;
@@ -2075,7 +2093,7 @@ R3DRenderer::ComposePush R3DRenderer::compose_push(const Frame& f) const {
                    .filter2d = {smooth_2d_ ? 1.0f : 0.0f, lay.scale},
                    .hud = {sr2_on ? std::max(0.0f, lay.game_x0 - hud_inset_) : 0.0f, hdr_ ? 1.0f : 0.0f,
                            overlay_brightness_, extend_back ? 1.0f : 0.0f},
-                   .sky = {0, 0, 0, sr2_between_screens() ? 4.0f : 0.0f},
+                   .sky = {float(front_edges_plain_), 0, 0, sr2_between_screens() ? 4.0f : 0.0f},
                    .effects = {bloom_strength_, saturation_, gamma_, 0},
                    // w: the race HUD's splits, in 2-pixel steps, one per byte (top left, top right, bottom)
                    .motion = {back_shift_, 0, 0,

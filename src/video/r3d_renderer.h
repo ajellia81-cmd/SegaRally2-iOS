@@ -325,6 +325,7 @@ private:
     VkFormat compose_format_ = VK_FORMAT_UNDEFINED;
     float max_aspect_ = 16.0f / 9.0f;
     bool smooth_2d_ = true;
+    int front_edges_plain_ = 0;   // compose: bit 0 / 1: the foreground's left / right column is one colour
     bool hud_edges_ = true, hud_band_ = true;
     float hud_inset_ = 0;
     float interp_ = 1.0f;
