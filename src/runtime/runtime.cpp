@@ -1258,39 +1258,16 @@ static void ffb_frame() {
         printf("[ffb] frame %llu  x %02X y %02X  shake %.2f  wheel %d\n", (unsigned long long)g_frame, m[0], m[1], shake,
                int(g_inputs.steer));
     last[0] = m[0], last[1] = m[1];
-    // A hard knock (a wall, a tree, another car head on): the car's speed
-    // falls more in one frame than any braking does. The wheel's motor gives
-    // little of it (the game turns the spring down as the car stops), so the
-    // pads had no jolt at all; a rumble from the speed lost instead, fading
-    // over about a quarter of a second (iOS port)
-    {
-        static float prev = -1, impact = 0;
-        if (int32_t(rd32(SR2_SEQUENCE)) == 1) {
-            uint32_t u = rd32(0x22F3A8);   // the player's speed, m/s (docs/game_ram.md)
-            float v;
-            memcpy(&v, &u, 4);
-            if (!std::isfinite(v)) v = -1;
-            // (a wall: about 1 m/s lost each frame for half a second, on the
-            // phone's log; the hardest braking, some 0.15)
-            if (prev >= 0 && v >= 0 && prev - v > 0.35f)
-                impact = std::max(impact, std::min(1.0f, (prev - v - 0.35f) / 0.6f));
 #ifdef __APPLE__
-            // (diagnosis, temporary: every sharp loss of speed, for the knock's rumble)
-            if (prev >= 0 && v >= 0 && prev - v > 0.2f)
-                printf("[impact] frame %llu  speed %.2f -> %.2f m/s (lost %.2f)  impact %.2f  motors %02X %02X\n",
-                       (unsigned long long)g_frame, prev, v, prev - v, impact, m[0], m[1]);
-#endif
-            prev = v;
-        } else {
-            prev = -1;
-        }
-        shake = std::max(shake, impact * 0.4f);   // (x 2.5 for the pads: 1 at full)
-#ifdef __APPLE__
-        // (diagnosis: the speed twice a second in a race, to line the crashes up with the sounds)
-        if (int32_t(rd32(SR2_SEQUENCE)) == 1 && g_frame % 30 == 0) printf("[spd] frame %llu  %.1f m/s\n", (unsigned long long)g_frame, prev);
-#endif
-        impact *= 0.85f;
+    // (diagnosis, temporary: the speed twice a second in a race, to line the
+    // crashes up with their sound commands)
+    if (int32_t(rd32(SR2_SEQUENCE)) == 1 && g_frame % 30 == 0) {
+        uint32_t u = rd32(0x22F3A8);   // the player's speed, m/s (docs/game_ram.md)
+        float v;
+        memcpy(&v, &u, 4);
+        printf("[spd] frame %llu  %.1f m/s\n", (unsigned long long)g_frame, v);
     }
+#endif
     float was = g_ffb_shake.load();
     if (shake > was) g_ffb_shake = shake;
     // A steering wheel's force feedback (wheel.cpp): the motor as a force,
