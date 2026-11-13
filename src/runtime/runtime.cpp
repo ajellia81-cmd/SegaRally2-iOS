@@ -1112,6 +1112,12 @@ static void debug_time_frame() {
 // the attract is reached on the way back; the selects draw their own
 static void clear_text_layers() {
     memset(dev_ptr(TILEGEN_BASE + 0xF8000), 0, 2 * 0x2000);   // name tables of layers A and A'
+    // The line mask back to the primary layers everywhere, as the attract and
+    // the selects have it: the race shows layer A' in the left 128 pixels of
+    // rows 72-95 and puts it back only on its own way to the attract. Back
+    // through the menu it stayed, and the next stage's title card had a hole
+    // there (A' empty) through which the previous screen's backdrop showed
+    memset(dev_ptr(TILEGEN_BASE + 0xF7000), 0xFF, 384 * 4);
 }
 
 static bool arcade_entry_frame() {
