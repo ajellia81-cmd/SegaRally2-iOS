@@ -202,6 +202,13 @@ const int OVERLAY_ROW = 48;          // after the cells: the replacement picture
 // below the 3D image over `under` (premultiplied), at `pos` in 2D pixels.
 // Listed in the last row of the text cells (text_hd.h): rectangle in cells,
 // then slot in R and 1 in G for the layers below the 3D image.
+// Screen derivatives of the 2D position (2D pixels per screen pixel), taken
+// in main where every pixel of a 2x2 block comes by: inside the pictures'
+// rectangles (a branch some pixels of a block skip) Apple's GPUs gave
+// undefined ones, a wild mip level along the edges, and the HUD pictures (the
+// rev counter, the gear) had a faint grey frame round them (iOS port)
+vec2 g_pic_dx = vec2(0.0), g_pic_dy = vec2(0.0);
+
 vec4 replacement_pictures(vec4 under, vec2 pos, bool below_3d) {
     int pictures = int(texelFetch(text_cells, ivec2(0, OVERLAY_ROW), 0).r * 255.0 + 0.5);
     for (int i = 0; i < pictures; i++) {
@@ -216,7 +223,8 @@ vec4 replacement_pictures(vec4 under, vec2 pos, bool below_3d) {
         vec4 rect = round(texelFetch(text_cells, ivec2(1 + 2 * i, OVERLAY_ROW), 0) * 255.0) * 8.0;
         vec2 r = (pos - rect.xy) / (rect.zw - rect.xy);
         if (all(greaterThanEqual(r, vec2(0.0))) && all(lessThan(r, vec2(1.0)))) {
-            vec4 o = texture(overlays[nonuniformEXT(uint(info.r * 255.0 + 0.5))], r);
+            vec2 span = rect.zw - rect.xy;
+            vec4 o = textureGrad(overlays[nonuniformEXT(uint(info.r * 255.0 + 0.5))], r, g_pic_dx / span, g_pic_dy / span);
             under = under * (1.0 - o.a) + vec4(clamp(o.rgb + pc.hud.z, 0.0, 1.0) * o.a, o.a);
         }
     }
@@ -343,6 +351,8 @@ void main() {
         q.x = clamp(q.x, 0.5 / 496.0, 1.0 - 0.5 / 496.0);
         bool inside_43 = p.x >= pc.layer2d.x && p.x <= pc.layer2d.x + pc.layer2d.y;
         vec2 sky_dx = dFdx(qb * vec2(SIZE_BACK)) / 512.0, sky_dy = dFdy(qb * vec2(SIZE_BACK)) / 512.0;
+        g_pic_dx = dFdx(q * vec2(SIZE_2D));
+        g_pic_dy = dFdy(q * vec2(SIZE_2D));
         vec4 back = vec4(0.0);
         // (not where the 3D image covers it: it would be multiplied by 0)
         if ((pc.hud.w > 0.5 || inside_43) && s.a < 1.0) {

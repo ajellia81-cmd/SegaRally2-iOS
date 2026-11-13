@@ -1240,6 +1240,14 @@ void midi_note(uint8_t b) {
     if (g_midi_len < 3) g_midi_msg[g_midi_len++] = b;
     if (g_midi_len != 3) return;
     g_midi_len = 0;
+    {   // (diagnosis, temporary: the one-off sounds in a race, for the slow knocks:
+        // not the engines' 70/74/75, nor the steady A0 13, A0 16, AC 71)
+        uint8_t st = g_midi_msg[0], prm = g_midi_msg[1];
+        bool steady = prm == 0x70 || prm == 0x74 || prm == 0x75 || (st == 0xA0 && (prm == 0x13 || prm == 0x16)) ||
+                      (st == 0xAC && prm == 0x71);
+        if (!steady && int32_t(rd32(SR2_SEQUENCE)) == 1)
+            printf("[snd] frame %llu: %02X %02X %02X\n", (unsigned long long)g_frame, st, prm, g_midi_msg[2]);
+    }
     if (g_midi_msg[0] == 0xA0 && g_midi_msg[1] == 0x14 && int32_t(rd32(SR2_SEQUENCE)) == 1) {
         g_crash_rumble = 1.0f;
         printf("[crash] frame %llu (sound %02X)\n", (unsigned long long)g_frame, g_midi_msg[2]);
