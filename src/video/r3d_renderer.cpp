@@ -1798,6 +1798,13 @@ void R3DRenderer::record_world(const Frame& f) {
     ri.pDepthAttachment = &da;
     vkCmdBeginRendering(cmd, &ri);
 
+#ifdef __APPLE__
+    {   // (profiling run, iOS port: 0 as it is, 1 no translucent pass, 2 no opaque
+        // shading (its depth only), 3 no early depth, 4 no 3D, 5 no translucent depth pre-pass)
+        static const bool prof = getenv("SR2_PROFILE") != nullptr;
+        prof_ = prof && scene_ && scene_->polygons > 5000 ? int((prof_frames_++ / 180) % 6) : 0;
+    }
+#endif
     if (vcount) {
         VkDeviceSize zero = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &vertices_.buffer, &zero);
@@ -1831,6 +1838,8 @@ void R3DRenderer::record_world(const Frame& f) {
             // Steps: opaque, the occlusion, translucent
             for (int step = 0; step < 3; step++) {
                 int pass = step == 2 ? 1 : 0;
+                if (prof_ == 4 && step != 1) continue;
+                if (prof_ == 1 && step == 2) continue;
                 // debug views 22 and 23: no translucent pass (22: as TEX ID)
                 if (step == 2 && (g_sr2_debug_view.load() == 22 || g_sr2_debug_view.load() == 23 ||
                                   g_sr2_debug_view.load() == 27 || g_sr2_debug_view.load() == 28))
@@ -1864,7 +1873,7 @@ void R3DRenderer::record_world(const Frame& f) {
                 }
                 if (step == 1) continue;
                 // (iOS: the opaque pass in two: the solid surfaces' depth, then the shading)
-                const bool early_z = pass == 0 && early_z_ != VK_NULL_HANDLE;
+                const bool early_z = pass == 0 && early_z_ != VK_NULL_HANDLE && prof_ != 3;
                 for (int sub = early_z ? 0 : 1; sub < 2; sub++) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                   sub == 0 ? early_z_ : pass == 0 ? opaque_ : translucent_);
@@ -1988,7 +1997,7 @@ void R3DRenderer::record_world(const Frame& f) {
                         pd.quality[0] = -1000.0f;
                         vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                            0, sizeof(pd), &pd);
-                        if (g_sr2_debug_view.load() != 20)   // debug view 20: no depth pre-pass
+                        if (g_sr2_debug_view.load() != 20 && prof_ != 5)   // debug view 20: no depth pre-pass
                             draw_runs(trans_depth_, blob_depth_, pd, true);
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, translucent_);
                     }
@@ -2003,7 +2012,7 @@ void R3DRenderer::record_world(const Frame& f) {
                         continue;
                     }
                     if (pass == 0) {
-                        vkCmdDraw(cmd, count, 1, v.opaque_first, 0);
+                        if (prof_ != 2) vkCmdDraw(cmd, count, 1, v.opaque_first, 0);
                         continue;
                     }
                     draw_runs(translucent_, blob_, pc, false);
@@ -2459,6 +2468,7 @@ void R3DRenderer::record(VkCommandBuffer cmd, VkImageView target, VkExtent2D ext
     if (gpu_times_) {
         gpu_time_mark(cmd, GPU_COMPOSE);
         gpu_pending_ = true;
+        prof_pending_ = prof_;
     }
 }
 
@@ -2471,6 +2481,26 @@ void R3DRenderer::gpu_time_report(uint32_t out_w, uint32_t out_h) {
     auto ms = [&](uint32_t from, uint32_t to) { return double(t[to] - t[from]) * timestamp_period_ * 1e-6; };
     double total = ms(GPU_START, GPU_COMPOSE);
     if (total >= 0 && total < 1000.0) gpu_recent_ms_ += total, gpu_recent_n_++;   // (the frame rate on screen)
+    // (profiling run: each way's time, the first 20 images after a change left
+    // out; a line after each round of the six)
+    if (prof_frames_ > 0 && total >= 0 && total < 1000.0) {
+        int v = prof_pending_;
+        if (v != prof_last_) {
+            if (v == 0 && prof_last_ == 5) {
+                auto avg = [&](int i) { return prof_n_[i] ? prof_sum_[i] / prof_n_[i] : 0.0; };
+                printf("[prof] GPU ms: as is %.1f | no translucent %.1f  opaque depth only %.1f  no early depth %.1f  "
+                       "no 3D %.1f  no translucent pre-pass %.1f  (%zu polygons)\n",
+                       avg(0), avg(1), avg(2), avg(3), avg(4), avg(5), scene_ ? scene_->polygons : size_t(0));
+                fflush(stdout);
+                std::fill(std::begin(prof_sum_), std::end(prof_sum_), 0.0);
+                std::fill(std::begin(prof_n_), std::end(prof_n_), 0);
+            }
+            prof_last_ = v;
+            prof_settle_ = 20;
+        }
+        if (prof_settle_ > 0) prof_settle_--;
+        else prof_sum_[v] += total, prof_n_[v]++;
+    }
     if (total > gpu_worst_ms_ && total < 1000.0) {
         char text[320];
         snprintf(text, sizeof(text),

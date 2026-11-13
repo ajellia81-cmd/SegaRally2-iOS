@@ -46,6 +46,7 @@ void platform_prepare_files() {
     link_to(game + "/third_party/fonts", "third_party/fonts");
     // The GPU's time per pass in the log, every 300 images (for tuning)
     setenv("SR2_GPUTIME", "1", 0);
+    setenv("SR2_PROFILE", "1", 0);   // (a profiling run: the 3D pass drawn six ways in turn, [prof] in the log; temporary)
     // The ROM: the player's own srally2.zip, copied into the rom folder here
     // with the Files app (the app carries none)
     if (stat("rom/srally2.zip", &st) == 0) {

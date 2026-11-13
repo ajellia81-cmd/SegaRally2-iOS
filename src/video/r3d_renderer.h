@@ -267,6 +267,13 @@ private:
     };
     VkQueryPool gpu_times_ = VK_NULL_HANDLE;
     float timestamp_period_ = 1;
+    // Profiling run (iOS port, temporary): the 3D pass drawn a different way
+    // every 1.5 s, the GPU's time of each logged ([prof]); 0 as it is
+    int prof_ = 0, prof_pending_ = 0;
+    uint64_t prof_frames_ = 0;
+    double prof_sum_[6] = {};
+    int prof_n_[6] = {};
+    int prof_last_ = -1, prof_settle_ = 0;
     double gpu_sum_[GPU_MARKS] = {};   // ms of the pass that ends at each mark, summed
     int gpu_frames_ = 0;
     bool gpu_pending_ = false;
