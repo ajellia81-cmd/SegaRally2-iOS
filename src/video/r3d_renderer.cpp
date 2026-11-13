@@ -1937,28 +1937,48 @@ void R3DRenderer::record_world(const Frame& f) {
                     // (the push constants again after each pipeline bound: with
                     // MoltenVK a draw could see the previous ones, the depth
                     // pre-pass's or another moment's positions; iOS port)
-                    auto draw_runs = [&](VkPipeline other, VkPipeline blob, const ViewportPush& push) {
+                    // The depth pre-pass leaves out what r3d.frag would discard in it
+                    // anyway (quality -1000: texture alpha, alpha test, self-lit
+                    // effects other than the patch, dust, nearly invisible): the
+                    // dust and spray clouds, layer upon layer over much of the
+                    // picture, were drawn twice (iOS port)
+                    auto needs_depth = [&](uint32_t i) {
+                        const R3DVertex& x = vs[i];
+                        if ((x.flags & R3D_DUST) || (x.color >> 24) < 8) return false;
+                        return (x.flags & (R3D_TEX_ALPHA | R3D_ALPHA_TEST | R3D_LUMINOUS)) == 0 || is_blob(i);
+                    };
+                    // (the push constants again after each pipeline bound: with
+                    // MoltenVK a draw could see the previous ones, the depth
+                    // pre-pass's or another moment's positions; iOS port)
+                    auto draw_runs = [&](VkPipeline other, VkPipeline blob, const ViewportPush& push, bool prepass) {
                         auto bind = [&](VkPipeline p) {
                             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
                             vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                                0, sizeof(push), &push);
                         };
-                        if (!v.world) {
+                        uint32_t end = std::min<uint32_t>(v.trans_first + count, uint32_t(vs.size()));
+                        if (!v.world && !prepass) {
                             bind(other);
                             vkCmdDraw(cmd, count, 1, v.trans_first, 0);
                             return;
                         }
-                        uint32_t end = std::min<uint32_t>(v.trans_first + count, uint32_t(vs.size()));
+                        // 0: left out (pre-pass), 1: as it is, 2: the cars' patch
+                        auto kind = [&](uint32_t i) {
+                            if (prepass && !needs_depth(i)) return 0;
+                            return v.world && is_blob(i) ? 2 : 1;
+                        };
+                        VkPipeline bound = VK_NULL_HANDLE;
                         for (uint32_t a = v.trans_first; a < end;) {
-                            bool here = is_blob(a);
+                            int here = kind(a);
                             uint32_t b = a + 3;
-                            while (b < end && is_blob(b) == here) b += 3;
+                            while (b < end && kind(b) == here) b += 3;
                             b = std::min(b, end);
-                            if (here && g_sr2_debug_view.load() == 29) {   // debug view 29: no blobs
+                            if (here == 0 || (here == 2 && g_sr2_debug_view.load() == 29)) {   // (debug view 29: no blobs)
                                 a = b;
                                 continue;
                             }
-                            bind(here ? blob : other);
+                            VkPipeline want = here == 2 ? blob : other;
+                            if (want != bound) bind(want), bound = want;
                             vkCmdDraw(cmd, b - a, 1, a, 0);
                             a = b;
                         }
@@ -1969,7 +1989,7 @@ void R3DRenderer::record_world(const Frame& f) {
                         vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                            0, sizeof(pd), &pd);
                         if (g_sr2_debug_view.load() != 20)   // debug view 20: no depth pre-pass
-                            draw_runs(trans_depth_, blob_depth_, pd);
+                            draw_runs(trans_depth_, blob_depth_, pd, true);
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, translucent_);
                     }
                     vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -1986,7 +2006,7 @@ void R3DRenderer::record_world(const Frame& f) {
                         vkCmdDraw(cmd, count, 1, v.opaque_first, 0);
                         continue;
                     }
-                    draw_runs(translucent_, blob_, pc);
+                    draw_runs(translucent_, blob_, pc, false);
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, translucent_);
                 }
                 }

@@ -1796,6 +1796,11 @@ int main(int argc, char** argv) {
                 if (images > 0) snprintf(fps, sizeof fps, "%llu FPS  GPU %.1f MS", hz, gpu / images);
                 else snprintf(fps, sizeof fps, "%llu FPS", hz);
                 g_touch.set_fps(fps);
+                // the same in the log, every second, shown or not (to read
+                // the frame rate afterwards, scene by scene)
+                printf("[fps] %llu  GPU %.1f ms  %zu polygons  frame %llu\n", hz, images > 0 ? gpu / images : 0.0,
+                       scene->polygons, (unsigned long long)(shown == ~0ull ? 0 : shown));
+                fflush(stdout);
             }
 #endif
             static ULONGLONG last_log = now;
