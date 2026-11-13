@@ -1693,7 +1693,9 @@ void R3DRenderer::record_world(const Frame& f) {
     ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     // The ambient occlusion splits the 3D pass in two: the first part must keep everything
-    bool ao_on = (ao_strength_ > 0 || rt_gi_) && scene_ && g_sr2_debug_view.load() != 21 &&   // debug view 21: none
+    const int dbg_view = g_sr2_debug_view.load();
+    bool ao_on = (ao_strength_ > 0 || rt_gi_) && scene_ && dbg_view != 21 &&   // debug views 21-28: none
+                 !(dbg_view >= 22 && dbg_view <= 28) &&
                  std::any_of(scene_->viewports.begin(), scene_->viewports.end(), [](const R3DViewport& v) { return v.world; });
     // Soft particles need the world's depth too, so they split it as well
     bool split = g_sr2_debug_view.load() != 25 && ao_on || (g_sr2_debug_view.load() != 25 && soft_particles_ && scene_ &&
@@ -1872,6 +1874,10 @@ void R3DRenderer::record_world(const Frame& f) {
                             uint32_t b = a + 3;
                             while (b < end && is_blob(b) == here) b += 3;
                             b = std::min(b, end);
+                            if (here && g_sr2_debug_view.load() == 29) {   // debug view 29: no blobs
+                                a = b;
+                                continue;
+                            }
                             bind(here ? blob : other);
                             vkCmdDraw(cmd, b - a, 1, a, 0);
                             a = b;
