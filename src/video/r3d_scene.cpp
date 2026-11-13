@@ -331,6 +331,7 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
             if (found >= 3) raw = least;
         }
     }
+    const float lift_before = car_lift_;
     bool measured = raw > -0.1f && raw < 0.45f;
     if (measured) patch_seen = out.frame;
     else if (out.frame - patch_seen > 120) car_lift_ = -1;   // (kept through a jump, not for good)
@@ -348,9 +349,17 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
             car_lift_skips_ = 0;
         }
     }
-    if (log)
-        printf("[car] frame %llu car %06X patch %zu road %zu raw %.3f lowest %.3f lift %.3f\n",
-               (unsigned long long)out.frame, car->node, patches.size(), road.size(), raw, low[1], car_lift_);
+    // (diagnosis on iOS, temporary: the frames where the measure and the
+    // height kept part, or the height moves: the car bobbing after the start)
+    bool odd = false;
+#ifdef __APPLE__
+    odd = (measured && std::fabs(raw - car_lift_) > 0.03f) || std::fabs(car_lift_ - lift_before) > 0.02f ||
+          car_lift_skips_ > 0;
+#endif
+    if (log || odd)
+        printf("[car] frame %llu car %06X patch %zu road %zu raw %.3f lowest %.3f lift %.3f skips %u\n",
+               (unsigned long long)out.frame, car->node, patches.size(), road.size(), raw, low[1], car_lift_,
+               unsigned(car_lift_skips_));
     float down = car_lift_;
     if (down <= 0.002f) return;
     auto lower = [&](R3DVertex& x, float by) {

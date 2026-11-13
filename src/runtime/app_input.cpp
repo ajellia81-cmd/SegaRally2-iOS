@@ -113,6 +113,16 @@ bool poll_gamepads(HWND hwnd) {
             if (!no_ffb) {   // the wheel's force feedback (runtime.cpp ffb_frame) as rumble
                 float sh = std::min(1.0f, g_ffb_shake.exchange(0.0f) * 2.5f);
                 if (sh > 0.08f) g_pads.rumble(i, sh, 0.6f * sh, 60);
+#ifdef __APPLE__
+                {   // (diagnosis, temporary: the strong rumbles sent, at most 4 a second)
+                    static double logged = 0;
+                    double now = qpc_seconds();
+                    if (sh > 0.3f && now - logged > 0.25) {
+                        logged = now;
+                        printf("[rumble] pad %d strength %.2f (vibration setting %d)\n", i, sh, g_pad_rumble);
+                    }
+                }
+#endif
             }
             driver = false;
         }

@@ -1244,6 +1244,12 @@ static void ffb_frame() {
             memcpy(&v, &u, 4);
             if (!std::isfinite(v)) v = -1;
             if (prev >= 0 && v >= 0 && prev - v > 0.5f) impact = std::max(impact, std::min(1.0f, (prev - v) / 4.0f));
+#ifdef __APPLE__
+            // (diagnosis, temporary: every sharp loss of speed, for the knock's rumble)
+            if (prev >= 0 && v >= 0 && prev - v > 0.2f)
+                printf("[impact] frame %llu  speed %.2f -> %.2f m/s (lost %.2f)  impact %.2f  motors %02X %02X\n",
+                       (unsigned long long)g_frame, prev, v, prev - v, impact, m[0], m[1]);
+#endif
             prev = v;
         } else {
             prev = -1;
