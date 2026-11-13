@@ -472,6 +472,18 @@ void main() {
     gl_SampleMask[0] = -1;   // a statically written mask must be set on every path
     vec4 col = color;
     int dbg = int(atm.axes[0].w + 0.5);
+    // 27: the polygon's own numbers, exact in the 3D image (captures' .f16):
+    // flags, texture word, pack slot, low bytes; 28: depth, pass, debug view
+    if (dbg == 27) {
+        out_color = vec4(float(flags & 255u), float(tex & 255u), float(replace & 255u), 255.0) / 255.0;
+        out_glow = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    if (dbg == 28) {
+        out_color = vec4(gl_FragCoord.z, vp.quality.x / 16.0, float(dbg) / 32.0, 1.0);
+        out_glow = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
     // 24: every fragment red, before anything else (do they reach the image?)
     if (dbg == 24) {
         out_color = vec4(1.0, 0.0, 0.0, 1.0);

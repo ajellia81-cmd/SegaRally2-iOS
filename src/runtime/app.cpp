@@ -1670,7 +1670,7 @@ int main(int argc, char** argv) {
         {   // Debugging aid (iOS port): three fingers capture the 3D debug views one
             // after another, each to out/capture/<n>_<view>.png (n: the request)
             extern std::atomic<int> g_sr2_debug_view, g_sr2_capture_request;
-            static const int VIEWS[] = {0, 19, 22, 23, 24, 25, 26, 21, 2, 18};
+            static const int VIEWS[] = {0, 22, 23, 24, 27, 28};
             static int request = 0, step = -1, presents_in_step = 0;
             if (step < 0 && g_sr2_capture_request.load() > request) {
                 request = g_sr2_capture_request.load();
@@ -1683,6 +1683,8 @@ int main(int argc, char** argv) {
                     char path[96];
                     snprintf(path, sizeof(path), "out/capture/%02d_%02d.png", request, VIEWS[step]);
                     presenter.capture_next(path);
+                    snprintf(path, sizeof(path), "out/capture/%02d_%02d", request, VIEWS[step]);
+                    renderer.dump_3d(path);
                 } else if (presents_in_step > 4) {
                     presents_in_step = 0;
                     if (++step >= int(sizeof(VIEWS) / sizeof(VIEWS[0]))) {

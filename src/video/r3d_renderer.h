@@ -66,6 +66,7 @@ public:
     // Debugging aid (iOS port): the texture RAM image read back from the GPU
     // and compared with what was uploaded (the staging copy) and with `cpu`
     void verify_texture_ram(const std::vector<uint16_t>& cpu);
+    void dump_3d(const char* stem);
     // Texture pack images, uploaded with a full mip chain into their slots
     void add_replacements(const std::vector<RgbaImage>& images);
     // 2D replacement pictures (those on screen are listed in the text cells,

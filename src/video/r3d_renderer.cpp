@@ -958,6 +958,19 @@ void R3DRenderer::verify_texture_ram(const std::vector<uint16_t>& cpu) {
             }
         }
     }
+    if (gpu_bad) {   // the uploaded copy again, whole
+        tex_y0_ = 0;
+        tex_y1_ = 2048;
+        printf("[texcheck] the whole texture RAM goes up again\n");
+    }
+    fflush(stdout);
+    destroy_buffer(rb);
+}
+
+// Debugging aid (iOS port): the 3D image as the last frame left it, before
+// compose, to <stem>_raw.png (colour; NaN or infinite: green), _rawalpha.png
+// and _raw.f16 (the values)
+void R3DRenderer::dump_3d(const char* stem) {
     // The 3D image itself as the last frame left it (before compose): colour,
     // alpha, and NaN/infinite texels marked (iOS port: debug captures)
     {
@@ -997,25 +1010,25 @@ void R3DRenderer::verify_texture_ram(const std::vector<uint16_t>& cpu) {
                 alpha[i * 4] = alpha[i * 4 + 1] = alpha[i * 4 + 2] = a;
                 alpha[i * 4 + 3] = 255;
             }
-            static int n = 0;
-            n++;
-            char path[96];
             CreateDirectoryA("out/capture", nullptr);
-            snprintf(path, sizeof(path), "out/capture/%02d_raw3d_rgb.png", n);
-            png_save(path, int(w), int(h), rgb.data());
-            snprintf(path, sizeof(path), "out/capture/%02d_raw3d_alpha.png", n);
-            png_save(path, int(w), int(h), alpha.data());
-            printf("[texcheck] 3D image %ux%u: %d NaN or infinite texels (green in the picture)\n", w, h, bad);
+            std::string path = std::string(stem) + "_raw.png";
+            png_save(path.c_str(), int(w), int(h), rgb.data());
+            path = std::string(stem) + "_rawalpha.png";
+            png_save(path.c_str(), int(w), int(h), alpha.data());
+            // and the exact values, half floats, for the debug views that write numbers
+            path = std::string(stem) + "_raw.f16";
+            int view = g_sr2_debug_view.load();
+            if (view != 27 && view != 28) {
+            } else if (FILE* f = fopen(path.c_str(), "wb")) {
+                uint32_t hdr[2] = {w, h};
+                fwrite(hdr, 4, 2, f);
+                fwrite(px, 8, size_t(w) * h, f);
+                fclose(f);
+            }
+            printf("[capture] %s: 3D image %ux%u, %d NaN or infinite texels\n", stem, w, h, bad);
             destroy_buffer(cb);
         }
     }
-    if (gpu_bad) {   // the uploaded copy again, whole
-        tex_y0_ = 0;
-        tex_y1_ = 2048;
-        printf("[texcheck] the whole texture RAM goes up again\n");
-    }
-    fflush(stdout);
-    destroy_buffer(rb);
 }
 
 void R3DRenderer::upload_texture_rows(const std::vector<uint16_t>& rows, int y0, int y1) {
@@ -1741,7 +1754,9 @@ void R3DRenderer::record_world(const Frame& f) {
             for (int step = 0; step < 3; step++) {
                 int pass = step == 2 ? 1 : 0;
                 // debug views 22 and 23: no translucent pass (22: as TEX ID)
-                if (step == 2 && (g_sr2_debug_view.load() == 22 || g_sr2_debug_view.load() == 23)) continue;
+                if (step == 2 && (g_sr2_debug_view.load() == 22 || g_sr2_debug_view.load() == 23 ||
+                                  g_sr2_debug_view.load() == 27 || g_sr2_debug_view.load() == 28))
+                    continue;
                 // Between the opaque and the translucent surfaces of the world:
                 // the ambient occlusion, from its depth (the HUD clears it later)
                 if (step == 1 && split && world_here) {
