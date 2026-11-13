@@ -1248,6 +1248,13 @@ void midi_note(uint8_t b) {
         if (!steady && int32_t(rd32(SR2_SEQUENCE)) == 1)
             printf("[snd] frame %llu: %02X %02X %02X\n", (unsigned long long)g_frame, st, prm, g_midi_msg[2]);
     }
+    // A0 15 xx: the slower knocks' sound (several at once, xx 01-0C, on the
+    // phone's log with each knock at low speed, the crash sound heard and A0 14
+    // not sent): a shorter rumble, held a little less
+    if (g_midi_msg[0] == 0xA0 && g_midi_msg[1] == 0x15 && int32_t(rd32(SR2_SEQUENCE)) == 1) {
+        if (g_crash_rumble.load() < 1.25f) g_crash_rumble = 1.25f;
+        printf("[crash] frame %llu (slow knock %02X)\n", (unsigned long long)g_frame, g_midi_msg[2]);
+    }
     if (g_midi_msg[0] == 0xA0 && g_midi_msg[1] == 0x14 && int32_t(rd32(SR2_SEQUENCE)) == 1) {
         g_crash_rumble = 1.6f;   // (above 1: held at full for about a quarter of a second, then fading)
         printf("[crash] frame %llu (sound %02X)\n", (unsigned long long)g_frame, g_midi_msg[2]);
