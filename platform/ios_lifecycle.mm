@@ -25,3 +25,10 @@ void platform_watch_lifecycle() {
                          queue:nil
                     usingBlock:^(NSNotification*) { compat_set_focus(true); }];
 }
+
+// The device's thermal state for the log (0 nominal, 1 fair, 2 serious,
+// 3 critical): iOS lowers the GPU's clock as it rises, and every pass then
+// takes longer at once
+int platform_thermal_state() {
+    return int([[NSProcessInfo processInfo] thermalState]);
+}

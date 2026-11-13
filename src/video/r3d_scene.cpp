@@ -359,9 +359,13 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
     for (uint32_t i = car->opaque_first; i < car->opaque_first + car->opaque_count && i < vs.size(); i++) lower(vs[i], down);
     for (uint32_t i = car->trans_first; i < car->trans_first + car->trans_count && i < vs.size(); i++) lower(vs[i], down);
     for (uint32_t i = car->back_first; i < car->back_first + car->back_count && i < out.backs.size(); i++) lower(out.backs[i], down);
-    // The patch: 3 cm clear of the road (on it, the two would flicker through each other)
+    // The patch: 3 cm clear of the road (on it, the two would flicker through each other).
+    // Never by more than this frame's own gap: while the car's height is
+    // held through a jump in it (the car squatting as it sets off), the patch
+    // went into the road and was gone for half a second (iOS port)
+    float patch_down = measured && !patches.empty() ? std::min(down, raw) : down;
     for (uint32_t k : patches) {
-        if (down > 0.03f) lower(vs[k], down - 0.03f);
+        if (patch_down > 0.03f) lower(vs[k], patch_down - 0.03f);
         set_down.insert(k);
     }
     };

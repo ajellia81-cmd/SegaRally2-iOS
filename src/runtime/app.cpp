@@ -62,6 +62,9 @@
 #include "platform_files.h"
 #include "touch_controls.h"
 #include "sdl_events.h"
+#ifdef __APPLE__
+int platform_thermal_state();   // platform/ios_lifecycle.mm
+#endif
 TouchControls g_touch;
 #endif
 
@@ -1798,8 +1801,10 @@ int main(int argc, char** argv) {
                 g_touch.set_fps(fps);
                 // the same in the log, every second, shown or not (to read
                 // the frame rate afterwards, scene by scene)
-                printf("[fps] %llu  GPU %.1f ms  %zu polygons  frame %llu\n", hz, images > 0 ? gpu / images : 0.0,
-                       scene->polygons, (unsigned long long)(shown == ~0ull ? 0 : shown));
+                static const char* const heat[] = {"nominal", "fair", "serious", "critical"};
+                int th = platform_thermal_state();
+                printf("[fps] %llu  GPU %.1f ms  %zu polygons  frame %llu  heat %s\n", hz, images > 0 ? gpu / images : 0.0,
+                       scene->polygons, (unsigned long long)(shown == ~0ull ? 0 : shown), th >= 0 && th < 4 ? heat[th] : "?");
                 fflush(stdout);
             }
 #endif
