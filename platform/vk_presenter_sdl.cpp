@@ -523,11 +523,19 @@ void VkPresenter::handle_event(const SDL_Event& e) {
             int n = 0;
             if (SDL_Finger** f = SDL_GetTouchFingers(e.tfinger.touchID, &n)) SDL_free(f);
             // (once per gesture: the fingers' touches can each see all four)
-            static bool gesture = false;
+            static bool gesture = false, three = false;
             if (n < 4) gesture = false;
+            if (n < 3) three = false;
             if (n == 4 && !gesture) {
                 gesture = true;
                 g_sr2_fps_toggle++;
+                break;
+            }
+            // three fingers (debugging aid, temporary): the screen and the 2D
+            // layers saved to out/capture and out/2d
+            if (n == 3 && !three) {
+                three = true;
+                g_sr2_capture_request++;
                 break;
             }
         }

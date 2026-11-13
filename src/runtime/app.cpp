@@ -1703,34 +1703,20 @@ int main(int argc, char** argv) {
             renderer.set_back_shift(paired ? float(1 - t) : 0.0f);
             if (g_pacing_log) pacing_sample(now, display, built->time - frame_period * (1 - t), *built);
         }
-        {   // Debugging aid (iOS port): three fingers capture the 3D debug views one
-            // after another, each to out/capture/<n>_<view>.png (n: the request)
-            extern std::atomic<int> g_sr2_debug_view, g_sr2_capture_request;
-            static const int VIEWS[] = {0, 21, 23, 27, 28, 29};
-            static int request = 0, step = -1, presents_in_step = 0;
-            if (step < 0 && g_sr2_capture_request.load() > request) {
+        {   // Debugging aid (iOS port): three fingers save the screen as shown
+            // (out/capture/<n>.png) and the next 2D composition's layers (out/2d)
+            extern std::atomic<int> g_sr2_capture_request;
+            static int request = 0;
+            if (g_sr2_capture_request.load() > request) {
                 request = g_sr2_capture_request.load();
-                step = 0, presents_in_step = 0;
+                CreateDirectoryA("out", nullptr);
                 CreateDirectoryA("out/capture", nullptr);
-                g_sr2_debug_view = VIEWS[0];
-            }
-            if (step >= 0) {
-                if (++presents_in_step == 4) {
-                    char path[96];
-                    snprintf(path, sizeof(path), "out/capture/%02d_%02d.png", request, VIEWS[step]);
-                    presenter.capture_next(path);
-                    snprintf(path, sizeof(path), "out/capture/%02d_%02d", request, VIEWS[step]);
-                    renderer.dump_3d(path);
-                } else if (presents_in_step > 4) {
-                    presents_in_step = 0;
-                    if (++step >= int(sizeof(VIEWS) / sizeof(VIEWS[0]))) {
-                        step = -1;
-                        g_sr2_debug_view = 0;
-                        printf("[debug] captures %02d saved in out/capture\n", request);
-                    } else {
-                        g_sr2_debug_view = VIEWS[step];
-                    }
-                }
+                char path[96];
+                snprintf(path, sizeof(path), "out/capture/%02d.png", request);
+                presenter.capture_next(path);
+                capture_2d = true;
+                printf("[debug] capture %02d: %s and the 2D layers in out/2d (frame %llu)\n", request, path,
+                       (unsigned long long)(shown == ~0ull ? 0 : shown));
             }
         }
         static int film_presents = 0;
