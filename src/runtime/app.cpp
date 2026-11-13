@@ -1373,6 +1373,20 @@ int main(int argc, char** argv) {
             g_touch.set_state(frontend.active() || g_boot_skip, back, any_pad);
             // The app sent to the background in a race: the pause menu, as
             // the pause button would
+#ifdef __APPLE__
+            {   // Away from the app (in the background, or a call or the control
+                // centre over it): the game waits and every sound stops, in the
+                // menus too, until it is back
+                extern std::atomic<bool> g_app_away;
+                void platform_audio_suspend(bool away);
+                bool away = GetForegroundWindow() == nullptr;
+                if (away != g_app_away.load()) {
+                    g_app_away = away;
+                    platform_audio_suspend(away);
+                    printf("[app] %s\n", away ? "away: the game waits, no sound" : "back");
+                }
+            }
+#endif
             bool to_background = g_sr2_backgrounded.exchange(false);
             if (to_background && g_opt.menu && !frontend.active()) {
                 frontend.open(Frontend::Screen::Pause);

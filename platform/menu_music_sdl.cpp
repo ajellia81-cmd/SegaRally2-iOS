@@ -51,8 +51,22 @@ void MenuMusic::close() {
     open_ = playing_ = false;
 }
 
+// iOS port: away from the app the music stops where it is and goes on when back
+static bool g_music_away = false, g_music_was_playing = false;
+void menu_music_suspend(bool away) {
+    if (away == g_music_away) return;
+    g_music_away = away;
+    if (!g_music) return;
+    if (away) {
+        g_music_was_playing = !SDL_AudioDevicePaused(SDL_GetAudioStreamDevice(g_music));
+        SDL_PauseAudioStreamDevice(g_music);
+    } else if (g_music_was_playing) {
+        SDL_ResumeAudioStreamDevice(g_music);
+    }
+}
+
 void MenuMusic::update(bool want, int volume, double dt) {
-    if (!open_) return;
+    if (!open_ || g_music_away) return;
     level_ = want ? std::min(1.0f, level_ + float(dt) / 1.0f) : std::max(0.0f, level_ - float(dt) / 0.5f);
     if (want && !playing_) {
         sent_ = -1;

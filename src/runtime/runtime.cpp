@@ -107,6 +107,7 @@ std::atomic<uint64_t> g_game_frames{0};
 // The WARNING notice and the copyright line shown at power-on are run through
 // at full speed with nothing on screen: the game appears at the SEGA logo.
 std::atomic<bool> g_boot_skip{false};
+std::atomic<bool> g_app_away{false};   // iOS port: the app in the background (app.cpp): the game waits
 std::atomic<int> g_arcade_entry{0};
 std::atomic<int> g_debug_jump{-1};
 std::atomic<bool> g_debug_freeze_time{false};
@@ -1230,6 +1231,26 @@ static void ffb_frame() {
         printf("[ffb] frame %llu  x %02X y %02X  shake %.2f  wheel %d\n", (unsigned long long)g_frame, m[0], m[1], shake,
                int(g_inputs.steer));
     last[0] = m[0], last[1] = m[1];
+    // A hard knock (a wall, a tree, another car head on): the car's speed
+    // falls more in one frame than any braking does. The wheel's motor gives
+    // little of it (the game turns the spring down as the car stops), so the
+    // pads had no jolt at all; a rumble from the speed lost instead, fading
+    // over about a quarter of a second (iOS port)
+    {
+        static float prev = -1, impact = 0;
+        if (int32_t(rd32(SR2_SEQUENCE)) == 1) {
+            uint32_t u = rd32(0x22F3A8);   // the player's speed, m/s (docs/game_ram.md)
+            float v;
+            memcpy(&v, &u, 4);
+            if (!std::isfinite(v)) v = -1;
+            if (prev >= 0 && v >= 0 && prev - v > 0.5f) impact = std::max(impact, std::min(1.0f, (prev - v) / 4.0f));
+            prev = v;
+        } else {
+            prev = -1;
+        }
+        shake = std::max(shake, impact * 0.4f);   // (x 2.5 for the pads: 1 at full)
+        impact *= 0.85f;
+    }
     float was = g_ffb_shake.load();
     if (shake > was) g_ffb_shake = shake;
     // A steering wheel's force feedback (wheel.cpp): the motor as a force,
@@ -1363,6 +1384,14 @@ void rt_event(Ctx& c) {
                 printf("[boot] start screens skipped in %.1f s (frame %llu)\n",
                        double(GetTickCount64() - g_boot_ms) / 1000.0, (unsigned long long)g_frame);
                 LARGE_INTEGER now;   // real-time pacing starts from here
+                QueryPerformanceCounter(&now);
+                g_start_time.QuadPart = now.QuadPart - LONGLONG(double(g_frame) / FRAME_HZ * double(g_qpf.QuadPart));
+            }
+            if (g_app_away) {   // in the background, whatever runs (the menus' run behind them too)
+                double away_from = qpc_seconds();
+                while (g_app_away && !g_quit) Sleep(10);
+                g_wait_seconds += qpc_seconds() - away_from;
+                LARGE_INTEGER now;   // on at real speed, without catching up
                 QueryPerformanceCounter(&now);
                 g_start_time.QuadPart = now.QuadPart - LONGLONG(double(g_frame) / FRAME_HZ * double(g_qpf.QuadPart));
             }

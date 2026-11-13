@@ -54,4 +54,12 @@ void AudioOut::stop() {
 
 // (WASAPI only)
 void AudioOut::run() {}
+
+// iOS port: away from the app no sound at all (LiveContainer lets the app run
+// on in the background: the game's sound and the menu music went on playing)
+void menu_music_suspend(bool away);
+void platform_audio_suspend(bool away) {
+    if (g_stream) away ? SDL_PauseAudioStreamDevice(g_stream) : SDL_ResumeAudioStreamDevice(g_stream);
+    menu_music_suspend(away);
+}
 bool AudioOut::play_default_device() { return false; }
