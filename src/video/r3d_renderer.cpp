@@ -1809,7 +1809,9 @@ void R3DRenderer::record_world(const Frame& f) {
         // surfaces (0) and without them (1), in turn every 1.5 s; the picture
         // is the same)
         static const bool prof = getenv("SR2_EZBENCH") != nullptr;
-        prof_ = prof && scene_ && scene_->polygons > 5000 ? int((prof_frames_++ / 180) % 2) : 0;
+        // (measured on an iPhone 18 Pro Max: the same or a little slower with
+        // the alpha-tested surfaces, as in the Lost World port; solid only)
+        prof_ = prof && scene_ && scene_->polygons > 5000 ? int((prof_frames_++ / 180) % 2) : 1;
     }
 #endif
     if (vcount) {
