@@ -439,7 +439,8 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
 VkPipeline R3DRenderer::make_pipeline(const PipelineDesc& d) {
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, d.vs, "main"};
-    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, d.fs, "main"};
+    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, d.fs, "main",
+                 d.fs_spec};
 
     VkVertexInputBindingDescription binding{0, sizeof(R3DVertex), VK_VERTEX_INPUT_RATE_VERTEX};
     VkVertexInputAttributeDescription attrs[9] = {
@@ -573,10 +574,14 @@ bool R3DRenderer::create_pipelines() {
                                        : make_module(dev_, spv_ao_frag, sizeof(spv_ao_frag));
     VkShaderModule aoa_fs = make_module(dev_, spv_ao_apply_frag, sizeof(spv_ao_apply_frag));
     bool motion = motion_pass_ = dlaa_.ready();
+    // r3d.frag leaves out the effects that are off (constant_id 0, iOS)
+    features_ = feature_mask();
+    const VkSpecializationMapEntry feat_entry{0, 0, sizeof(uint32_t)};
+    const VkSpecializationInfo r3d_spec{1, &feat_entry, sizeof(features_), &features_};
     // The world: 3D geometry into the HDR image, with the motion and glow slots
     PipelineDesc world{.vs = r3d_vs, .fs = r3d_fs, .layout = r3d_layout_, .color = VK_FORMAT_R16G16B16A16_SFLOAT,
                        .depth = true, .depth_write = true, .vertex_input = true, .samples = samples_,
-                       .motion = motion, .glow = true};
+                       .motion = motion, .glow = true, .fs_spec = &r3d_spec};
     opaque_ = make_pipeline(world);
     PipelineDesc translucent = world;
     translucent.depth_write = false;
@@ -620,7 +625,7 @@ bool R3DRenderer::create_pipelines() {
     }
 #endif
     shadow_ = make_pipeline({.vs = r3d_vs, .fs = r3d_fs, .layout = r3d_layout_, .color = VK_FORMAT_UNDEFINED,
-                             .depth = true, .depth_write = true, .vertex_input = true});
+                             .depth = true, .depth_write = true, .vertex_input = true, .fs_spec = &r3d_spec});
     // Full-screen passes: a triangle over the target, no vertex input
     compose_format_ = vk_->swap_format();
     PipelineDesc compose{.vs = c_vs, .fs = c_fs, .layout = compose_layout_, .color = compose_format_};
@@ -643,6 +648,36 @@ bool R3DRenderer::create_pipelines() {
                                     .samples = samples_, .multiply = true});
     for (auto m : {r3d_vs, r3d_fs, c_vs, c_fs, b_fs, ao_fs, aoa_fs}) vkDestroyShaderModule(dev_, m, nullptr);
     return opaque_ && translucent_ && blob_ && blob_depth_ && trans_depth_ && shadow_ && compose_measure_ && compose_ && bloom_ && ao_pass_ && ao_apply_ && ao_apply_glow_;
+}
+
+// The FEAT_ bits of r3d.frag for what is on now (iOS port; all of them elsewhere)
+uint32_t R3DRenderer::feature_mask() const {
+#ifdef __APPLE__
+    uint32_t m = 0;
+    if (shadow_strength_ > 0) m |= 1u;   // FEAT_SHADOW
+    if (haze_strength_ > 0) m |= 2u;     // FEAT_HAZE
+    if (soft_particles_) m |= 4u;        // FEAT_SOFT
+    if (sun_) m |= 8u;                   // FEAT_SUN
+    if (aniso_ > 1.0f) m |= 16u;         // FEAT_ANISO: more than one tap
+    return m;                            // (no ray tracing, no debug views)
+#else
+    return ~0u;
+#endif
+}
+
+void R3DRenderer::destroy_pipelines() {
+    for (VkPipeline* p : {&opaque_, &translucent_, &blob_, &blob_depth_, &trans_depth_, &shadow_, &compose_measure_, &compose_,
+                          &bloom_, &compose_glow_, &ao_pass_, &ao_apply_, &ao_apply_glow_, &early_z_})
+        if (*p) vkDestroyPipeline(dev_, *p, nullptr), *p = VK_NULL_HANDLE;
+}
+
+void R3DRenderer::refresh_features() {
+    if (!dev_ || feature_mask() == features_) return;
+    vkDeviceWaitIdle(dev_);
+    uint32_t was = features_;
+    destroy_pipelines();
+    if (!create_pipelines()) fprintf(stderr, "[vulkan] could not make the pipelines again (effects)\n");
+    printf("[video] shader effects %02X -> %02X\n", was, features_);
 }
 
 // w, h: the 3D image as drawn; up_w, up_h: as DLSS hands it on (the same but with DLSS upscaling)

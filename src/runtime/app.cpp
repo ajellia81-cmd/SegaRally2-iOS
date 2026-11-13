@@ -284,10 +284,11 @@ int main(int argc, char** argv) {
         ini.gi = 0;
         ini.rear_boost = 0;
         if (ini.speakers == 1) ini.speakers = 0;   // surround 4.0: stereo
-        // Up to 4 anisotropic taps instead of 8 (the textures are filtered in
-        // the shader: each tap is 4 to 8 reads): at 460 pixels per inch no
-        // difference shows, and the 3D pass costs a good part less
-        g_opt.aniso = std::min(g_opt.aniso, 4);
+        // The arcade's texture filtering: trilinear, one tap (the textures are
+        // filtered in the shader, each anisotropic tap 4 to 8 more reads;
+        // at 460 pixels per inch it hardly shows, and the 3D pass costs a
+        // good part less)
+        g_opt.aniso = 1;
 #endif
         options_from_settings(g_opt, ini);
         g_pad_rumble = ini.vibration;
@@ -615,6 +616,7 @@ int main(int argc, char** argv) {
     renderer.set_global_illumination(g_opt.gi);
     r3d_set_sr2_dust(g_opt.dust);
     renderer.set_sharpen(g_opt.sharpen ? 0.5f : 0.0f);
+    renderer.refresh_features();   // (iOS port: the world shader with only the effects that are on)
     if (g_opt.haze > 0) printf("[video] distance haze on (strength %.2f)\n", g_opt.haze);
     if (g_opt.dlaa && !renderer.dlaa_active()) printf("[video] DLAA not available: using MSAA\n");
     if (renderer.dlaa_active())
@@ -1254,6 +1256,7 @@ int main(int argc, char** argv) {
                     renderer.set_picture(s.saturation / 100.0f, s.gamma / 100.0f);
 #ifndef _WIN32
                     renderer.set_supersample(float(s.render_scale) / 100.0f);
+                    renderer.refresh_features();   // (an effect on or off: the world shader without the others)
 #endif
                     g_pad_rumble = s.vibration;
                     save_settings(s);

@@ -27,6 +27,17 @@ layout(set = 0, binding = 0) uniform usampler2D texture_ram;   // 2048x2048 R16_
 layout(set = 0, binding = 1) uniform texture2D replacement_tex[4096];
 layout(set = 0, binding = 3) uniform sampler replacement_smp;
 
+// The effects compiled in (R3DRenderer::feature_mask(), iOS port): the ones
+// that are off are left out, so the shader keeps fewer registers per pixel
+layout(constant_id = 0) const uint FEATURES = 0xFFFFFFFFu;
+const bool FEAT_SHADOW = (FEATURES & 1u) != 0u;
+const bool FEAT_HAZE = (FEATURES & 2u) != 0u;
+const bool FEAT_SOFT = (FEATURES & 4u) != 0u;
+const bool FEAT_SUN = (FEATURES & 8u) != 0u;
+const bool FEAT_ANISO = (FEATURES & 16u) != 0u;
+const bool FEAT_RT = (FEATURES & 32u) != 0u || FEATURES == 0xFFFFFFFFu;
+const bool FEAT_DEBUG = FEATURES == 0xFFFFFFFFu;
+
 layout(push_constant) uniform Viewport {
     mat4 proj;
     vec4 sun;
@@ -73,7 +84,7 @@ vec3 world_up_safe() {
 }
 
 bool sun_shadowed() {
-    return atm.shadow.x > 0.0 && vp.sun.w > 0.0 && (flags & (WORLD | NO_SHADOW)) == WORLD;
+    return FEAT_SHADOW && atm.shadow.x > 0.0 && vp.sun.w > 0.0 && (flags & (WORLD | NO_SHADOW)) == WORLD;
 }
 #ifdef RAY_TRACING
 // Whether they are traced here (traced_shadow) instead
@@ -327,7 +338,7 @@ vec4 sample_texture(vec2 duv_dx, vec2 duv_dy) {
         // of them, and the texture black; iOS port)
         if (isnan(pmax) || isinf(pmax)) pmax = 1.0;
         if (isnan(pmin) || isinf(pmin)) pmin = 1.0;
-        float taps = clamp(ceil(min(pmax / pmin, 64.0)), 1.0, max(max_aniso, 1.0));
+        float taps = FEAT_ANISO ? clamp(ceil(min(pmax / pmin, 64.0)), 1.0, max(max_aniso, 1.0)) : 1.0;
         // Levels are stored while both sides are >= 4 before halving
         int max_level = max(findMSB(min(size.x, size.y)) - 1, 0);
         float lod = clamp(log2(max(pmax / taps, 1e-6)), 0.0, float(max_level));
@@ -415,7 +426,7 @@ vec4 dust() {
     vec3 up = world_up_safe();
     vec3 sun_dir = length(vp.sun.xyz) > 0.01 ? normalize(vp.sun.xyz) : up;
     float sun = vp.sun.w, ambient = vp.params.x;
-    if (atm.sunlight.z > 0.0) {   // clear outdoor scenes (SUN), as the world is lit
+    if (FEAT_SUN && atm.sunlight.z > 0.0) {   // clear outdoor scenes (SUN), as the world is lit
         sun *= atm.sunlight.x;
         ambient *= atm.sunlight.y;
     }
@@ -471,7 +482,7 @@ void main() {
     out_motion = (clip_before.xy / clip_before.w - ndc) * px_per_ndc;
     gl_SampleMask[0] = -1;   // a statically written mask must be set on every path
     vec4 col = color;
-    int dbg = int(atm.axes[0].w + 0.5);
+    int dbg = FEAT_DEBUG ? int(atm.axes[0].w + 0.5) : 0;
     // 27: the polygon's own numbers, exact in the 3D image (captures' .f16):
     // flags, texture word, pack slot, low bytes; 28: depth, pass, debug view
     if (dbg == 27) {
@@ -518,7 +529,7 @@ void main() {
         bool puff = (tex & 3u) == 0u;
         // Not in the eye's face: the cloud the camera drives through thins out before it
         float fade = puff ? smoothstep(0.3, 1.6, -view_pos.z) : smoothstep(0.8, 2.2, -view_pos.z);
-        if (atm.soft.x > 0.0) {   // soft where it meets the road and what stands behind, over its size
+        if (FEAT_SOFT && atm.soft.x > 0.0) {   // soft where it meets the road and what stands behind, over its size
             float d = texelFetch(scene_depth, ivec2(gl_FragCoord.xy), 0).r;
             float soft = puff ? clamp(params.z * 0.6, 0.15, 1.0) : 0.05;
             if (d > 0.0) fade *= clamp((view_pos.z + 1e-3 / d) / soft, 0.0, 1.0);
@@ -533,7 +544,7 @@ void main() {
         c.rgb = min(c.rgb, vec3(atm.soft.z > 0.5 ? 8.0 : 1.0));
         float fog = params.y * clamp(vp.params.z + (-view_pos.z) * vp.params.y, 0.0, 1.0);
         if (fog > 0.0) c.rgb = mix(c.rgb, vp.fog_color.rgb * vp.fog_color.a * mist_light(view_pos), fog);
-        if (atm.haze.a > 0.0) c.rgb = distance_haze(c.rgb, view_pos, fog);
+        if (FEAT_HAZE && atm.haze.a > 0.0) c.rgb = distance_haze(c.rgb, view_pos, fog);
         out_color = c;
         out_glow = vec4(0.0, 0.0, 0.0, c.a);
         return;
@@ -618,13 +629,13 @@ void main() {
         vec3 light = vec3(s * vp.sun.w + ambient);
         // Clear outdoor scenes (SUN): a stronger, warmer sun and a softer,
         // slightly bluer ambient (light from the sky) for more contrast
-        if (atm.sunlight.z > 0.0 && (flags & WORLD) != 0u) {
+        if (FEAT_SUN && atm.sunlight.z > 0.0 && (flags & WORLD) != 0u) {
             float w = atm.sunlight.z;
             light = s * vp.sun.w * atm.sunlight.x * vec3(1.0, 1.0 - 0.05 * w, 1.0 - 0.14 * w) +
                     ambient * atm.sunlight.y * vec3(1.0 - 0.06 * w, 1.0, 1.0 + 0.08 * w);
         }
         // Global illumination: the ambient light in the colour of the sky
-        if (atm.gi.y > 0.0 && atm.sunlight.z > 0.0) {
+        if (FEAT_RT && atm.gi.y > 0.0 && atm.sunlight.z > 0.0) {
             bool clear = (flags & WORLD) != 0u;
             float w = atm.sunlight.z;
             float a = ambient * (clear ? atm.sunlight.y : 1.0);
@@ -744,7 +755,7 @@ void main() {
         // With ray tracing the world itself: the scenery, the stands and the
         // other cars mirrored where the reflected ray meets them, lit by the
         // sun and the ambient as the scene is, fading into the sky with distance
-        if (atm.rt.x > 0.0 && atm.mirror.w > 0.5) {
+        if (FEAT_RT && atm.rt.x > 0.0 && atm.mirror.w > 0.5) {
             vec3 hit_colour;
             float hit_dist;
             vec3 from = view_pos + nn * (0.03 + 0.002 * length(view_pos));
@@ -777,7 +788,7 @@ void main() {
     if ((flags & WORLD) != 0u && fog > 0.0) fog_color = fog_color * mist_light(view_pos) + atm.spot_fog.rgb * spotlight().y;
     c.rgb = mix(c.rgb, fog_color, fog);
     // Optional distance haze
-    if ((flags & WORLD) != 0u && atm.haze.a > 0.0)
+    if (FEAT_HAZE && (flags & WORLD) != 0u && atm.haze.a > 0.0)
         c.rgb = distance_haze(c.rgb, view_pos, fog);
     // Opaque pass: the colour written is always solid, since a filtered alpha
     // would let the 2D background show through. With MSAA, alpha-tested edges
@@ -804,7 +815,7 @@ void main() {
     // Textured ones only: the game's untextured black patch under each car (its
     // shadow) lies 3 cm over the road once the car is set down on it
     // (settle_player_car), and faded over 2 m it was gone
-    if (vp.quality.x < 0.0 && atm.soft.x > 0.0 && (flags & (WORLD | TEXTURED)) == (WORLD | TEXTURED)) {
+    if (FEAT_SOFT && vp.quality.x < 0.0 && atm.soft.x > 0.0 && (flags & (WORLD | TEXTURED)) == (WORLD | TEXTURED)) {
         float d = texelFetch(scene_depth, ivec2(gl_FragCoord.xy), 0).r;
         if (d > 0.0) c.a *= clamp((view_pos.z + 1e-3 / d) / atm.soft.y, 0.0, 1.0);
     }

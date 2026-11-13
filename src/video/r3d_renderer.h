@@ -181,7 +181,18 @@ private:
                                                // nearer, and written (the cars' patch, blob_)
         float bias = 0;                        // depth bias (constant factor; < 0: farther)
         float slope_bias = 0;                  // ... and its slope factor
+        const VkSpecializationInfo* fs_spec = nullptr;   // the fragment shader's specialization constants
     };
+    // iOS port: the effects r3d.frag is compiled with (constant_id 0, its FEAT_
+    // bits); the ones that are off are left out of the shader, which then
+    // keeps fewer registers per pixel. ~0u: all of them (other platforms)
+    uint32_t features_ = ~0u;
+    uint32_t feature_mask() const;
+    void destroy_pipelines();
+public:
+    // Between frames: the world shader made again if an effect went on or off
+    void refresh_features();
+private:
     VkPipeline make_pipeline(const PipelineDesc& d);
     void bind_scene_image(VkImageView view, VkImageView alpha);
     void update_atmosphere(const ScreenLayout& lay, uint32_t target_w, uint32_t target_h);
