@@ -131,6 +131,10 @@ double qpc_seconds() {
     return double(now.QuadPart) / double(freq.QuadPart);
 }
 
+#ifdef __APPLE__
+void midi_note(uint8_t b);   // (diagnosis, below)
+#endif
+
 namespace {
 
 constexpr uint64_t CPU_HZ = 166666667;      // PowerPC 603ev at 166 MHz (Step 2.1). TODO: DEC and TB still tick every 4 cycles, as tuned for Lost World
@@ -403,8 +407,7 @@ void dev_write8(uint32_t a, uint8_t v) {
         g_irq_state &= ~0x40;
         g_sound.midi_write(v);
 #ifdef __APPLE__
-        extern void midi_note(uint8_t b);
-        midi_note(uint8_t(v));
+        ::midi_note(uint8_t(v));
 #endif
     }
     if (a == 0xF0080004) {
