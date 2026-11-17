@@ -30,6 +30,13 @@ layout(push_constant) uniform Viewport {
                      // and current game frame
 } vp;
 
+// The same position, to the bit, from every pipeline this goes into (iOS
+// port: Metal compiles each pipeline's vertex stage on its own, fast math
+// reordering the sums; the shadow patch's two passes then differed by more
+// than the hair between them and the whole patch went out for a frame, on
+// Snowy's hills)
+invariant gl_Position;
+
 layout(location = 0) out vec3 view_pos;
 layout(location = 1) out vec3 normal;
 layout(location = 2) out vec2 uv;

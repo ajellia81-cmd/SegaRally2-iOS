@@ -622,12 +622,11 @@ bool R3DRenderer::create_pipelines() {
     // a little nearer (the same amount, so the hair between them stays)
     blob.bias = 8.0f;
     blob.slope_bias = 1.0f;
-    // (and the shading pass clearly nearer than the depth pass before it,
-    // most of all on a slope: by one unit the hair between the two passes
-    // could go the other way, and the whole patch failed its test for a frame,
-    // the shadow going out going up Snowy's hills)
-    blob_depth.bias = 8.0f - 4.0f;
-    blob_depth.slope_bias = 0.5f;
+    // (r3d.vert's position is invariant now: a wider hair, 4 units and half
+    // the slope, let the patch's overlapping layers each through, and the
+    // shadow came out ragged)
+    blob_depth.bias = 8.0f - 1.0f;
+    blob_depth.slope_bias = 1.0f;
 #endif
     blob_ = make_pipeline(blob);
     blob_depth_ = make_pipeline(blob_depth);
