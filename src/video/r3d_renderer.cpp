@@ -524,6 +524,11 @@ VkPipeline R3DRenderer::make_pipeline(const PipelineDesc& d) {
     // Bloom source: blended like the colour. With it the motion slot is always
     // there (without an image when DLAA is off)
     cbas[2] = cba;
+#ifdef __APPLE__
+    // Without BLOOM nothing reads the glow image: not written, nor kept
+    // (iOS port; a whole-screen image less for every surface drawn)
+    if (!(features_ & 32u)) cbas[2].colorWriteMask = 0;
+#endif
     if (d.depth_only)
         for (auto& c : cbas) c.colorWriteMask = 0;
     uint32_t attachments = d.glow ? 3 : d.motion ? 2 : 1;
@@ -665,6 +670,7 @@ uint32_t R3DRenderer::feature_mask() const {
     if (soft_particles_) m |= 4u;        // FEAT_SOFT
     if (sun_) m |= 8u;                   // FEAT_SUN
     if (aniso_ > 1.0f) m |= 16u;         // FEAT_ANISO: more than one tap
+    if (bloom_strength_ > 0) m |= 32u;   // the bloom's glow image written (not a shader bit)
     return m;                            // (no ray tracing, no debug views)
 #else
     return ~0u;
@@ -1783,6 +1789,12 @@ void R3DRenderer::record_world(const Frame& f) {
     ca.clearValue.color = {{0, 0, 0, 0}};
     cas[2] = ca;   // bloom source, cleared to no glow
     cas[2].imageView = msaa ? glow_ms_.view : glow_.view;
+#ifdef __APPLE__
+    if (bloom_strength_ <= 0) {   // (no bloom: neither cleared nor stored, iOS port)
+        cas[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        cas[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    }
+#endif
     if (msaa) cas[2].resolveImageView = glow_.view;
     VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     da.imageView = depth_.view;
