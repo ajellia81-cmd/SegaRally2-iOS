@@ -396,17 +396,24 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
     if (!patches.empty()) {
         if (measured) patch_down = std::min(down, raw);
         else {
-            float least = 1e30f;
-            for (float g : gaps) least = std::min(least, g);
-            patch_down = gaps.empty() ? 0.0f : std::min(down, std::max(least, 0.0f));
+            // Set on the road by its own gap, whichever way: under it (the
+            // reading below -0.1 is not taken: the patch stayed in the road,
+            // out of sight for a frame) or high above it (a jump)
+            float mid = 0.03f;
+            if (!gaps.empty()) {
+                std::vector<float> g = gaps;
+                std::nth_element(g.begin(), g.begin() + g.size() / 2, g.end());
+                mid = std::clamp(g[g.size() / 2], -1.0f, 2.0f);
+            }
+            patch_down = mid;
 #ifdef __APPLE__
-            printf("[shadow] frame %llu car %06X: not measured (%zu points, %zu over the road), lowered %.3f of %.3f\n",
-                   (unsigned long long)out.frame, car->node, patches.size() / 3, gaps.size(), patch_down, down);
+            printf("[shadow] frame %llu car %06X: not measured (%zu points, %zu over the road), gap %.3f, height %.3f\n",
+                   (unsigned long long)out.frame, car->node, patches.size() / 3, gaps.size(), mid, down);
 #endif
         }
     }
     for (uint32_t k : patches) {
-        if (patch_down > 0.03f) lower(vs[k], patch_down - 0.03f);
+        if (patch_down > 0.03f || (!measured && patch_down < 0.03f)) lower(vs[k], patch_down - 0.03f);
         set_down.insert(k);
     }
     };

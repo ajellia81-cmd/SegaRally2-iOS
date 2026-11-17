@@ -1808,18 +1808,24 @@ int main(int argc, char** argv) {
                     // under 6.6 ms for 5 s. A hot phone lowers the GPU's clock
                     // (some 20-30% already at "fair", Snowy fell to 80 fps)
                     static const float steps[] = {1.0f, 0.92f, 0.85f, 0.78f, 0.7f};
-                    static int level = 0, calm = 0;
-                    if (images >= 30) {
+                    // (the composition, some 1.6 ms, does not shrink with the 3D:
+                    // reckoned apart when going back up, or it stayed at 70%;
+                    // and a second left out after each change, which it straddled)
+                    static int level = 0, calm = 0, settle = 0;
+                    if (images >= 30 && settle > 0) settle--;
+                    else if (images >= 30) {
                         double per = gpu / images;
                         int was = level;
                         if (per > 7.4 && level < 4) {
                             level++;
                             calm = 0;
                         } else if (level > 0) {
+                            const double fixed = 1.6;
                             double up = steps[level - 1] / steps[level];
-                            calm = per * up * up < 6.6 ? calm + 1 : 0;
+                            calm = fixed + std::max(per - fixed, 0.0) * up * up < 6.8 ? calm + 1 : 0;
                             if (calm >= 5) level--, calm = 0;
                         }
+                        if (level != was) settle = 1;
                         if (level != was) {
                             renderer.set_thermal_scale(steps[level]);
                             printf("[res] GPU %.1f ms, heat %s: the 3D at %d%% of its size\n", per,
