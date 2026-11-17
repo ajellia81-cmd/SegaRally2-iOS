@@ -48,7 +48,7 @@ static CHHapticEngine* g_knock_engine = nil;   // (ARC: CMakeLists.txt)
 static GCController* g_knock_pad = nil;
 static std::atomic<bool> g_knock_ok{false};
 
-void platform_crash_haptic(float strength) {
+void platform_crash_haptic(float strength, int where) {
     if (strength <= 0.0f) return;
     {
         @autoreleasepool {
@@ -59,10 +59,20 @@ void platform_crash_haptic(float strength) {
                     break;
                 }
             if (!pad) return;
+            static int logged = 0;   // (diagnosis: where the pad can vibrate)
+            if (!logged++) {
+                NSMutableString* list = [NSMutableString string];
+                for (GCHapticsLocality l in pad.haptics.supportedLocalities) [list appendFormat:@"%@ ", l];
+                printf("[knock] %s: haptics at %s\n", pad.vendorName.UTF8String, list.UTF8String);
+            }
             NSError* error = nil;
-            if (!g_knock_engine || !g_knock_ok.load() || g_knock_pad != pad) {
+            static int engine_where = -1;
+            if (!g_knock_engine || !g_knock_ok.load() || g_knock_pad != pad || engine_where != where) {
                 if (g_knock_engine) [g_knock_engine stopWithCompletionHandler:nil];
-                g_knock_engine = [pad.haptics createEngineWithLocality:GCHapticsLocalityDefault];
+                engine_where = where;
+                g_knock_engine = [pad.haptics createEngineWithLocality:where == 1 ? GCHapticsLocalityHandles
+                                                                     : where == 2 ? GCHapticsLocalityLeftHandle
+                                                                                  : GCHapticsLocalityDefault];
                 g_knock_pad = pad;
                 if (!g_knock_engine) {
                     printf("[knock] no haptics engine\n");
@@ -112,7 +122,7 @@ void platform_crash_haptic(float strength) {
                 g_knock_ok = false;   // a new engine next time
                 return;
             }
-            printf("[knock] %.2f\n", s);   // (diagnosis, temporary)
+            printf("[knock] %.2f (engine %d)\n", s, where);   // (diagnosis, temporary)
         }
     }
 }

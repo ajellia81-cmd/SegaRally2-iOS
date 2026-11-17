@@ -47,6 +47,9 @@ public:
     std::vector<PadKey> take_keys();
     // Vibration, 0..1 per motor, scaled by the settings' strength
     void rumble(int i, float low, float high, int ms);
+    // (diagnosis, iOS port: the vibration test) a button as it is now, and the first pad connected (-1: none)
+    bool button_down(int i, int b) const;
+    int first() const;
 
 private:
     struct Slot {

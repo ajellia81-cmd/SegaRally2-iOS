@@ -13,13 +13,16 @@
 #include "wheel.h"
 #ifndef _WIN32
 #include "touch_controls.h"
+#ifdef __APPLE__
+#include <SDL3/SDL_gamepad.h>   // (the vibration test)
+#endif
 #endif
 
 bool g_menu_open = false;   // a menu has the controls
 Gamepads g_pads;
 int g_pad_rumble = 2;
 #ifdef __APPLE__
-void platform_crash_haptic(float strength);   // platform/ios_lifecycle.mm
+void platform_crash_haptic(float strength, int where = 0);   // platform/ios_lifecycle.mm (where: 0 default, 1 handles, 2 left handle)
 #endif
 
 static int adc(float v) { return std::clamp(int(std::lround(v)), 0, 255); }
@@ -85,6 +88,48 @@ void poll_keyboard(HWND hwnd) {
 bool poll_gamepads(HWND hwnd) {
     bool focused = GetForegroundWindow() == hwnd;
     g_pads.poll(g_pad_rumble, focused, g_menu_open);
+#ifdef __APPLE__
+    {   // (diagnosis, temporary) The vibration test: the left stick pressed in
+        // starts nine steps, 1.5 s apart, each logged: 1 left handle (SDL low),
+        // 2 right handle (SDL high), 3 both, 4 both pulsing, 5 both at 0.4,
+        // 6-8 a knock on our own engine (default, both handles, left handle),
+        // 9 SDL both again
+        static double test_at = -1;
+        static int test_step = 0;
+        static bool was = false;
+        int p = g_pads.first();
+        bool down = p >= 0 && g_pads.button_down(p, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+        double now = qpc_seconds();
+        if (down && !was && test_at < 0) {
+            test_at = now;
+            test_step = 0;
+            printf("[vibtest] start\n");
+        }
+        was = down;
+        if (test_at >= 0 && p >= 0) {
+            double t = now - test_at;
+            int step = int(t / 1.5) + 1;
+            double in = t - (step - 1) * 1.5;
+            if (step > 9) {
+                test_at = -1;
+                printf("[vibtest] end\n");
+            } else {
+                if (step != test_step) {
+                    test_step = step;
+                    printf("[vibtest] step %d\n", step);
+                    if (step >= 6 && step <= 8) platform_crash_haptic(1.0f, step - 6);
+                }
+                if (in < 0.6 && (step <= 5 || step == 9)) {
+                    float lo = step == 2 ? 0.0f : 1.0f, hi = step == 1 ? 0.0f : 1.0f;
+                    if (step == 4 && int(in / 0.06) % 2) lo = hi = 0.2f;
+                    if (step == 5) lo = hi = 0.4f;
+                    g_pads.rumble(p, lo, hi, 60);
+                }
+            }
+            if (test_at >= 0) return false;   // (nothing else rumbles meanwhile)
+        }
+    }
+#endif
     if (!focused || g_menu_open || !g_auto.events.empty()) return false;
     Inputs& in = g_inputs;
     auto keyboard_steer = [&] { return (float(in.steer) - 128.0f) / 127.0f; };
