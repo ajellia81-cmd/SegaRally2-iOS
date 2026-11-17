@@ -21,6 +21,7 @@ layout(set = 0, binding = 9) uniform sampler2D sky_coords;   // backdrop replace
 layout(set = 0, binding = 12) uniform sampler2D diffusion;   // the picture behind the HUD, blurred (bloom.frag)
 layout(set = 0, binding = 11) uniform sampler2D exposure_log;   // 1x1: average log brightness of the 3D image, eased
 layout(set = 0, binding = 13) uniform sampler2D bloom_tight;   // the same glow, blurred only a little (halos)
+layout(set = 0, binding = 14) uniform sampler2D dust_half;   // iOS: the dust (DUST: ENHANCED) at half resolution, premultiplied
 
 layout(push_constant) uniform Compose {
     vec2 scale;       // image size relative to the window
@@ -37,7 +38,7 @@ layout(push_constant) uniform Compose {
                       // 3 = scene mode: the picture behind the HUD (backdrop and 3D), for the diffusion;
                       // 4 = a black picture
     vec4 effects;     // x: bloom strength (0 = off); y: colour saturation (1 = original);
-                      // z: gamma (1 = original, higher = brighter mid-tones)
+                      // z: gamma (1 = original, higher = brighter mid-tones); w: 1 = dust_half drawn
     vec4 motion;      // x: interpolation of the back layers: the fraction of each row's scroll
                       // since the previous game frame (in sky_coords) to draw them back by;
                       // w: where the race HUD's bands split (R3DRenderer::compose_push)
@@ -321,6 +322,13 @@ void main() {
         // With DLAA the alpha comes from its own anti-aliasing pass, steady
         // from frame to frame like the colour
         s.a = texture(scene3d_alpha, p).r;
+        // The dust, drawn at half resolution after the 3D pass (effects.w, iOS
+        // port, r3d_renderer.cpp record_world): over the 3D image, as it was
+        // blended in it
+        if (pc.effects.w > 0.5) {
+            vec4 d = texture(dust_half, p);
+            s = vec4(d.rgb + s.rgb * (1.0 - d.a), d.a + s.a * (1.0 - d.a));
+        }
         // Sharpening (SHARPEN), contrast adaptive like AMD's CAS: detail comes
         // back after the anti-aliasing and the diffusion, flat areas and
         // strong edges are left alone (no halos)

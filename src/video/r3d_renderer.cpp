@@ -287,8 +287,9 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     li.pNext = nullptr;
     // 5: high-resolution text atlas (only bound when there is one), 6: text cells,
     // 7: alpha of the 3D image (in red), 8: bloom, 9: backdrop replacement coordinates,
-    // 11: exposure, 12: diffusion, 13: tight bloom (no 10)
-    VkDescriptorSetLayoutBinding cb[13];
+    // 11: exposure, 12: diffusion, 13: tight bloom (no 10), 14: the dust at half
+    // resolution (iOS port)
+    VkDescriptorSetLayoutBinding cb[14];
     for (uint32_t i = 0; i < 3; i++)
         cb[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
     cb[3] = {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Pack2D::MAX_SLOTS, VK_SHADER_STAGE_FRAGMENT_BIT};
@@ -301,11 +302,12 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     cb[10] = {11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
     cb[11] = {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
     cb[12] = {13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
-    VkDescriptorBindingFlags cflags[13] = {0, 0, 0, bflags[1], 0, bflags[1], 0, 0, 0, 0, 0, 0, 0};
-    bfi.bindingCount = 13;
+    cb[13] = {14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
+    VkDescriptorBindingFlags cflags[14] = {0, 0, 0, bflags[1], 0, bflags[1], 0, 0, 0, 0, 0, 0, 0, 0};
+    bfi.bindingCount = 14;
     bfi.pBindingFlags = cflags;
     li.pNext = &bfi;
-    li.bindingCount = 13;
+    li.bindingCount = 14;
     li.pBindings = cb;
     vkCreateDescriptorSetLayout(dev_, &li, nullptr, &compose_set_layout_);
     li.pNext = nullptr;
@@ -592,6 +594,14 @@ bool R3DRenderer::create_pipelines() {
     translucent.depth_write = false;
     translucent.blend = true;
     translucent_ = make_pipeline(translucent);
+    {   // The dust at half resolution (iOS port): one image, no depth (r3d.frag
+        // tests it against the world's depth itself)
+        PipelineDesc half = translucent;
+        half.depth = false;
+        half.samples = VK_SAMPLE_COUNT_1_BIT;
+        half.motion = half.glow = false;
+        dust_half_ = make_pipeline(half);
+    }
     PipelineDesc trans_depth = world;
     trans_depth.depth_only = true;
     trans_depth_ = make_pipeline(trans_depth);
@@ -679,7 +689,7 @@ uint32_t R3DRenderer::feature_mask() const {
 
 void R3DRenderer::destroy_pipelines() {
     for (VkPipeline* p : {&opaque_, &translucent_, &blob_, &blob_depth_, &trans_depth_, &shadow_, &compose_measure_, &compose_,
-                          &bloom_, &compose_glow_, &ao_pass_, &ao_apply_, &ao_apply_glow_, &early_z_, &opaque_ez_})
+                          &bloom_, &compose_glow_, &ao_pass_, &ao_apply_, &ao_apply_glow_, &early_z_, &opaque_ez_, &dust_half_})
         if (*p) vkDestroyPipeline(dev_, *p, nullptr), *p = VK_NULL_HANDLE;
 }
 
@@ -703,7 +713,7 @@ void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t
     destroy_image(motion_);
     destroy_image(dlaa_out_);
     destroy_image(dlaa_alpha_);
-    for (Image* img : {&glow_, &glow_ms_, &bloom_a_, &bloom_b_, &bloom_c_, &depth_resolved_, &ao_, &diff_a_, &diff_b_})
+    for (Image* img : {&glow_, &glow_ms_, &bloom_a_, &bloom_b_, &bloom_c_, &depth_resolved_, &ao_, &diff_a_, &diff_b_, &dust_half_img_})
         destroy_image(*img);
     create_image(color_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
@@ -810,6 +820,19 @@ void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t
             dw[i].pImageInfo = &src[i];
         }
         vkUpdateDescriptorSets(dev_, 3, dw, 0, nullptr);
+    }
+    // The dust (DUST: ENHANCED) at half resolution, laid over the 3D image by
+    // the composition (iOS port, record_world)
+    create_image(dust_half_img_, (w + 1) / 2, (h + 1) / 2, VK_FORMAT_R16G16B16A16_SFLOAT, target, VK_IMAGE_ASPECT_COLOR_BIT);
+    {
+        VkDescriptorImageInfo src{linear_, dust_half_img_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet dw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        dw.dstSet = compose_set_;
+        dw.dstBinding = 14;
+        dw.descriptorCount = 1;
+        dw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        dw.pImageInfo = &src;
+        vkUpdateDescriptorSets(dev_, 1, &dw, 0, nullptr);
     }
     composed_view_ = VK_NULL_HANDLE;
     if (dlaa_.ready()) bind_scene_image(dlaa_out_.view, dlaa_alpha_.view);
@@ -1749,6 +1772,29 @@ void R3DRenderer::record_world(const Frame& f) {
     const bool sr2_on = sr2_hud_on();
     // 3D pass
     bool msaa = samples_ != VK_SAMPLE_COUNT_1_BIT;
+    // The dust (DUST: ENHANCED, its own viewport at the end of the world's
+    // priority, r3d_dust.cpp) drawn at half resolution after the 3D pass, and
+    // laid over its image by the composition (iOS port: in another car's cloud
+    // a dozen puffs one over another, each over much of the picture, took the
+    // GPU from 5.7 to 11.5 ms; a quarter of the pixels)
+    auto is_dust = [&](const R3DViewport& v) {
+        return !v.world && v.trans_count && v.opaque_count == 0 && v.trans_first < scene_->vertices.size() &&
+               (scene_->vertices[v.trans_first].flags & R3D_DUST);
+    };
+    dust_half_ready_ = false;
+    bool dust_half = false;
+#ifdef __APPLE__
+    {
+        static const bool full = getenv("SR2_DUST_FULL") != nullptr;   // (debugging aid: as before)
+        if (!msaa && !full && dust_half_ && scene_ && f.vcount && !dlaa_.ready())
+            for (const R3DViewport& v : scene_->viewports) dust_half |= is_dust(v);
+    }
+#endif
+    bool have_dust = false;
+    VkViewport dust_vp{};
+    VkRect2D dust_sc{};
+    ViewportPush dust_pc{};
+    uint32_t dust_first = 0, dust_count = 0;
     color_.layout = VK_IMAGE_LAYOUT_UNDEFINED;   // contents are cleared every frame
     color_ms_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
     depth_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1800,7 +1846,7 @@ void R3DRenderer::record_world(const Frame& f) {
     da.imageView = depth_.view;
     da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    da.storeOp = motion_pass_ || split ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    da.storeOp = motion_pass_ || split || dust_half ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
     if (split && msaa) {   // sample 0 of the depth, readable without multisampling
         transition(cmd, depth_resolved_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
         da.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
@@ -1833,6 +1879,28 @@ void R3DRenderer::record_world(const Frame& f) {
         float sx = float(out_w) / lay.view_w, sy = float(out_h) / SCREEN_H;
         float widen = lay.view_w / SCREEN_W;
         const auto& vps = scene_->viewports;
+        // Where each viewport goes on the screen
+        auto place = [&](const R3DViewport& v, bool& full, VkViewport& viewport, VkRect2D& sc) {
+            full = v.x <= 0.5f && v.w >= SCREEN_W - 0.5f;
+            float vx = full ? 0.0f : v.x + lay.game_x0, vw = full ? lay.view_w : v.w;
+            // A small viewport of the HUD (the rev counter's needle)
+            // goes with its corner of the 2D HUD
+            if (!full && sr2_on) {
+                const int* s = sr2_split_;
+                bool top = v.y + v.h <= SR2_HUD_TOP_ROWS, bottom = v.y >= SR2_HUD_BOTTOM_ROW - 8;
+                bool top_left = v.y + v.h <= SR2_HUD_LEFT_ROWS;
+                // (as far as the 2D HUD moves: up to the safe area's inset, iOS port)
+                float moved = std::max(0.0f, lay.game_x0 - hud_inset_);
+                if ((top_left && v.x + v.w <= s[0]) || (bottom && s[2] > 0 && v.x + v.w <= s[2])) vx = v.x + lay.game_x0 - moved;
+                else if ((top && s[1] > 0 && v.x >= s[1]) || (bottom && s[2] > 0 && v.x >= s[2]))
+                    vx = v.x + lay.game_x0 + moved;
+            }
+            viewport = VkViewport{vx * sx + jitter_x, v.y * sy + jitter_y, vw * sx, v.h * sy, 0.0f, 1.0f};
+            int32_t x0 = std::max(0, int32_t(vx * sx)), y0 = std::max(0, int32_t(v.y * sy));
+            sc = VkRect2D{{x0, y0},
+                        {std::min(out_w - uint32_t(x0), uint32_t(vw * sx + 0.5f)),
+                         std::min(out_h - uint32_t(y0), uint32_t(v.h * sy + 0.5f))}};
+        };
         size_t i = 0;
         bool first_priority = true;
         while (i < vps.size()) {
@@ -1841,8 +1909,18 @@ void R3DRenderer::record_world(const Frame& f) {
             if (!first_priority) {   // each priority starts with a cleared depth buffer
                 VkClearAttachment clr{VK_IMAGE_ASPECT_DEPTH_BIT, 0, {}};
                 clr.clearValue.depthStencil = {0.0f, 0};
-                VkClearRect rect{{{0, 0}, {out_w, out_h}}, 0, 1};
-                vkCmdClearAttachments(cmd, 1, &clr, 1, &rect);
+                std::vector<VkClearRect> rects{{{{0, 0}, {out_w, out_h}}, 0, 1}};
+                if (dust_half) {   // (only where its viewports are: the world's depth stays for the dust)
+                    rects.clear();
+                    for (size_t k = i; k < j; k++) {
+                        bool full;
+                        VkViewport vpt;
+                        VkRect2D r;
+                        place(vps[k], full, vpt, r);
+                        if (r.extent.width && r.extent.height) rects.push_back({r, 0, 1});
+                    }
+                }
+                if (!rects.empty()) vkCmdClearAttachments(cmd, 1, &clr, uint32_t(rects.size()), rects.data());
                 // MoltenVK clears inside a pass by drawing with its own
                 // pipeline, which leaves the 3D set unbound on Metal: what
                 // followed read texture RAM, the texture pack and the
@@ -1902,26 +1980,11 @@ void R3DRenderer::record_world(const Frame& f) {
                     if (!count) continue;
                     // Full-screen viewports are widened (wider horizontal field of
                     // view, same vertical one); smaller ones keep their 4:3 place
-                    bool full = v.x <= 0.5f && v.w >= SCREEN_W - 0.5f;
-                    float vx = full ? 0.0f : v.x + lay.game_x0, vw = full ? lay.view_w : v.w;
-                    // A small viewport of the HUD (the rev counter's needle)
-                    // goes with its corner of the 2D HUD
-                    if (!full && sr2_on) {
-                        const int* s = sr2_split_;
-                        bool top = v.y + v.h <= SR2_HUD_TOP_ROWS, bottom = v.y >= SR2_HUD_BOTTOM_ROW - 8;
-                        bool top_left = v.y + v.h <= SR2_HUD_LEFT_ROWS;
-                        // (as far as the 2D HUD moves: up to the safe area's inset, iOS port)
-                        float moved = std::max(0.0f, lay.game_x0 - hud_inset_);
-                        if ((top_left && v.x + v.w <= s[0]) || (bottom && s[2] > 0 && v.x + v.w <= s[2])) vx = v.x + lay.game_x0 - moved;
-                        else if ((top && s[1] > 0 && v.x >= s[1]) || (bottom && s[2] > 0 && v.x >= s[2]))
-                            vx = v.x + lay.game_x0 + moved;
-                    }
-                    VkViewport viewport{vx * sx + jitter_x, v.y * sy + jitter_y, vw * sx, v.h * sy, 0.0f, 1.0f};
+                    bool full = false;
+                    VkViewport viewport;
+                    VkRect2D sc;
+                    place(v, full, viewport, sc);
                     vkCmdSetViewport(cmd, 0, 1, &viewport);
-                    int32_t x0 = std::max(0, int32_t(vx * sx)), y0 = std::max(0, int32_t(v.y * sy));
-                    VkRect2D sc{{x0, y0},
-                                {std::min(out_w - uint32_t(x0), uint32_t(vw * sx + 0.5f)),
-                                 std::min(out_h - uint32_t(y0), uint32_t(v.h * sy + 0.5f))}};
                     vkCmdSetScissor(cmd, 0, 1, &sc);
                     ViewportPush pc{};
                     memcpy(pc.proj, v.proj, 64);
@@ -2011,6 +2074,12 @@ void R3DRenderer::record_world(const Frame& f) {
                             a = b;
                         }
                     };
+                    if (pass == 1 && dust_half && is_dust(v)) {   // (after the pass, at half resolution)
+                        have_dust = true;
+                        dust_vp = viewport, dust_sc = sc, dust_pc = pc;
+                        dust_first = v.trans_first, dust_count = count;
+                        continue;
+                    }
                     if (pass == 1) {
                         ViewportPush pd = pc;
                         pd.quality[0] = -1000.0f;
@@ -2043,6 +2112,53 @@ void R3DRenderer::record_world(const Frame& f) {
         }
     }
     vkCmdEndRendering(cmd);
+    if (have_dust) {
+        // The depth of everything drawn, readable (r3d.frag tests each puff
+        // against it, softly)
+        transition(cmd, depth_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        depth_resolved_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        transition(cmd, depth_resolved_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        VkImageCopy copy{};
+        copy.srcSubresource = copy.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+        copy.extent = {out_w, out_h, 1};
+        vkCmdCopyImage(cmd, depth_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, depth_resolved_.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        transition(cmd, depth_resolved_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        // The dust alone, premultiplied, over nothing (0, 0, 0, 0)
+        dust_half_img_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        transition(cmd, dust_half_img_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo ha{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        ha.imageView = dust_half_img_.view;
+        ha.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        ha.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        ha.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        ha.clearValue.color = {{0, 0, 0, 0}};
+        VkRenderingInfo hr{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        hr.renderArea = {{0, 0}, {dust_half_img_.w, dust_half_img_.h}};
+        hr.layerCount = 1;
+        hr.colorAttachmentCount = 1;
+        hr.pColorAttachments = &ha;
+        vkCmdBeginRendering(cmd, &hr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dust_half_);
+        VkDeviceSize zero = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vertices_.buffer, &zero);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r3d_layout_, 0, 1, &r3d_set_, 0, nullptr);
+        VkViewport hv = dust_vp;
+        hv.x *= 0.5f, hv.y *= 0.5f, hv.width *= 0.5f, hv.height *= 0.5f;
+        vkCmdSetViewport(cmd, 0, 1, &hv);
+        int32_t x0 = dust_sc.offset.x / 2, y0 = dust_sc.offset.y / 2;
+        int32_t x1 = std::min<int32_t>(int32_t(dust_half_img_.w), (dust_sc.offset.x + int32_t(dust_sc.extent.width) + 1) / 2);
+        int32_t y1 = std::min<int32_t>(int32_t(dust_half_img_.h), (dust_sc.offset.y + int32_t(dust_sc.extent.height) + 1) / 2);
+        VkRect2D hs{{x0, y0}, {uint32_t(std::max(0, x1 - x0)), uint32_t(std::max(0, y1 - y0))}};
+        vkCmdSetScissor(cmd, 0, 1, &hs);
+        dust_pc.quality[2] = -1.0f;   // half resolution: r3d.frag tests the depth itself
+        vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                           sizeof(dust_pc), &dust_pc);
+        vkCmdDraw(cmd, dust_count, 1, dust_first, 0);
+        vkCmdEndRendering(cmd);
+        transition(cmd, dust_half_img_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        dust_half_ready_ = true;
+    }
     transition(cmd, color_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     transition(cmd, glow_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
@@ -2203,7 +2319,7 @@ R3DRenderer::ComposePush R3DRenderer::compose_push(const Frame& f) const {
                    .hud = {sr2_on ? std::max(0.0f, lay.game_x0 - hud_inset_) : 0.0f, hdr_ ? 1.0f : 0.0f,
                            overlay_brightness_, extend_back ? 1.0f : 0.0f},
                    .sky = {float(front_edges_plain_), 0, 0, sr2_between_screens() ? 4.0f : 0.0f},
-                   .effects = {bloom_strength_, saturation_, gamma_, 0},
+                   .effects = {bloom_strength_, saturation_, gamma_, dust_half_ready_ ? 1.0f : 0.0f},
                    // w: the race HUD's splits, in 2-pixel steps, one per byte (top left, top right, bottom)
                    .motion = {back_shift_, 0, 0,
                               sr2_on ? float(sr2_split_[0] / 2 | (sr2_split_[1] / 2) << 8 | (sr2_split_[2] / 2) << 16)
@@ -2571,13 +2687,13 @@ void R3DRenderer::gpu_time_mark(VkCommandBuffer cmd, uint32_t index) {
 void R3DRenderer::shutdown() {
     if (!dev_) return;
     vkDeviceWaitIdle(dev_);
-    for (auto p : {opaque_, translucent_, blob_, blob_depth_, trans_depth_, shadow_, compose_measure_, compose_, bloom_, compose_glow_, ao_pass_, ao_apply_, ao_apply_glow_, early_z_, opaque_ez_})
+    for (auto p : {opaque_, translucent_, blob_, blob_depth_, trans_depth_, shadow_, compose_measure_, compose_, bloom_, compose_glow_, ao_pass_, ao_apply_, ao_apply_glow_, early_z_, opaque_ez_, dust_half_})
         if (p) vkDestroyPipeline(dev_, p, nullptr);
     dlaa_.shutdown();
     rt_.shutdown();
     if (gpu_times_) vkDestroyQueryPool(dev_, gpu_times_, nullptr);
     for (Image* img : {&texture_ram_, &back_, &front_, &text_cells_, &sky_coords_, &color_, &color_ms_, &depth_, &motion_, &dlaa_out_, &dlaa_alpha_,
-                        &glow_, &glow_ms_, &bloom_a_, &bloom_b_, &bloom_c_, &depth_resolved_, &ao_, &shadow_map_, &exposure_, &diff_a_, &diff_b_})
+                        &glow_, &glow_ms_, &bloom_a_, &bloom_b_, &bloom_c_, &depth_resolved_, &ao_, &shadow_map_, &exposure_, &diff_a_, &diff_b_, &dust_half_img_})
         destroy_image(*img);
     for (Image& img : replacements_) destroy_image(img);
     for (auto& [slot, img] : overlay_images_) destroy_image(img);

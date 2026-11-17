@@ -7,6 +7,8 @@
 
 Inputs g_inputs;
 std::atomic<float> g_ffb_shake{0.0f};
+std::atomic<uint32_t> g_crash_knocks{0};
+std::atomic<float> g_crash_knock_strength{0.0f};
 
 static double now_seconds() {
     using namespace std::chrono;

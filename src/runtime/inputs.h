@@ -62,6 +62,9 @@ extern Inputs g_inputs;
 // The shakes of the wheel's force feedback since the pads last took them
 // (0..1; runtime.cpp, from the drive board's motors)
 extern std::atomic<float> g_ffb_shake;
+// iOS port: each crash sound heard (runtime.cpp) and the strongest since the last one taken (app_input.cpp)
+extern std::atomic<uint32_t> g_crash_knocks;
+extern std::atomic<float> g_crash_knock_strength;
 
 // A pad's BACK and START: the coin / the start button held for 0.1 s. Driven
 // by the clock, so whoever polls the controls (the window at the monitor's

@@ -344,6 +344,9 @@ private:
     VkPipeline early_z_ = VK_NULL_HANDLE;   // iOS: the solid surfaces' depth first
     VkPipeline opaque_ez_ = VK_NULL_HANDLE;  // iOS: the opaque pass after it (no depth writes: tested early)
     VkPipeline trans_depth_ = VK_NULL_HANDLE;   // nearest translucent surface, depth only (spec 7.2)
+    VkPipeline dust_half_ = VK_NULL_HANDLE;     // iOS: the dust (DUST: ENHANCED) drawn at half resolution
+    Image dust_half_img_;                       // ... into this, laid over the 3D image by the composition
+    bool dust_half_ready_ = false;              // ... this frame
     VkDescriptorSetLayout bloom_set_layout_ = VK_NULL_HANDLE;
     VkDescriptorSet bloom_sets_[4] = {};   // sources: glow_, bloom_a_, bloom_b_, bloom_c_
     VkPipelineLayout bloom_layout_ = VK_NULL_HANDLE;

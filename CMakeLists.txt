@@ -245,6 +245,7 @@ else()
         platform/touch_controls.cpp platform/platform_files.cpp)
     if(APPLE)
         list(APPEND SR2_PLATFORM_SOURCES platform/ios_lifecycle.mm)
+        set_source_files_properties(platform/ios_lifecycle.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     endif()
 endif()
 if(GEN_SOURCES STREQUAL "")
@@ -340,7 +341,8 @@ elseif(APPLE)
     # app's Frameworks/ (platform/ios/build.sh puts it there), through volk
     target_compile_definitions(SegaRally2 PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_METAL_EXT)
     target_link_libraries(SegaRally2 PRIVATE SDL3::SDL3-static
-        "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework UIKit")
+        "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework UIKit"
+        "-framework CoreHaptics" "-framework GameController")
     set_target_properties(SegaRally2 PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/platform/ios/Info.plist.in
         XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO)

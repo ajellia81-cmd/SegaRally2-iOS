@@ -544,7 +544,7 @@ void main() {
         bool puff = (tex & 3u) == 0u;
         {   // how big the puff is on the screen (its uv spans -1..1), taken before
             // any pixel of the 2x2 block is discarded
-            float w = max(fwidth(uv.x), fwidth(uv.y));
+            float w = max(fwidth(uv.x), fwidth(uv.y)) * (vp.quality.z < 0.0 ? 0.5 : 1.0);   // (half resolution: as at full)
             g_dust_octaves = w < 0.004 ? 1 : w < 0.012 ? 2 : 3;
         }
         // Not in the eye's face: the cloud the camera drives through thins out before it
@@ -553,7 +553,15 @@ void main() {
         // went one over another before it: 5 ms more on the phone)
         float fade = puff ? (FEATURES != ~0u ? smoothstep(1.2, 3.5, -view_pos.z) : smoothstep(0.3, 1.6, -view_pos.z))
                           : smoothstep(0.8, 2.2, -view_pos.z);
-        if (FEAT_SOFT && atm.soft.x > 0.0) {   // soft where it meets the road and what stands behind, over its size
+        if (vp.quality.z < 0.0) {
+            // At half resolution, after the 3D pass (iOS port, r3d_renderer.cpp
+            // record_world): no depth buffer, the depth of all that was drawn
+            // read here, a little softly (a hard edge, upscaled, would step)
+            ivec2 at = min(ivec2(gl_FragCoord.xy * 2.0), textureSize(scene_depth, 0) - 1);
+            float d = texelFetch(scene_depth, at, 0).r;
+            float soft = puff ? clamp(params.z * 0.25, 0.08, 0.4) : 0.05;
+            if (d > 0.0) fade *= clamp((view_pos.z + 1e-3 / d) / soft, 0.0, 1.0);
+        } else if (FEAT_SOFT && atm.soft.x > 0.0) {   // soft where it meets the road and what stands behind, over its size
             float d = texelFetch(scene_depth, ivec2(gl_FragCoord.xy), 0).r;
             float soft = puff ? clamp(params.z * 0.6, 0.15, 1.0) : 0.05;
             if (d > 0.0) fade *= clamp((view_pos.z + 1e-3 / d) / soft, 0.0, 1.0);

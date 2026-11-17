@@ -18,6 +18,9 @@
 bool g_menu_open = false;   // a menu has the controls
 Gamepads g_pads;
 int g_pad_rumble = 2;
+#ifdef __APPLE__
+void platform_crash_haptic(float strength);   // platform/ios_lifecycle.mm
+#endif
 
 static int adc(float v) { return std::clamp(int(std::lround(v)), 0, 255); }
 
@@ -113,6 +116,24 @@ bool poll_gamepads(HWND hwnd) {
             if (!no_ffb) {   // the wheel's force feedback (runtime.cpp ffb_frame) as rumble
                 float sh = std::min(1.0f, g_ffb_shake.exchange(0.0f) * 2.5f);
                 if (sh > 0.08f) g_pads.rumble(i, sh, 0.6f * sh, 60);
+#ifdef __APPLE__
+                {   // A crash sound: a knock of its own in the controller (platform/ios_lifecycle.mm),
+                    // at most one every 0.12 s (a slow knock is several sounds at once)
+                    static uint32_t seen = g_crash_knocks.load();
+                    static double last = -1;
+                    uint32_t knocks = g_crash_knocks.load();
+                    if (knocks != seen) {
+                        seen = knocks;
+                        float st = g_crash_knock_strength.exchange(0.0f);
+                        double now = qpc_seconds();
+                        static const float level[4] = {0.0f, 0.45f, 0.75f, 1.0f};
+                        if (now - last > 0.12 && g_pad_rumble > 0) {
+                            last = now;
+                            platform_crash_haptic(st * level[std::clamp(g_pad_rumble, 0, 3)]);
+                        }
+                    }
+                }
+#endif
 #ifdef __APPLE__
                 {   // (diagnosis, temporary: the strong rumbles sent, at most 4 a second)
                     static double logged = 0;

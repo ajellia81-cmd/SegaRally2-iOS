@@ -1262,10 +1262,14 @@ void midi_note(uint8_t b) {
     // not sent): a shorter rumble, held a little less
     if (g_midi_msg[0] == 0xA0 && g_midi_msg[1] == 0x15 && int32_t(rd32(SR2_SEQUENCE)) == 1) {
         if (g_crash_rumble.load() < 1.25f) g_crash_rumble = 1.25f;
+        if (g_crash_knock_strength.load() < 0.8f) g_crash_knock_strength = 0.8f;
+        g_crash_knocks++;
         printf("[crash] frame %llu (slow knock %02X)\n", (unsigned long long)g_frame, g_midi_msg[2]);
     }
     if (g_midi_msg[0] == 0xA0 && g_midi_msg[1] == 0x14 && int32_t(rd32(SR2_SEQUENCE)) == 1) {
         g_crash_rumble = 1.6f;   // (above 1: held at full for about a quarter of a second, then fading)
+        g_crash_knock_strength = 1.0f;
+        g_crash_knocks++;
         printf("[crash] frame %llu (sound %02X)\n", (unsigned long long)g_frame, g_midi_msg[2]);
     }
 }
