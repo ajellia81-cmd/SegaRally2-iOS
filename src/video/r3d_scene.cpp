@@ -159,6 +159,29 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
         for (uint32_t i = v.trans_first; i < v.trans_first + v.trans_count; i++) out.vertices[i].flags |= R3D_CAR;
     }
     settle_player_car(out);
+    {   // The cars' dark patches (their shadows) are copies of one model, and
+        // the game reorders them: a patch paired with another car's in the
+        // previous frame was drawn, between game frames, on its way from
+        // there, and the player's shadow went out for a frame now and then
+        // (Snowy's start, iOS port). A patch that moved more than 1.5 units
+        // in view space since the last frame is drawn where it is
+        size_t cut = 0;
+        for (R3DVertex& x : out.vertices) {
+            if ((x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) != (R3D_WORLD | R3D_LUMINOUS) ||
+                (x.color & 0x00FFFFFFu) != 0 || (x.color >> 24) >= 255)
+                continue;
+            float d2 = 0;
+            for (int k = 0; k < 3; k++) d2 += (x.pos[k] - x.prev[k]) * (x.pos[k] - x.prev[k]);
+            if (d2 > 1.5f * 1.5f) {
+                for (int k = 0; k < 3; k++) x.prev[k] = x.pos[k];
+                cut++;
+            }
+        }
+#ifdef __APPLE__
+        if (cut) printf("[shadow] frame %llu: %zu patch points drawn where they are (paired far away)\n",
+                        (unsigned long long)out.frame, cut);
+#endif
+    }
     static const float shine = getenv("SR2_SHINE") ? float(atof(getenv("SR2_SHINE"))) : 0.0f;   // the cars' painted shine layer, F of its strength: left out (it veiled the paint, a grey box over the roof); SR2_SHINE=F brings it back
     if (shine != 1.0f)
         for (R3DVertex& x : out.vertices)
