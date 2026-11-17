@@ -415,14 +415,22 @@ vec2 spotlight() {
 // wheels. tex: kind in bits 0-1, a seed in bits 8-23; params.x: age 0..1;
 // params.z: a puff's radius, a clod's length over its width. The normal is
 // the direction to the eye (they face it)
+// (octaves: 3 for a puff of a few hundred pixels or less; a puff that fills
+// much of the picture, about the camera in another car's cloud, needs fewer:
+// its fine billows are larger than the eye can follow there, and a dozen such
+// puffs one over another, each worked out in full, halved the frame rate on
+// the phone; iOS port)
+int g_dust_octaves = 3;
 float dust_fbm(vec3 p) {
-    float s = 0.0, a = 0.5;
+    float s = 0.0, a = 0.5, total = 0.0;
     for (int i = 0; i < 3; i++) {
+        if (i >= g_dust_octaves) break;
         s += a * atm_noise(p);
+        total += a;
         p = p * 2.07 + vec3(1.7, 9.2, 3.1);
         a *= 0.5;
     }
-    return s / 0.875;
+    return s / total;
 }
 
 vec4 dust() {
@@ -534,6 +542,11 @@ void main() {
     if ((flags & DUST) != 0u) {   // only in the translucent pass
         if (vp.quality.x <= -1000.0 || vp.quality.x > 0.0 || vp.fog_color.w < 0.0) discard;
         bool puff = (tex & 3u) == 0u;
+        {   // how big the puff is on the screen (its uv spans -1..1), taken before
+            // any pixel of the 2x2 block is discarded
+            float w = max(fwidth(uv.x), fwidth(uv.y));
+            g_dust_octaves = w < 0.004 ? 1 : w < 0.012 ? 2 : 3;
+        }
         // Not in the eye's face: the cloud the camera drives through thins out before it
         float fade = puff ? smoothstep(0.3, 1.6, -view_pos.z) : smoothstep(0.8, 2.2, -view_pos.z);
         if (FEAT_SOFT && atm.soft.x > 0.0) {   // soft where it meets the road and what stands behind, over its size

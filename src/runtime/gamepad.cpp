@@ -147,7 +147,10 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
                 float t = std::min((m - STICK_DEAD) / (0.92f - STICK_DEAD), 1.0f);
                 float c = 0.2f * t + 0.8f * t * t * t;
                 float lx = sx / m * c, ly = sy / m * c;
-                if (std::max(std::fabs(lx), std::fabs(ly)) > 0.35f)
+                // (let go only below 0.2: a stick resting near the edge went
+                // in and out of 0.35 and gave a second press, an option
+                // turned on went straight back off)
+                if (std::max(std::fabs(lx), std::fabs(ly)) > (s.dir >= 0 ? 0.2f : 0.35f))
                     dir = std::fabs(ly) >= std::fabs(lx) ? (ly < 0 ? 0 : 1) : (lx < 0 ? 2 : 3);
             }
             if (dir != s.dir || (dir >= 0 && now >= s.next_repeat)) {
