@@ -147,16 +147,27 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
                 float t = std::min((m - STICK_DEAD) / (0.92f - STICK_DEAD), 1.0f);
                 float c = 0.2f * t + 0.8f * t * t * t;
                 float lx = sx / m * c, ly = sy / m * c;
-                // (let go only below 0.2: a stick resting near the edge went
-                // in and out of 0.35 and gave a second press, an option
-                // turned on went straight back off)
-                if (std::max(std::fabs(lx), std::fabs(ly)) > (s.dir >= 0 ? 0.2f : 0.35f))
+                if (std::max(std::fabs(lx), std::fabs(ly)) > 0.35f)
                     dir = std::fabs(ly) >= std::fabs(lx) ? (ly < 0 ? 0 : 1) : (lx < 0 ? 2 : 3);
             }
+#ifdef __APPLE__
+            if (menu) {   // (diagnosis, temporary: the d-pad and the stick as read in the menus, on each change)
+                static uint32_t last_raw[MAX] = {};
+                uint32_t raw = (down(SDL_GAMEPAD_BUTTON_DPAD_UP) ? 1u : 0u) | (down(SDL_GAMEPAD_BUTTON_DPAD_DOWN) ? 2u : 0u) |
+                               (down(SDL_GAMEPAD_BUTTON_DPAD_LEFT) ? 4u : 0u) | (down(SDL_GAMEPAD_BUTTON_DPAD_RIGHT) ? 8u : 0u);
+                if (raw != last_raw[i] || dir != s.dir)
+                    printf("[menu pad] %.3f s  pad %d  d-pad %s%s%s%s  stick %.2f %.2f  dir %d -> %d\n", now, i,
+                           raw & 1 ? "U" : "-", raw & 2 ? "D" : "-", raw & 4 ? "L" : "-", raw & 8 ? "R" : "-", sx, sy, s.dir, dir);
+                last_raw[i] = raw;
+            }
+#endif
             if (dir != s.dir || (dir >= 0 && now >= s.next_repeat)) {
                 if (dir >= 0) {
                     static const PadKey DIRS[4] = {PadKey::Up, PadKey::Down, PadKey::Left, PadKey::Right};
                     keys_.push_back(DIRS[dir]);
+#ifdef __APPLE__
+                    if (menu) printf("[menu pad] %.3f s  pad %d  key %c%s\n", now, i, "UDLR"[dir], dir == s.dir ? " (repeat)" : "");
+#endif
                     s.next_repeat = now + (dir != s.dir ? 0.4 : 0.11);
                 }
                 s.dir = dir;
