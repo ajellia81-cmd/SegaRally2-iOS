@@ -2314,6 +2314,12 @@ R3DRenderer::ComposePush R3DRenderer::compose_push(const Frame& f) const {
     float W = float(extent.width), H = float(extent.height);
     bool extend_back = back_layer_extended();
     const bool sr2_on = sr2_hud_on();
+    // The foreground's plain edge columns go on beside the 4:3 picture only
+    // with a game world behind (a race and its fades): the screens without one
+    // (the game over's white, like the title and the results) stay 4:3 (iOS port)
+    const bool world = scene_ && std::any_of(scene_->viewports.begin(), scene_->viewports.end(),
+                                             [](const R3DViewport& v) { return v.world; });
+    const int edges = world ? front_edges_plain_ : 0;
     ComposePush pc{.scale = {lay.view_w * lay.scale / W, SCREEN_H * lay.scale / H},
                    .offset = {lay.ox / W, lay.oy / H},
                    .sharpen = {sharpen_, 0},
@@ -2322,7 +2328,7 @@ R3DRenderer::ComposePush R3DRenderer::compose_push(const Frame& f) const {
                    .filter2d = {smooth_2d_ ? 1.0f : 0.0f, lay.scale},
                    .hud = {sr2_on ? std::max(0.0f, lay.game_x0 - hud_inset_) : 0.0f, hdr_ ? 1.0f : 0.0f,
                            overlay_brightness_, extend_back ? 1.0f : 0.0f},
-                   .sky = {float(front_edges_plain_), 0, 0, sr2_between_screens() ? 4.0f : 0.0f},
+                   .sky = {float(edges), 0, 0, sr2_between_screens() ? 4.0f : 0.0f},
                    .effects = {bloom_strength_, saturation_, gamma_, dust_half_ready_ ? 1.0f : 0.0f},
                    // w: the race HUD's splits, in 2-pixel steps, one per byte (top left, top right, bottom)
                    .motion = {back_shift_, 0, 0,
