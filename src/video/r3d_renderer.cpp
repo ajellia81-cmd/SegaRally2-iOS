@@ -1865,6 +1865,21 @@ void R3DRenderer::record_world(const Frame& f) {
     ri.pColorAttachments = cas;
     ri.pDepthAttachment = &da;
     vkCmdBeginRendering(cmd, &ri);
+    // The depth for the dust at half resolution (record_world's end), taken
+    // with no rendering in progress
+    bool depth_taken = false;
+    auto take_depth = [&] {
+        transition(cmd, depth_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        depth_resolved_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        transition(cmd, depth_resolved_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        VkImageCopy copy{};
+        copy.srcSubresource = copy.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+        copy.extent = {out_w, out_h, 1};
+        vkCmdCopyImage(cmd, depth_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, depth_resolved_.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        transition(cmd, depth_resolved_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        depth_taken = true;
+    };
 
 #ifdef __APPLE__
     {   // (measuring run, iOS port: the early depth with the alpha-tested
@@ -1914,14 +1929,42 @@ void R3DRenderer::record_world(const Frame& f) {
                 VkClearAttachment clr{VK_IMAGE_ASPECT_DEPTH_BIT, 0, {}};
                 clr.clearValue.depthStencil = {0.0f, 0};
                 std::vector<VkClearRect> rects{{{{0, 0}, {out_w, out_h}}, 0, 1}};
-                if (dust_half) {   // (only where its viewports are: the world's depth stays for the dust)
+                if (dust_half && !depth_taken) {   // (only where its viewports are: the world's depth stays for the dust)
                     rects.clear();
+                    uint64_t area = 0;
                     for (size_t k = i; k < j; k++) {
                         bool full;
                         VkViewport vpt;
                         VkRect2D r;
                         place(vps[k], full, vpt, r);
                         if (r.extent.width && r.extent.height) rects.push_back({r, 0, 1});
+                        if (vps[k].opaque_count + vps[k].trans_count) area += uint64_t(r.extent.width) * r.extent.height;
+                    }
+                    // A later priority over much of the screen (the start's
+                    // 3, 2, 1 and the like) would clear the world's depth there:
+                    // the dust behind a wall came through it whole. The depth
+                    // is taken before it then, the pass going on after
+                    if (have_dust && area * 4 > uint64_t(out_w) * out_h) {
+                        static double logged = -10;   // (diagnosis, temporary)
+                        double t = double(GetTickCount64()) / 1000.0;
+                        if (t - logged > 5) {
+                            logged = t;
+                            printf("[dust] depth taken before priority %d (%zu viewports over %.0f%% of the screen)\n",
+                                   vps[i].priority, j - i, 100.0 * double(area) / (double(out_w) * out_h));
+                        }
+                        vkCmdEndRendering(cmd);
+                        take_depth();
+                        transition(cmd, depth_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+                        VkRenderingAttachmentInfo again[3] = {cas[0], cas[1], cas[2]};
+                        VkRenderingAttachmentInfo dagain = da;
+                        for (auto& a : again)
+                            if (a.storeOp == VK_ATTACHMENT_STORE_OP_STORE) a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                        dagain.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                        VkRenderingInfo rag = ri;
+                        rag.pColorAttachments = again;
+                        rag.pDepthAttachment = &dagain;
+                        vkCmdBeginRendering(cmd, &rag);
+                        rects.assign(1, {{{0, 0}, {out_w, out_h}}, 0, 1});
                     }
                 }
                 if (!rects.empty()) vkCmdClearAttachments(cmd, 1, &clr, uint32_t(rects.size()), rects.data());
@@ -2118,16 +2161,8 @@ void R3DRenderer::record_world(const Frame& f) {
     vkCmdEndRendering(cmd);
     if (have_dust) {
         // The depth of everything drawn, readable (r3d.frag tests each puff
-        // against it, softly)
-        transition(cmd, depth_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
-        depth_resolved_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
-        transition(cmd, depth_resolved_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
-        VkImageCopy copy{};
-        copy.srcSubresource = copy.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
-        copy.extent = {out_w, out_h, 1};
-        vkCmdCopyImage(cmd, depth_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, depth_resolved_.image,
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-        transition(cmd, depth_resolved_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        // against it, softly), unless taken before a later priority
+        if (!depth_taken) take_depth();
         // The dust alone, premultiplied, over nothing (0, 0, 0, 0)
         dust_half_img_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
         transition(cmd, dust_half_img_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
