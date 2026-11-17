@@ -881,21 +881,25 @@ void R3DRenderer::set_layers(const uint32_t* back, const uint32_t* front) {
     layers_dirty_ = true;
     // Whether the foreground's outermost columns are each one colour (within
     // 6%): compose repeats them beside the 4:3 picture only then (iOS port)
+    // (a few pixels apart allowed: the game over screen's white had one
+    // see-through pixel in its top left corner, and the whole left side
+    // beside it stayed black)
     front_edges_plain_ = 0;
     for (int side = 0; side < 2; side++) {
         int x = side ? SCREEN_W - 1 : 0;
-        uint32_t lo[4] = {255, 255, 255, 255}, hi[4] = {0, 0, 0, 0};
+        uint32_t ref = front[(SCREEN_H / 2) * SCREEN_W + x];
+        int apart = 0;
         for (int y = 0; y < SCREEN_H; y++) {
             uint32_t p = front[y * SCREEN_W + x];
             for (int k = 0; k < 4; k++) {
-                uint32_t v = (p >> (8 * k)) & 255;
-                lo[k] = std::min(lo[k], v);
-                hi[k] = std::max(hi[k], v);
+                int d = int((p >> (8 * k)) & 255) - int((ref >> (8 * k)) & 255);
+                if (d >= 16 || d <= -16) {
+                    apart++;
+                    break;
+                }
             }
         }
-        bool plain = true;
-        for (int k = 0; k < 4; k++) plain &= hi[k] - lo[k] < 16;
-        if (plain) front_edges_plain_ |= 1 << side;
+        if (apart <= 4) front_edges_plain_ |= 1 << side;
     }
     // Average colour of each row of the back layer, for the horizon colour
     for (int y = 0; y < SCREEN_H; y++) {

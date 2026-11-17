@@ -93,7 +93,9 @@ bool poll_gamepads(HWND hwnd) {
         // starts nine steps, 1.5 s apart, each logged: 1 left handle (SDL low),
         // 2 right handle (SDL high), 3 both, 4 both pulsing, 5 both at 0.4,
         // 6-8 a knock on our own engine (default, both handles, left handle),
-        // 9 SDL both again
+        // 9 SDL both again; then three of 2 s, 3 s apart, as a scrape along a
+        // wall: 10 SDL both and a knock every 0.13 s (as before), 11 the same
+        // with a knock every 0.4 s, 12 SDL both alone
         static double test_at = -1;
         static int test_step = 0;
         static bool was = false;
@@ -108,9 +110,9 @@ bool poll_gamepads(HWND hwnd) {
         was = down;
         if (test_at >= 0 && p >= 0) {
             double t = now - test_at;
-            int step = int(t / 1.5) + 1;
-            double in = t - (step - 1) * 1.5;
-            if (step > 9) {
+            int step = t < 13.5 ? int(t / 1.5) + 1 : 10 + int((t - 13.5) / 3.0);
+            double in = step <= 9 ? t - (step - 1) * 1.5 : t - 13.5 - (step - 10) * 3.0;
+            if (step > 12) {
                 test_at = -1;
                 printf("[vibtest] end\n");
             } else {
@@ -118,6 +120,15 @@ bool poll_gamepads(HWND hwnd) {
                     test_step = step;
                     printf("[vibtest] step %d\n", step);
                     if (step >= 6 && step <= 8) platform_crash_haptic(1.0f, step - 6);
+                }
+                if (step >= 10 && in < 2.0) {
+                    g_pads.rumble(p, 1.0f, 1.0f, 60);
+                    static double knock_at = -1;
+                    double every = step == 10 ? 0.13 : 0.4;
+                    if (step != 12 && (in < 0.02 || now - knock_at >= every)) {
+                        knock_at = now;
+                        platform_crash_haptic(0.75f, 0);
+                    }
                 }
                 if (in < 0.6 && (step <= 5 || step == 9)) {
                     float lo = step == 2 ? 0.0f : 1.0f, hi = step == 1 ? 0.0f : 1.0f;
@@ -163,7 +174,9 @@ bool poll_gamepads(HWND hwnd) {
                 if (sh > 0.08f) g_pads.rumble(i, sh, 0.6f * sh, 60);
 #ifdef __APPLE__
                 {   // A crash sound: a knock of its own in the controller (platform/ios_lifecycle.mm),
-                    // at most one every 0.12 s (a slow knock is several sounds at once)
+                    // at most one every 0.35 s (a slow knock is several sounds at once, and a scrape
+                    // along a wall one every few frames: a knock started over the last one
+                    // before it was through, several a second, was not felt)
                     static uint32_t seen = g_crash_knocks.load();
                     static double last = -1;
                     uint32_t knocks = g_crash_knocks.load();
@@ -172,7 +185,7 @@ bool poll_gamepads(HWND hwnd) {
                         float st = g_crash_knock_strength.exchange(0.0f);
                         double now = qpc_seconds();
                         static const float level[4] = {0.0f, 0.45f, 0.75f, 1.0f};
-                        if (now - last > 0.12 && g_pad_rumble > 0) {
+                        if (now - last > 0.35 && g_pad_rumble > 0) {
                             last = now;
                             platform_crash_haptic(st * level[std::clamp(g_pad_rumble, 0, 3)]);
                         }
