@@ -1786,6 +1786,8 @@ void R3DRenderer::record_world(const Frame& f) {
                (scene_->vertices[v.trans_first].flags & R3D_DUST);
     };
     dust_half_ready_ = false;
+    const bool world_frame = scene_ && std::any_of(scene_->viewports.begin(), scene_->viewports.end(),
+                                                   [](const R3DViewport& v) { return v.world; });
     bool dust_half = false;
 #ifdef __APPLE__
     {
@@ -2057,7 +2059,10 @@ void R3DRenderer::record_world(const Frame& f) {
                     pc.quality[0] = pass == 0 ? float(samples_) + alpha_seed : -float(samples_);
                     pc.quality[1] = aniso_;
                     pc.quality[2] = 1.0f / upscale_;   // DLSS upscaling: textures as sharp as the picture shown needs
-                    pc.quality[3] = interp_;
+                    // (no game world: drawn as the game's latest frame, not in
+                    // between. The ending's driver, his parts paired with the
+                    // wrong ones from frame to frame, shook; iOS port)
+                    pc.quality[3] = world_frame ? interp_ : 1.0f;
                     // Translucent surfaces that are not effects (a whole model made
                     // see-through, like the Carnotaurus' camouflage): only the
                     // nearest one shows at each pixel, as on the Real3D (spec 7.2),

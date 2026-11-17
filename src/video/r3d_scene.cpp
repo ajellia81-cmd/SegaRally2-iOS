@@ -389,7 +389,22 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
     // Never by more than this frame's own gap: while the car's height is
     // held through a jump in it (the car squatting as it sets off), the patch
     // went into the road and was gone for half a second (iOS port)
-    float patch_down = measured && !patches.empty() ? std::min(down, raw) : down;
+    // Nor, in a frame that could not measure it (too few of its points over
+    // the road found), by the whole height: the least gap there is, or none
+    // (a shadow that went out for one frame now and then, Snowy's start)
+    float patch_down = down;
+    if (!patches.empty()) {
+        if (measured) patch_down = std::min(down, raw);
+        else {
+            float least = 1e30f;
+            for (float g : gaps) least = std::min(least, g);
+            patch_down = gaps.empty() ? 0.0f : std::min(down, std::max(least, 0.0f));
+#ifdef __APPLE__
+            printf("[shadow] frame %llu car %06X: not measured (%zu points, %zu over the road), lowered %.3f of %.3f\n",
+                   (unsigned long long)out.frame, car->node, patches.size() / 3, gaps.size(), patch_down, down);
+#endif
+        }
+    }
     for (uint32_t k : patches) {
         if (patch_down > 0.03f) lower(vs[k], patch_down - 0.03f);
         set_down.insert(k);

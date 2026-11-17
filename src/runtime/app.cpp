@@ -1802,27 +1802,29 @@ int main(int argc, char** argv) {
                 // the frame rate afterwards, scene by scene)
                 static const char* const heat[] = {"nominal", "fair", "serious", "critical"};
                 int th = platform_thermal_state();
-                {   // Hot (serious: iOS lowers the GPU's clock, some 30%, and the
-                    // heaviest stretches fell to 100 fps): the 3D drawn at 85% of its
-                    // size, 75% when critical; back to full once it has been fair or
-                    // better for 20 s
-                    static double cool_since = -1;
-                    float want = th >= 3 ? 0.75f : th == 2 ? 0.85f : 1.0f;
-                    float have = renderer.thermal_scale();
-                    double t = double(now) / 1000.0;
-                    if (want < have) {
-                        renderer.set_thermal_scale(want);
-                        cool_since = -1;
-                        printf("[heat] %s: the 3D at %d%% of its size\n", heat[th], int(want * 100.0f + 0.5f));
-                    } else if (want > have) {
-                        if (cool_since < 0) cool_since = t;
-                        if (t - cool_since >= 20.0) {
-                            renderer.set_thermal_scale(want);
-                            cool_since = -1;
-                            printf("[heat] %s: the 3D at %d%% of its size\n", heat[th], int(want * 100.0f + 0.5f));
+                {   // The 3D's size from the GPU's own time (iOS port): over 7.4 ms
+                    // an image (the 120 Hz frame is 8.3) one step smaller, each
+                    // second; back up a step once the time there would have been
+                    // under 6.6 ms for 5 s. A hot phone lowers the GPU's clock
+                    // (some 20-30% already at "fair", Snowy fell to 80 fps)
+                    static const float steps[] = {1.0f, 0.92f, 0.85f, 0.78f, 0.7f};
+                    static int level = 0, calm = 0;
+                    if (images >= 30) {
+                        double per = gpu / images;
+                        int was = level;
+                        if (per > 7.4 && level < 4) {
+                            level++;
+                            calm = 0;
+                        } else if (level > 0) {
+                            double up = steps[level - 1] / steps[level];
+                            calm = per * up * up < 6.6 ? calm + 1 : 0;
+                            if (calm >= 5) level--, calm = 0;
                         }
-                    } else {
-                        cool_since = -1;
+                        if (level != was) {
+                            renderer.set_thermal_scale(steps[level]);
+                            printf("[res] GPU %.1f ms, heat %s: the 3D at %d%% of its size\n", per,
+                                   th >= 0 && th < 4 ? heat[th] : "?", int(steps[level] * 100.0f + 0.5f));
+                        }
                     }
                 }
                 printf("[fps] %llu  GPU %.1f ms  %zu polygons  frame %llu  heat %s\n", hz, images > 0 ? gpu / images : 0.0,
