@@ -1802,6 +1802,29 @@ int main(int argc, char** argv) {
                 // the frame rate afterwards, scene by scene)
                 static const char* const heat[] = {"nominal", "fair", "serious", "critical"};
                 int th = platform_thermal_state();
+                {   // Hot (serious: iOS lowers the GPU's clock, some 30%, and the
+                    // heaviest stretches fell to 100 fps): the 3D drawn at 85% of its
+                    // size, 75% when critical; back to full once it has been fair or
+                    // better for 20 s
+                    static double cool_since = -1;
+                    float want = th >= 3 ? 0.75f : th == 2 ? 0.85f : 1.0f;
+                    float have = renderer.thermal_scale();
+                    double t = double(now) / 1000.0;
+                    if (want < have) {
+                        renderer.set_thermal_scale(want);
+                        cool_since = -1;
+                        printf("[heat] %s: the 3D at %d%% of its size\n", heat[th], int(want * 100.0f + 0.5f));
+                    } else if (want > have) {
+                        if (cool_since < 0) cool_since = t;
+                        if (t - cool_since >= 20.0) {
+                            renderer.set_thermal_scale(want);
+                            cool_since = -1;
+                            printf("[heat] %s: the 3D at %d%% of its size\n", heat[th], int(want * 100.0f + 0.5f));
+                        }
+                    } else {
+                        cool_since = -1;
+                    }
+                }
                 printf("[fps] %llu  GPU %.1f ms  %zu polygons  frame %llu  heat %s\n", hz, images > 0 ? gpu / images : 0.0,
                        scene->polygons, (unsigned long long)(shown == ~0ull ? 0 : shown), th >= 0 && th < 4 ? heat[th] : "?");
                 fflush(stdout);

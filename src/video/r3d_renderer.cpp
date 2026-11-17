@@ -2532,8 +2532,9 @@ void R3DRenderer::record(VkCommandBuffer cmd, VkImageView target, VkExtent2D ext
     f.cmd = cmd;
     f.extent = extent;
     f.lay = compute_layout(float(extent.width), float(extent.height), max_aspect_);
-    f.up_w = std::max(1u, uint32_t(f.lay.view_w * f.lay.scale * supersample_));
-    f.up_h = std::max(1u, uint32_t(SCREEN_H * f.lay.scale * supersample_));
+    const float ss = supersample_ * thermal_scale_;
+    f.up_w = std::max(1u, uint32_t(f.lay.view_w * f.lay.scale * ss));
+    f.up_h = std::max(1u, uint32_t(SCREEN_H * f.lay.scale * ss));
     f.out_w = upscale_ > 1.0f ? std::max(1u, uint32_t(float(f.up_w) / upscale_ + 0.5f)) : f.up_w;
     f.out_h = upscale_ > 1.0f ? std::max(1u, uint32_t(float(f.up_h) / upscale_ + 0.5f)) : f.up_h;
     ensure_targets(f.out_w, f.out_h, f.up_w, f.up_h);

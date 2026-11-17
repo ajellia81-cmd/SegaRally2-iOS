@@ -89,6 +89,9 @@ public:
     void set_hud_inset(float px) { hud_inset_ = px > 0 ? px : 0; }
     // The internal 3D resolution as a share of the target's (iOS port: RESOLUTION)
     void set_supersample(float s) { supersample_ = s < 0.5f ? 0.5f : s > 4.0f ? 4.0f : s; }
+    // iOS port: the 3D drawn smaller while the phone is hot (app.cpp), times RESOLUTION
+    void set_thermal_scale(float s) { thermal_scale_ = s < 0.5f ? 0.5f : s > 1.0f ? 1.0f : s; }
+    float thermal_scale() const { return thermal_scale_; }
     // false while the top of the 2D screen is a picture rather than a HUD
     void set_hud_band(bool hud) { hud_band_ = hud; }
     // Position between the previous (0) and the current (1) game frame
@@ -222,6 +225,7 @@ private:
     VkPresenter* vk_ = nullptr;
     VkDevice dev_ = VK_NULL_HANDLE;
     float supersample_ = 1.0f;
+    float thermal_scale_ = 1.0f;
     VkSampleCountFlagBits samples_ = VK_SAMPLE_COUNT_1_BIT;
     float aniso_ = 0.0f;
     const R3DScene* scene_ = nullptr;
