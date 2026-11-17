@@ -205,37 +205,24 @@ std::vector<PadKey> Gamepads::take_keys() {
     return k;
 }
 
-#ifdef __APPLE__
-// iOS port: when each pad last rumbled (gamepad.cpp, poll's keep-alive)
-static Uint64 g_last_rumble[8] = {};
-#endif
-
 void Gamepads::rumble(int i, float low, float high, int ms) {
     if (!slot_[i].pad) return;
 #ifdef __APPLE__
-    // iOS port: a pad's haptics engine idle for a while is shut down by iOS,
-    // and SDL starts it again only for a rumble that fails: one that seemed
-    // to go through after a quiet spell (a slow scrape along a fence, with no
-    // rumble from the wheel's motor before it) was silent. The first rumble
-    // after 3 s without any opens the pad again, which makes a new engine
-    // (nothing runs while there is no rumble: no battery spent on it)
-    if (i < 8 && (low > 0 || high > 0)) {
-        Uint64 now_ms = SDL_GetTicks();
-        if (g_last_rumble[i] && now_ms - g_last_rumble[i] > 3000) {
-            SDL_JoystickID id = slot_[i].id;
-            SDL_CloseGamepad(slot_[i].pad);
-            slot_[i].pad = SDL_OpenGamepad(id);
-            if (!slot_[i].pad) {
-                slot_[i] = Slot{};
-                return;
-            }
-        }
-        g_last_rumble[i] = now_ms;
-    }
+    // iOS port: SDL hands a rumble on to the controller only when it differs
+    // from the last one (the same again only lengthens it). A crash's rumble
+    // held at full is the same each frame: after a quiet spell, with the
+    // haptics engine still starting, the first was lost and the rest never went
+    // out (slow knocks, no rumble). One step of 65535 up or down each time
+    // sends every one
+    static uint32_t flip[8] = {};
+    if (i < 8) flip[i] ^= 1u;
 #endif
     float k = RUMBLE_STRENGTH[std::clamp(rumble_, 0, 3)] * 65535.0f;
-    bool ok = SDL_RumbleGamepad(slot_[i].pad, Uint16(std::clamp(low, 0.0f, 1.0f) * k),
-                                Uint16(std::clamp(high, 0.0f, 1.0f) * k), Uint32(ms));
+    Uint16 lo = Uint16(std::clamp(low, 0.0f, 1.0f) * k), hi = Uint16(std::clamp(high, 0.0f, 1.0f) * k);
+#ifdef __APPLE__
+    if (lo > 1 && i < 8 && flip[i]) lo ^= 1;   // (the lowest bit: a step of 65535, not to be felt)
+#endif
+    bool ok = SDL_RumbleGamepad(slot_[i].pad, lo, hi, Uint32(ms));
 #ifdef __APPLE__
     // iOS port: a controller's haptics engine that iOS stopped (the app in the
     // background, an idle spell, an audio interruption) is never started again

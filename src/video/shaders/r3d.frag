@@ -548,7 +548,11 @@ void main() {
             g_dust_octaves = w < 0.004 ? 1 : w < 0.012 ? 2 : 3;
         }
         // Not in the eye's face: the cloud the camera drives through thins out before it
-        float fade = puff ? smoothstep(0.3, 1.6, -view_pos.z) : smoothstep(0.8, 2.2, -view_pos.z);
+        // (the iOS build, FEATURES not all set: the puffs give way from 1.2 to 3.5 m;
+        // in another car's cloud dozens of them, each over much of the picture,
+        // went one over another before it: 5 ms more on the phone)
+        float fade = puff ? (FEATURES != ~0u ? smoothstep(1.2, 3.5, -view_pos.z) : smoothstep(0.3, 1.6, -view_pos.z))
+                          : smoothstep(0.8, 2.2, -view_pos.z);
         if (FEAT_SOFT && atm.soft.x > 0.0) {   // soft where it meets the road and what stands behind, over its size
             float d = texelFetch(scene_depth, ivec2(gl_FragCoord.xy), 0).r;
             float soft = puff ? clamp(params.z * 0.6, 0.15, 1.0) : 0.05;
