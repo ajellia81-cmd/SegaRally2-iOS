@@ -14,13 +14,14 @@
 #ifndef _WIN32
 #include "touch_controls.h"
 #ifdef __APPLE__
-#include <SDL3/SDL_gamepad.h>   // (the vibration test)
+#include <SDL3/SDL_gamepad.h>   // (the left stick: a diagnosis)
 #endif
 #endif
 
 bool g_menu_open = false;   // a menu has the controls
 Gamepads g_pads;
 int g_pad_rumble = 2;
+extern std::atomic<bool> g_sr2_car_as_is;   // r3d_scene.cpp
 #ifdef __APPLE__
 void platform_crash_haptic(float strength, int where = 0);   // platform/ios_lifecycle.mm (where: 0 default, 1 handles, 2 left handle)
 #endif
@@ -89,56 +90,18 @@ bool poll_gamepads(HWND hwnd) {
     bool focused = GetForegroundWindow() == hwnd;
     g_pads.poll(g_pad_rumble, focused, g_menu_open);
 #ifdef __APPLE__
-    {   // (diagnosis, temporary) The vibration test: the left stick pressed in
-        // starts nine steps, 1.5 s apart, each logged: 1 left handle (SDL low),
-        // 2 right handle (SDL high), 3 both, 4 both pulsing, 5 both at 0.4,
-        // 6-8 a knock on our own engine (default, both handles, left handle),
-        // 9 SDL both again; then three of 2 s, 3 s apart, as a scrape along a
-        // wall: 10 SDL both and a knock every 0.13 s (as before), 11 the same
-        // with a knock every 0.4 s, 12 SDL both alone
-        static double test_at = -1;
-        static int test_step = 0;
+    {   // (diagnosis, temporary) The left stick pressed in: the cars and their
+        // shadows as the game draws them (no setting down on the road,
+        // r3d_scene.cpp settle_player_car), and back, to tell whose the
+        // flickering shadow is
         static bool was = false;
         int p = g_pads.first();
         bool down = p >= 0 && g_pads.button_down(p, SDL_GAMEPAD_BUTTON_LEFT_STICK);
-        double now = qpc_seconds();
-        if (down && !was && test_at < 0) {
-            test_at = now;
-            test_step = 0;
-            printf("[vibtest] start\n");
+        if (down && !was) {
+            g_sr2_car_as_is = !g_sr2_car_as_is.load();
+            printf("[shadow] cars %s\n", g_sr2_car_as_is.load() ? "as the game draws them (no setting down)" : "set down on the road");
         }
         was = down;
-        if (test_at >= 0 && p >= 0) {
-            double t = now - test_at;
-            int step = t < 13.5 ? int(t / 1.5) + 1 : 10 + int((t - 13.5) / 3.0);
-            double in = step <= 9 ? t - (step - 1) * 1.5 : t - 13.5 - (step - 10) * 3.0;
-            if (step > 12) {
-                test_at = -1;
-                printf("[vibtest] end\n");
-            } else {
-                if (step != test_step) {
-                    test_step = step;
-                    printf("[vibtest] step %d\n", step);
-                    if (step >= 6 && step <= 8) platform_crash_haptic(1.0f, step - 6);
-                }
-                if (step >= 10 && in < 2.0) {
-                    g_pads.rumble(p, 1.0f, 1.0f, 60);
-                    static double knock_at = -1;
-                    double every = step == 10 ? 0.13 : 0.4;
-                    if (step != 12 && (in < 0.02 || now - knock_at >= every)) {
-                        knock_at = now;
-                        platform_crash_haptic(0.75f, 0);
-                    }
-                }
-                if (in < 0.6 && (step <= 5 || step == 9)) {
-                    float lo = step == 2 ? 0.0f : 1.0f, hi = step == 1 ? 0.0f : 1.0f;
-                    if (step == 4 && int(in / 0.06) % 2) lo = hi = 0.2f;
-                    if (step == 5) lo = hi = 0.4f;
-                    g_pads.rumble(p, lo, hi, 60);
-                }
-            }
-            if (test_at >= 0) return false;   // (nothing else rumbles meanwhile)
-        }
     }
 #endif
     if (!focused || g_menu_open || !g_auto.events.empty()) return false;

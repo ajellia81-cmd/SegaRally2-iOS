@@ -3,6 +3,8 @@
 #include <chrono>
 
 #include "r3d_dust.h"
+#include <atomic>
+std::atomic<bool> g_sr2_car_as_is{getenv("SR2_CAR_AS_IS") != nullptr};   // the cars as drawn (SR2_CAR_AS_IS; iOS: the left stick)
 #include "r3d_screen.h"
 
 #include <algorithm>
@@ -217,7 +219,7 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
 // a car without a patch, far away, is left). The patch is set down with it,
 // just clear of the road. SR2_CAR_AS_IS=1 leaves the car as the game places it
 void R3DSceneBuilder::settle_player_car(R3DScene& out) {
-    static const bool as_is = getenv("SR2_CAR_AS_IS") != nullptr;
+    const bool as_is = g_sr2_car_as_is.load();
     static const bool log = getenv("SR2_CARLOG") != nullptr;
     const R3DViewport* world = nullptr;
     for (const R3DViewport& v : out.viewports)
