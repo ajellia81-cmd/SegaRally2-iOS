@@ -161,6 +161,33 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
         for (uint32_t i = v.trans_first; i < v.trans_first + v.trans_count; i++) out.vertices[i].flags |= R3D_CAR;
     }
     settle_player_car(out);
+#ifdef __APPLE__
+    {   // (diagnosis, temporary) The dark patches (shadows) the game sent this
+        // frame, near the camera (within 12 units): logged when the count
+        // changes by more than a quarter or to none, and the frame after
+        static size_t before = 0;
+        static int after = 0;
+        size_t near = 0, all = 0;
+        uint32_t amin = 255, amax = 0;
+        for (const R3DVertex& x : out.vertices) {
+            if ((x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) != (R3D_WORLD | R3D_LUMINOUS) ||
+                (x.color & 0x00FFFFFFu) != 0 || (x.color >> 24) >= 255)
+                continue;
+            all++;
+            if (x.pos[0] * x.pos[0] + x.pos[1] * x.pos[1] + x.pos[2] * x.pos[2] < 144.0f) {
+                near++;
+                amin = std::min(amin, x.color >> 24);
+                amax = std::max(amax, x.color >> 24);
+            }
+        }
+        bool jump = before > 0 && (near * 4 < before * 3 || near * 3 > before * 4);
+        if (jump || after > 0)
+            printf("[patch] frame %llu: %zu points near (%zu in all), was %zu, alpha %u-%u\n",
+                   (unsigned long long)out.frame, near, all, before, amin, amax);
+        after = jump ? 2 : std::max(0, after - 1);
+        before = near;
+    }
+#endif
     {   // The cars' dark patches (their shadows) are copies of one model, and
         // the game reorders them: a patch paired with another car's in the
         // previous frame was drawn, between game frames, on its way from
