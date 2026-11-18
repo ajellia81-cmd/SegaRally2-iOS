@@ -5,6 +5,7 @@
 #include "r3d_dust.h"
 #include <atomic>
 std::atomic<bool> g_sr2_car_as_is{getenv("SR2_CAR_AS_IS") != nullptr};   // the cars as drawn (SR2_CAR_AS_IS; iOS: the left stick, a diagnosis)
+std::atomic<bool> g_sr2_patch_far{false};   // (diagnosis: the patches 3 units nearer; iOS: the left stick)
 #include "r3d_screen.h"
 
 #include <algorithm>
@@ -166,7 +167,7 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
     for (R3DVertex& x : out.vertices)
         if ((x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) == (R3D_WORLD | R3D_LUMINOUS) &&
             (x.color & 0x00FFFFFFu) == 0 && (x.color >> 24) < 255)
-            x.flags |= R3D_PATCH;
+            x.flags |= R3D_PATCH | (g_sr2_patch_far.load() ? R3D_PATCH_FAR : 0u);
     {   // Between game frames the patches move with the road under them, by
         // its own move since the last frame (averaged over the world near the
         // camera), not from their own previous positions: copies of one model

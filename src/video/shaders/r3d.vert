@@ -114,7 +114,8 @@ void main() {
     // going out for a frame (iOS port; both of its passes alike)
     if ((in_flags & 2097152u) != 0u) {   // (PATCH, r3d_texture.glsl)
         float l = length(pos);
-        if (l > 0.5) pos *= (l - 0.3) / l;
+        float by = (in_flags & 4194304u) != 0u ? 3.0 : 0.3;   // (PATCH_FAR: a diagnosis)
+        if (l > by + 0.2) pos *= (l - by) / l;
     }
     view_pos = pos;
     normal = in_nrm;
