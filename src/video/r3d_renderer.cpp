@@ -1,4 +1,6 @@
 #include "r3d_renderer.h"
+#include <atomic>
+std::atomic<bool> g_sr2_dust_full{getenv("SR2_DUST_FULL") != nullptr};   // the dust at full resolution in the 3D pass (SR2_DUST_FULL; iOS: the left stick, a diagnosis)
 #include "image_io.h"
 #include <windows.h>
 
@@ -1794,8 +1796,7 @@ void R3DRenderer::record_world(const Frame& f) {
     bool dust_half = false;
 #ifdef __APPLE__
     {
-        static const bool full = getenv("SR2_DUST_FULL") != nullptr;   // (debugging aid: as before)
-        if (!msaa && !full && dust_half_ && scene_ && f.vcount && !dlaa_.ready())
+        if (!msaa && !g_sr2_dust_full.load() && dust_half_ && scene_ && f.vcount && !dlaa_.ready())
             for (const R3DViewport& v : scene_->viewports) dust_half |= is_dust(v);
     }
 #endif
