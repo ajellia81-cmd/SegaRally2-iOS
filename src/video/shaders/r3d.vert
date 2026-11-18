@@ -108,6 +108,14 @@ void main() {
     vpo_quality = vp.quality;
     // Displays faster than the game: positions in between its frames
     vec3 pos = mix(in_prev, in_pos, vp.quality.w);
+    // A car's dark patch, 0.3 nearer along its line of sight (the same spot
+    // on the screen): the game lays it on its road, and ours, or a layer of
+    // it (Snowy's hills), could lie up to a quarter unit over it, the shadow
+    // going out for a frame (iOS port; both of its passes alike)
+    if ((in_flags & 2097152u) != 0u) {   // (PATCH, r3d_texture.glsl)
+        float l = length(pos);
+        if (l > 0.5) pos *= (l - 0.3) / l;
+    }
     view_pos = pos;
     normal = in_nrm;
     uv = in_uv;

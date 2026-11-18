@@ -21,7 +21,7 @@
 bool g_menu_open = false;   // a menu has the controls
 Gamepads g_pads;
 int g_pad_rumble = 2;
-extern std::atomic<bool> g_sr2_dust_full;   // r3d_renderer.cpp
+extern std::atomic<bool> g_sr2_car_as_is;   // r3d_scene.cpp
 #ifdef __APPLE__
 void platform_crash_haptic(float strength, int where = 0);   // platform/ios_lifecycle.mm (where: 0 default, 1 handles, 2 left handle)
 #endif
@@ -97,9 +97,9 @@ bool poll_gamepads(HWND hwnd) {
         static bool was = false;
         int p = g_pads.first();
         bool down = p >= 0 && g_pads.button_down(p, SDL_GAMEPAD_BUTTON_LEFT_STICK);
-        if (down && !was) {   // (now: the enhanced dust at full resolution in the 3D pass, as on PC, and back)
-            g_sr2_dust_full = !g_sr2_dust_full.load();
-            printf("[dust] %s\n", g_sr2_dust_full.load() ? "at full resolution in the 3D pass" : "at half resolution after it");
+        if (down && !was) {
+            g_sr2_car_as_is = !g_sr2_car_as_is.load();
+            printf("[shadow] cars %s\n", g_sr2_car_as_is.load() ? "as the game draws them (no setting down)" : "set down on the road");
         }
         was = down;
     }

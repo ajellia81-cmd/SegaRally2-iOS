@@ -47,6 +47,7 @@ enum : uint32_t {
     R3D_CAR = 1 << 17,         // a car drawn in a viewport of its own: the player's, the rivals near it (clear coat, glass)
     R3D_ACTOR = 1 << 18,       // a model of the world turned its own way: the other cars, people (r3d_world.cpp)
     R3D_NO_SHADOW = 1 << 20,   // receives no sun shadows (the dust's particles)
+    R3D_PATCH = 1 << 21,       // a car's dark patch (its shadow), drawn a little nearer (r3d.vert, iOS port)
     R3D_DUST = 1 << 23,        // DUST: ENHANCED: a particle drawn by r3d.frag's dust() (r3d_dust.cpp)
 };
 
