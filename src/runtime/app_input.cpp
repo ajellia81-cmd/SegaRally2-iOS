@@ -21,7 +21,7 @@
 bool g_menu_open = false;   // a menu has the controls
 Gamepads g_pads;
 int g_pad_rumble = 2;
-extern std::atomic<bool> g_sr2_patch_far;   // r3d_scene.cpp
+extern std::atomic<int> g_sr2_patch_mode;   // r3d_scene.cpp
 #ifdef __APPLE__
 void platform_crash_haptic(float strength, int where = 0);   // platform/ios_lifecycle.mm (where: 0 default, 1 handles, 2 left handle)
 #endif
@@ -98,8 +98,10 @@ bool poll_gamepads(HWND hwnd) {
         int p = g_pads.first();
         bool down = p >= 0 && g_pads.button_down(p, SDL_GAMEPAD_BUTTON_LEFT_STICK);
         if (down && !was) {
-            g_sr2_patch_far = !g_sr2_patch_far.load();
-            printf("[shadow] patches drawn %s nearer\n", g_sr2_patch_far.load() ? "3 units" : "0.3 units");
+            static const char* names[4] = {"as they are (0.3 nearer, once a pixel)", "every layer blended",
+                                           "3 units nearer", "not nearer"};
+            g_sr2_patch_mode = (g_sr2_patch_mode.load() + 1) % 4;
+            printf("[shadow] patch mode %d: %s\n", g_sr2_patch_mode.load(), names[g_sr2_patch_mode.load()]);
         }
         was = down;
     }

@@ -4,8 +4,55 @@
 
 #include "r3d_dust.h"
 #include <atomic>
+#include <cmath>
+#include <cstdio>
+#include <vector>
 std::atomic<bool> g_sr2_car_as_is{getenv("SR2_CAR_AS_IS") != nullptr};   // the cars as drawn (SR2_CAR_AS_IS; iOS: the left stick, a diagnosis)
-std::atomic<bool> g_sr2_patch_far{false};   // (diagnosis: the patches 3 units nearer; iOS: the left stick)
+// (diagnosis; iOS: the left stick goes round them) how the cars' shadow
+// patches are drawn: 0 as they are, 1 every layer blended (not once a pixel),
+// 2 drawn 3 units nearer, 3 not drawn nearer at all
+std::atomic<int> g_sr2_patch_mode{0};
+
+// (diagnosis) The patches near the camera (within 12 units): their count when
+// it jumps, the order of their triangles (by alpha) when it changes, and the
+// most any triangle moved since the last frame (by its place in the list)
+// when over 0.2
+[[maybe_unused]] static void log_patches(const R3DScene& out) {
+    static size_t before = 0;
+    static std::vector<uint8_t> was_order;
+    static std::vector<float> was_mid;
+    std::vector<uint8_t> order;
+    std::vector<float> mid;
+    for (size_t i = 0; i + 2 < out.vertices.size(); i += 3) {
+        const R3DVertex& x = out.vertices[i];
+        if (!(x.flags & R3D_PATCH) || x.pos[0] * x.pos[0] + x.pos[1] * x.pos[1] + x.pos[2] * x.pos[2] >= 144.0f) continue;
+        order.push_back(uint8_t(x.color >> 24));
+        for (int k = 0; k < 3; k++)
+            mid.push_back((out.vertices[i].pos[k] + out.vertices[i + 1].pos[k] + out.vertices[i + 2].pos[k]) / 3.0f);
+    }
+    size_t near = order.size() * 3;
+    if (before > 0 && (near * 4 < before * 3 || near * 3 > before * 4))
+        printf("[patch] frame %llu: %zu points near, was %zu\n", (unsigned long long)out.frame, near, before);
+    before = near;
+    if (!order.empty() && order.size() == was_order.size()) {
+        size_t differ = 0;
+        float most = 0;
+        for (size_t i = 0; i < order.size(); i++) {
+            differ += order[i] != was_order[i];
+            float d = 0;
+            for (int k = 0; k < 3; k++) d += (mid[i * 3 + k] - was_mid[i * 3 + k]) * (mid[i * 3 + k] - was_mid[i * 3 + k]);
+            most = std::max(most, std::sqrt(d));
+        }
+        if (differ || most > 0.2f) {
+            unsigned amin = 255, amax = 0;
+            for (uint8_t v : order) amin = std::min<unsigned>(amin, v), amax = std::max<unsigned>(amax, v);
+            printf("[patchorder] %llu %zu triangles, %zu reordered, a triangle moved %.2f, alpha %u-%u, mode %d\n",
+                   (unsigned long long)out.frame, order.size(), differ, most, amin, amax, g_sr2_patch_mode.load());
+        }
+    }
+    was_order = order;
+    was_mid = mid;
+}
 #include "r3d_screen.h"
 
 #include <algorithm>
@@ -167,7 +214,7 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
     for (R3DVertex& x : out.vertices)
         if ((x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) == (R3D_WORLD | R3D_LUMINOUS) &&
             (x.color & 0x00FFFFFFu) == 0 && (x.color >> 24) < 255)
-            x.flags |= R3D_PATCH | (g_sr2_patch_far.load() ? R3D_PATCH_FAR : 0u);
+            x.flags |= R3D_PATCH | (g_sr2_patch_mode.load() == 2 ? R3D_PATCH_FAR : 0u);
     {   // Between game frames the patches move with the road under them, by
         // its own move since the last frame (averaged over the world near the
         // camera), not from their own previous positions: copies of one model
@@ -192,26 +239,10 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
                 for (int k = 0; k < 3; k++) x.prev[k] = x.pos[k] - move[k];
     }
 #ifdef __APPLE__
-    {   // (diagnosis) The patches the game sent near the camera (within 12
-        // units): logged when their count jumps by more than a quarter
-        static size_t before = 0;
-        size_t near = 0;
-        for (const R3DVertex& x : out.vertices)
-            if ((x.flags & R3D_PATCH) && x.pos[0] * x.pos[0] + x.pos[1] * x.pos[1] + x.pos[2] * x.pos[2] < 144.0f) near++;
-        if (before > 0 && (near * 4 < before * 3 || near * 3 > before * 4))
-            printf("[patch] frame %llu: %zu points near, was %zu\n", (unsigned long long)out.frame, near, before);
-        before = near;
-        // (and every frame, in a race: the box of those points in view space,
-        // to see the frame the shadow dips)
-        float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
-        for (const R3DVertex& x : out.vertices)
-            if ((x.flags & R3D_PATCH) && x.pos[0] * x.pos[0] + x.pos[1] * x.pos[1] + x.pos[2] * x.pos[2] < 144.0f)
-                for (int k = 0; k < 3; k++) lo[k] = std::min(lo[k], x.pos[k]), hi[k] = std::max(hi[k], x.pos[k]);
-        if (near)
-            printf("[patchbox] %llu n%zu x %.2f %.2f y %.2f %.2f z %.2f %.2f\n", (unsigned long long)out.frame, near,
-                   lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
-    }
+    log_patches(out);   // (diagnosis)
 #endif
+    if (g_sr2_patch_mode.load() == 3)   // (diagnosis: not drawn nearer; still a patch to the renderer by its colour)
+        for (R3DVertex& x : out.vertices) x.flags &= ~R3D_PATCH;
     static const float shine = getenv("SR2_SHINE") ? float(atof(getenv("SR2_SHINE"))) : 0.0f;   // the cars' painted shine layer, F of its strength: left out (it veiled the paint, a grey box over the roof); SR2_SHINE=F brings it back
     if (shine != 1.0f)
         for (R3DVertex& x : out.vertices)
