@@ -167,6 +167,29 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
         if ((x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) == (R3D_WORLD | R3D_LUMINOUS) &&
             (x.color & 0x00FFFFFFu) == 0 && (x.color >> 24) < 255)
             x.flags |= R3D_PATCH;
+    {   // Between game frames the patches move with the road under them, by
+        // its own move since the last frame (averaged over the world near the
+        // camera), not from their own previous positions: copies of one model
+        // that the game reorders, they were paired with each other's, and the
+        // shadow dipped and came back between frames (iOS port)
+        double sum[3] = {0, 0, 0};
+        size_t n = 0;
+        for (const R3DVertex& x : out.vertices) {
+            if (!(x.flags & R3D_WORLD) || (x.flags & (R3D_CAR | R3D_PATCH))) continue;
+            if (x.pos[0] * x.pos[0] + x.pos[1] * x.pos[1] + x.pos[2] * x.pos[2] > 15.0f * 15.0f) continue;
+            float d2 = 0;
+            for (int k = 0; k < 3; k++) d2 += (x.pos[k] - x.prev[k]) * (x.pos[k] - x.prev[k]);
+            if (d2 > 4.0f * 4.0f) continue;   // (a pairing gone wrong itself)
+            for (int k = 0; k < 3; k++) sum[k] += x.pos[k] - x.prev[k];
+            n++;
+        }
+        float move[3] = {0, 0, 0};
+        if (n >= 16)
+            for (int k = 0; k < 3; k++) move[k] = float(sum[k] / double(n));
+        for (R3DVertex& x : out.vertices)
+            if (x.flags & R3D_PATCH)
+                for (int k = 0; k < 3; k++) x.prev[k] = x.pos[k] - move[k];
+    }
 #ifdef __APPLE__
     {   // (diagnosis) The patches the game sent near the camera (within 12
         // units): logged when their count jumps by more than a quarter
