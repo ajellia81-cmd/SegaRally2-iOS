@@ -111,6 +111,22 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
         // Buttons and triggers, with what changed since the last poll
         bool now_down[32] = {};
         for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT && b < 32; b++) now_down[b] = SDL_GetGamepadButton(p, SDL_GamepadButton(b));
+#ifdef __APPLE__
+        // A button let go counts as let go only after 40 ms up: the pad's
+        // buttons now and then read up for a moment in one press, and the press
+        // went in twice (in any menu, now and then; iOS port). Logged when it
+        // happens (diagnosis)
+        for (int b = 0; b < 32; b++) {
+            if (!now_down[b]) {
+                if (s.buttons[b] && s.up_at[b] <= 0) s.up_at[b] = now;   // just let go
+                if (s.up_at[b] > 0 && now - s.up_at[b] < 0.04) now_down[b] = true;
+                else s.up_at[b] = 0;
+            } else if (s.up_at[b] > 0) {
+                printf("[pad] %d button %d: up for %.0f ms in a press, taken as held\n", i, b, (now - s.up_at[b]) * 1000.0);
+                s.up_at[b] = 0;
+            }
+        }
+#endif
         // A button still held from the menu does nothing in the game until it
         // is let go: A, which chose PLAY, is also the accelerator, and the
         // pedal confirmed SELECT GAME's first choice (CHAMPIONSHIP) at once
