@@ -155,16 +155,6 @@ bool poll_gamepads(HWND hwnd) {
                     }
                 }
 #endif
-#ifdef __APPLE__
-                {   // (diagnosis, temporary: the strong rumbles sent, at most 4 a second)
-                    static double logged = 0;
-                    double now = qpc_seconds();
-                    if (sh > 0.3f && now - logged > 0.25) {
-                        logged = now;
-                        printf("[rumble] pad %d strength %.2f (vibration setting %d)\n", i, sh, g_pad_rumble);
-                    }
-                }
-#endif
             }
             driver = false;
         }

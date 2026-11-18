@@ -122,7 +122,6 @@ void platform_crash_haptic(float strength, int where) {
                 g_knock_ok = false;   // a new engine next time
                 return;
             }
-            printf("[knock] %.2f (engine %d)\n", s, where);   // (diagnosis, temporary)
         }
     }
 }

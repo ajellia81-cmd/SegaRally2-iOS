@@ -1240,23 +1240,6 @@ void midi_note(uint8_t b) {
     if (g_midi_len < 3) g_midi_msg[g_midi_len++] = b;
     if (g_midi_len != 3) return;
     g_midi_len = 0;
-    {   // (diagnosis, temporary: the one-off sounds in a race, for the slow knocks:
-        // not the engines' 70/74/75, nor the steady A0 13, A0 16, AC 71)
-        uint8_t st = g_midi_msg[0], prm = g_midi_msg[1];
-        bool steady = prm == 0x70 || prm == 0x74 || prm == 0x75 || (st == 0xA0 && (prm == 0x13 || prm == 0x16)) ||
-                      (st == 0xAC && prm == 0x71);
-        if (!steady && int32_t(rd32(SR2_SEQUENCE)) == 1)
-            printf("[snd] frame %llu: %02X %02X %02X\n", (unsigned long long)g_frame, st, prm, g_midi_msg[2]);
-        // (and the steady A0 13 and A0 16 when their value changes: a scrape
-        // along a wall may be one of them)
-        static uint8_t last13 = 0xFF, last16 = 0xFF;
-        if (st == 0xA0 && (prm == 0x13 || prm == 0x16) && int32_t(rd32(SR2_SEQUENCE)) == 1) {
-            uint8_t& last = prm == 0x13 ? last13 : last16;
-            if (g_midi_msg[2] != last)
-                printf("[snd] frame %llu: A0 %02X %02X\n", (unsigned long long)g_frame, prm, g_midi_msg[2]);
-            last = g_midi_msg[2];
-        }
-    }
     // A0 15 xx: the slower knocks' sound (several at once, xx 01-0C, on the
     // phone's log with each knock at low speed, the crash sound heard and A0 14
     // not sent): a shorter rumble, held a little less
@@ -1264,13 +1247,11 @@ void midi_note(uint8_t b) {
         if (g_crash_rumble.load() < 1.25f) g_crash_rumble = 1.25f;
         if (g_crash_knock_strength.load() < 0.8f) g_crash_knock_strength = 0.8f;
         g_crash_knocks++;
-        printf("[crash] frame %llu (slow knock %02X)\n", (unsigned long long)g_frame, g_midi_msg[2]);
     }
     if (g_midi_msg[0] == 0xA0 && g_midi_msg[1] == 0x14 && int32_t(rd32(SR2_SEQUENCE)) == 1) {
         g_crash_rumble = 1.6f;   // (above 1: held at full for about a quarter of a second, then fading)
         g_crash_knock_strength = 1.0f;
         g_crash_knocks++;
-        printf("[crash] frame %llu (sound %02X)\n", (unsigned long long)g_frame, g_midi_msg[2]);
     }
 }
 #endif

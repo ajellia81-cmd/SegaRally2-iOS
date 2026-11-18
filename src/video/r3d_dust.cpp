@@ -701,15 +701,6 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
     if (place < 0)
         for (uint32_t vi = 0; vi < out.viewports.size() && place < 0; vi++)
             if (has_fan[vi]) place = int(vi);
-#ifdef __APPLE__
-    if (world < 0) {   // (diagnosis, temporary)
-        static uint64_t logged = 0;
-        if (out.frame - logged > 300) {
-            logged = out.frame;
-            printf("[dust] no world: %zu fans, %zu particles, drawn in viewport %d\n", ribbons.size(), g_parts.size(), place);
-        }
-    }
-#endif
     if (place < 0 || g_parts.empty()) {
         g_before = f;
         return;

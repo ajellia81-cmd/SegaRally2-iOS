@@ -624,9 +624,6 @@ bool R3DRenderer::create_pipelines() {
     // a little nearer (the same amount, so the hair between them stays)
     blob.bias = 8.0f;
     blob.slope_bias = 1.0f;
-    // (r3d.vert's position is invariant now: a wider hair, 4 units and half
-    // the slope, let the patch's overlapping layers each through, and the
-    // shadow came out ragged)
     blob_depth.bias = 8.0f - 1.0f;
     blob_depth.slope_bias = 1.0f;
 #endif
@@ -1951,13 +1948,6 @@ void R3DRenderer::record_world(const Frame& f) {
                     // the dust behind a wall came through it whole. The depth
                     // is taken before it then, the pass going on after
                     if (have_dust && area * 4 > uint64_t(out_w) * out_h) {
-                        static double logged = -10;   // (diagnosis, temporary)
-                        double t = double(GetTickCount64()) / 1000.0;
-                        if (t - logged > 5) {
-                            logged = t;
-                            printf("[dust] depth taken before priority %d (%zu viewports over %.0f%% of the screen)\n",
-                                   vps[i].priority, j - i, 100.0 * double(area) / (double(out_w) * out_h));
-                        }
                         vkCmdEndRendering(cmd);
                         take_depth();
                         transition(cmd, depth_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
