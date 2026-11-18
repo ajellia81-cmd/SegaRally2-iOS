@@ -215,8 +215,10 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
         if (n >= 16)
             for (int k = 0; k < 3; k++) move[k] = float(sum[k] / double(n));
         for (R3DVertex& x : out.vertices)
-            if (patch(x))
+            if (patch(x)) {
                 for (int k = 0; k < 3; k++) x.prev[k] = x.pos[k] - move[k];
+                x.flags |= R3D_PATCH;
+            }
     }
     static const float shine = getenv("SR2_SHINE") ? float(atof(getenv("SR2_SHINE"))) : 0.0f;   // the cars' painted shine layer, F of its strength: left out (it veiled the paint, a grey box over the roof); SR2_SHINE=F brings it back
     if (shine != 1.0f)
@@ -453,7 +455,7 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
     // (a shadow that went out for one frame now and then, Snowy's start)
     float patch_down = down;
     if (!patches.empty()) {
-        if (measured) patch_down = std::min(down, raw);
+        if (measured) patch_down = raw < 0.03f ? raw : std::min(down, raw);   // (under the road: set back on it)
         else {
             // Under the road (the reading below -0.1 is not taken: the patch
             // stayed in it, out of sight for a frame): set back on it. Above
@@ -473,7 +475,7 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
         }
     }
     for (uint32_t k : patches) {
-        if (patch_down > 0.03f || (!measured && patch_down < 0.03f)) lower(vs[k], patch_down - 0.03f);
+        if (patch_down != 0.03f) lower(vs[k], patch_down - 0.03f);
         set_down.insert(k);
     }
     };
