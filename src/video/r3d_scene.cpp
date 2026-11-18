@@ -202,14 +202,14 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
             printf("[patch] frame %llu: %zu points near, was %zu\n", (unsigned long long)out.frame, near, before);
         before = near;
         // (and every frame, in a race: the box of those points in view space,
-        // and the player's car height kept, to see the frame the shadow dips)
+        // to see the frame the shadow dips)
         float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
         for (const R3DVertex& x : out.vertices)
             if ((x.flags & R3D_PATCH) && x.pos[0] * x.pos[0] + x.pos[1] * x.pos[1] + x.pos[2] * x.pos[2] < 144.0f)
                 for (int k = 0; k < 3; k++) lo[k] = std::min(lo[k], x.pos[k]), hi[k] = std::max(hi[k], x.pos[k]);
         if (near)
-            printf("[patchbox] %llu n%zu x %.2f %.2f y %.2f %.2f z %.2f %.2f lift %.3f\n", (unsigned long long)out.frame, near,
-                   lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], car_lift_);
+            printf("[patchbox] %llu n%zu x %.2f %.2f y %.2f %.2f z %.2f %.2f\n", (unsigned long long)out.frame, near,
+                   lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
     }
 #endif
     static const float shine = getenv("SR2_SHINE") ? float(atof(getenv("SR2_SHINE"))) : 0.0f;   // the cars' painted shine layer, F of its strength: left out (it veiled the paint, a grey box over the roof); SR2_SHINE=F brings it back
