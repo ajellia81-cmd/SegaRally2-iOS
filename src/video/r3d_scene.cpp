@@ -163,29 +163,29 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
     settle_player_car(out);
 #ifdef __APPLE__
     {   // (diagnosis, temporary) The dark patches (shadows) the game sent this
-        // frame, near the camera (within 12 units): logged when the count
-        // changes by more than a quarter or to none, and the frame after
-        static size_t before = 0;
-        static int after = 0;
-        size_t near = 0, all = 0;
-        uint32_t amin = 255, amax = 0;
+        // frame near the camera (within 12 units), every frame: how many
+        // points, their alpha, where their middle is (view space) and their
+        // flags, to find what changes in the frame the shadow goes out
+        size_t near = 0;
+        uint32_t amin = 255, amax = 0, fl = 0;
+        double c[3] = {0, 0, 0};
         for (const R3DVertex& x : out.vertices) {
             if ((x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) != (R3D_WORLD | R3D_LUMINOUS) ||
                 (x.color & 0x00FFFFFFu) != 0 || (x.color >> 24) >= 255)
                 continue;
-            all++;
             if (x.pos[0] * x.pos[0] + x.pos[1] * x.pos[1] + x.pos[2] * x.pos[2] < 144.0f) {
                 near++;
                 amin = std::min(amin, x.color >> 24);
                 amax = std::max(amax, x.color >> 24);
+                fl |= x.flags;
+                for (int k = 0; k < 3; k++) c[k] += x.pos[k];
             }
         }
-        bool jump = before > 0 && (near * 4 < before * 3 || near * 3 > before * 4);
-        if (jump || after > 0)
-            printf("[patch] frame %llu: %zu points near (%zu in all), was %zu, alpha %u-%u\n",
-                   (unsigned long long)out.frame, near, all, before, amin, amax);
-        after = jump ? 2 : std::max(0, after - 1);
-        before = near;
+        if (near) {
+            for (int k = 0; k < 3; k++) c[k] /= double(near);
+            printf("[patch] %llu %zu a%u-%u at %.2f %.2f %.2f f%X\n", (unsigned long long)out.frame, near, amin, amax,
+                   c[0], c[1], c[2], fl);
+        }
     }
 #endif
     {   // The cars' dark patches (their shadows) are copies of one model that
