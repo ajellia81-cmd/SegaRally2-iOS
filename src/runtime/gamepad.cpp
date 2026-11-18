@@ -15,6 +15,8 @@ namespace {
 
 constexpr float STICK_DEAD = 0.15f;
 constexpr float TRIGGER_DOWN = 0.35f;
+constexpr float TRIGGER_UP = 0.2f;          // a held trigger is let go below this
+constexpr double BUTTON_SETTLE = 0.04;      // seconds a button stays down after the pad says up
 constexpr float RUMBLE_STRENGTH[4] = {0.0f, 0.45f, 0.75f, 1.0f};
 
 float axis(SDL_Gamepad* p, SDL_GamepadAxis a) { return float(SDL_GetGamepadAxis(p, a)) / 32767.0f; }
@@ -109,24 +111,16 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
         if (!s.pad) continue;
         SDL_Gamepad* p = s.pad;
         // Buttons and triggers, with what changed since the last poll
+        // A held button only counts as let go once it has been up for a moment:
+        // some pads report a press as down, up, down within a few
+        // milliseconds, which made a double press (as in the Lost World port)
         bool now_down[32] = {};
-        for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT && b < 32; b++) now_down[b] = SDL_GetGamepadButton(p, SDL_GamepadButton(b));
-#ifdef __APPLE__
-        // A button let go counts as let go only after 40 ms up: the pad's
-        // buttons now and then read up for a moment in one press, and the press
-        // went in twice (in any menu, now and then; iOS port). Logged when it
-        // happens (diagnosis)
-        for (int b = 0; b < 32; b++) {
-            if (!now_down[b]) {
-                if (s.buttons[b] && s.up_at[b] <= 0) s.up_at[b] = now;   // just let go
-                if (s.up_at[b] > 0 && now - s.up_at[b] < 0.04) now_down[b] = true;
-                else s.up_at[b] = 0;
-            } else if (s.up_at[b] > 0) {
-                printf("[pad] %d button %d: up for %.0f ms in a press, taken as held\n", i, b, (now - s.up_at[b]) * 1000.0);
-                s.up_at[b] = 0;
-            }
+        for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT && b < 32; b++) {
+            bool raw = SDL_GetGamepadButton(p, SDL_GamepadButton(b));
+            if (raw || !s.buttons[b]) s.up_at[b] = 0;
+            else if (s.up_at[b] == 0) s.up_at[b] = now;
+            now_down[b] = raw || (s.buttons[b] && now - s.up_at[b] < BUTTON_SETTLE);
         }
-#endif
         // A button still held from the menu does nothing in the game until it
         // is let go: A, which chose PLAY, is also the accelerator, and the
         // pedal confirmed SELECT GAME's first choice (CHAMPIONSHIP) at once
@@ -135,8 +129,12 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
             else if (!now_down[b]) s.menu_held[b] = false;
             else if (s.menu_held[b]) now_down[b] = false;
         }
-        bool lt = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > int(TRIGGER_DOWN * 32767);
-        bool rt = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > int(TRIGGER_DOWN * 32767);
+        // (the triggers with some hysteresis, for the same reason)
+        auto trigger = [&](SDL_GamepadAxis a, bool was) {
+            return SDL_GetGamepadAxis(p, a) > int((was ? TRIGGER_UP : TRIGGER_DOWN) * 32767);
+        };
+        bool lt = trigger(SDL_GAMEPAD_AXIS_LEFT_TRIGGER, s.left_trigger);
+        bool rt = trigger(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, s.right_trigger);
         auto down = [&](SDL_GamepadButton b) { return now_down[b]; };
         auto pressed = [&](SDL_GamepadButton b) { return now_down[b] && !s.buttons[b]; };
 

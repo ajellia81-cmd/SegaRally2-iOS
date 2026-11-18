@@ -58,7 +58,7 @@ private:
         bool nintendo = false;   // A on the right: accept and back swap
         bool buttons[32] = {}, left_trigger = false, right_trigger = false;
         bool menu_held[32] = {};   // held when the menu closed: nothing in the game until let go (gamepad.cpp)
-        double up_at[32] = {};     // when each button was last seen let go (its release held 40 ms, iOS port)
+        double up_at[32] = {};     // when a held button was first seen up (debounce, see poll)
         // Menu direction held, for the key repeat
         int dir = -1;
         double next_repeat = 0;
