@@ -251,13 +251,3 @@ void Gamepads::rumble(int i, float low, float high, int ms) {
     (void)ok;
 #endif
 }
-
-bool Gamepads::button_down(int i, int b) const {
-    return i >= 0 && i < MAX && slot_[i].pad && SDL_GetGamepadButton(slot_[i].pad, SDL_GamepadButton(b));
-}
-
-int Gamepads::first() const {
-    for (int i = 0; i < MAX; i++)
-        if (slot_[i].pad) return i;
-    return -1;
-}

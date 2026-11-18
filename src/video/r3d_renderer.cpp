@@ -1,7 +1,5 @@
 #include "r3d_renderer.h"
 #include <atomic>
-extern std::atomic<int> g_sr2_patch_mode;   // r3d_scene.cpp (diagnosis)
-std::atomic<bool> g_sr2_dust_full{getenv("SR2_DUST_FULL") != nullptr};   // the dust at full resolution in the 3D pass (SR2_DUST_FULL; iOS: the left stick, a diagnosis)
 #include "image_io.h"
 #include <windows.h>
 
@@ -1794,7 +1792,8 @@ void R3DRenderer::record_world(const Frame& f) {
     bool dust_half = false;
 #ifdef __APPLE__
     {
-        if (!msaa && !g_sr2_dust_full.load() && dust_half_ && scene_ && f.vcount && !dlaa_.ready())
+        static const bool full = getenv("SR2_DUST_FULL") != nullptr;   // (as on PC: in the 3D pass)
+        if (!msaa && !full && dust_half_ && scene_ && f.vcount && !dlaa_.ready())
             for (const R3DViewport& v : scene_->viewports) dust_half |= is_dust(v);
     }
 #endif
@@ -2103,7 +2102,7 @@ void R3DRenderer::record_world(const Frame& f) {
                         // 0: left out (pre-pass), 1: as it is, 2: the cars' patch
                         auto kind = [&](uint32_t i) {
                             if (prepass && !needs_depth(i)) return 0;
-                            return v.world && is_blob(i) && g_sr2_patch_mode.load() != 1 ? 2 : 1;   // (mode 1: a diagnosis)
+                            return v.world && is_blob(i) ? 2 : 1;
                         };
                         VkPipeline bound = VK_NULL_HANDLE;
                         for (uint32_t a = v.trans_first; a < end;) {
