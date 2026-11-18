@@ -4,7 +4,7 @@
 
 #include "r3d_dust.h"
 #include <atomic>
-std::atomic<bool> g_sr2_car_as_is{getenv("SR2_CAR_AS_IS") != nullptr};   // the cars as drawn (SR2_CAR_AS_IS; iOS: the left stick)
+std::atomic<bool> g_sr2_car_as_is{getenv("SR2_CAR_AS_IS") != nullptr};   // the cars as drawn (SR2_CAR_AS_IS; iOS: the left stick, a diagnosis)
 #include "r3d_screen.h"
 
 #include <algorithm>
@@ -161,65 +161,24 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
         for (uint32_t i = v.trans_first; i < v.trans_first + v.trans_count; i++) out.vertices[i].flags |= R3D_CAR;
     }
     settle_player_car(out);
+    // The cars' dark patches (their shadows) marked: r3d.vert draws them a
+    // little nearer (iOS port)
+    for (R3DVertex& x : out.vertices)
+        if ((x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) == (R3D_WORLD | R3D_LUMINOUS) &&
+            (x.color & 0x00FFFFFFu) == 0 && (x.color >> 24) < 255)
+            x.flags |= R3D_PATCH;
 #ifdef __APPLE__
-    {   // (diagnosis, temporary) The dark patches (shadows) the game sent this
-        // frame, near the camera (within 12 units): logged when the count
-        // changes by more than a quarter or to none, and the frame after
+    {   // (diagnosis) The patches the game sent near the camera (within 12
+        // units): logged when their count jumps by more than a quarter
         static size_t before = 0;
-        static int after = 0;
-        size_t near = 0, all = 0;
-        uint32_t amin = 255, amax = 0;
-        for (const R3DVertex& x : out.vertices) {
-            if ((x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) != (R3D_WORLD | R3D_LUMINOUS) ||
-                (x.color & 0x00FFFFFFu) != 0 || (x.color >> 24) >= 255)
-                continue;
-            all++;
-            if (x.pos[0] * x.pos[0] + x.pos[1] * x.pos[1] + x.pos[2] * x.pos[2] < 144.0f) {
-                near++;
-                amin = std::min(amin, x.color >> 24);
-                amax = std::max(amax, x.color >> 24);
-            }
-        }
-        bool jump = before > 0 && (near * 4 < before * 3 || near * 3 > before * 4);
-        if (jump || after > 0)
-            printf("[patch] frame %llu: %zu points near (%zu in all), was %zu, alpha %u-%u\n",
-                   (unsigned long long)out.frame, near, all, before, amin, amax);
-        after = jump ? 2 : std::max(0, after - 1);
+        size_t near = 0;
+        for (const R3DVertex& x : out.vertices)
+            if ((x.flags & R3D_PATCH) && x.pos[0] * x.pos[0] + x.pos[1] * x.pos[1] + x.pos[2] * x.pos[2] < 144.0f) near++;
+        if (before > 0 && (near * 4 < before * 3 || near * 3 > before * 4))
+            printf("[patch] frame %llu: %zu points near, was %zu\n", (unsigned long long)out.frame, near, before);
         before = near;
     }
 #endif
-    {   // The cars' dark patches (their shadows) are copies of one model that
-        // the game reorders: their own previous positions pair them with other
-        // cars' (almost every frame), and drawn where they are, between game
-        // frames the road under them moved on and covered them (the shadow
-        // going out for a frame now and then going up Snowy's hills, iOS port).
-        // They move with the road instead: by the road's own move since the
-        // last frame, averaged over the world near the camera
-        double sum[3] = {0, 0, 0};
-        size_t n = 0;
-        auto patch = [](const R3DVertex& x) {
-            return (x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) == (R3D_WORLD | R3D_LUMINOUS) &&
-                   (x.color & 0x00FFFFFFu) == 0 && (x.color >> 24) < 255;
-        };
-        for (const R3DVertex& x : out.vertices) {
-            if (!(x.flags & R3D_WORLD) || (x.flags & R3D_CAR) || patch(x)) continue;
-            float r2 = x.pos[0] * x.pos[0] + x.pos[1] * x.pos[1] + x.pos[2] * x.pos[2];
-            if (r2 > 15.0f * 15.0f) continue;
-            float d2 = 0;
-            for (int k = 0; k < 3; k++) d2 += (x.pos[k] - x.prev[k]) * (x.pos[k] - x.prev[k]);
-            if (d2 > 4.0f * 4.0f) continue;   // (a pairing gone wrong itself)
-            for (int k = 0; k < 3; k++) sum[k] += x.pos[k] - x.prev[k];
-            n++;
-        }
-        float move[3] = {0, 0, 0};
-        if (n >= 16)
-            for (int k = 0; k < 3; k++) move[k] = float(sum[k] / double(n));
-        for (R3DVertex& x : out.vertices)
-            if (patch(x)) {
-                for (int k = 0; k < 3; k++) x.prev[k] = x.pos[k] - move[k];
-                x.flags |= R3D_PATCH;
-            }
-    }
     static const float shine = getenv("SR2_SHINE") ? float(atof(getenv("SR2_SHINE"))) : 0.0f;   // the cars' painted shine layer, F of its strength: left out (it veiled the paint, a grey box over the roof); SR2_SHINE=F brings it back
     if (shine != 1.0f)
         for (R3DVertex& x : out.vertices)
@@ -444,32 +403,9 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
     // Never by more than this frame's own gap: while the car's height is
     // held through a jump in it (the car squatting as it sets off), the patch
     // went into the road and was gone for half a second (iOS port)
-    // Nor, in a frame that could not measure it (too few of its points over
-    // the road found), by the whole height: the least gap there is, or none
-    // (a shadow that went out for one frame now and then, Snowy's start)
-    float patch_down = down;
-    if (!patches.empty()) {
-        if (measured) patch_down = raw < 0.03f ? raw : std::min(down, raw);   // (under the road: set back on it)
-        else {
-            // Under the road (the reading below -0.1 is not taken: the patch
-            // stayed in it, out of sight for a frame): set back on it. Above
-            // it, where the game put it (a jump), lowered no more than the
-            // car and no more than its gap, as when measured
-            float mid = 0.03f;
-            if (!gaps.empty()) {
-                std::vector<float> g = gaps;
-                std::nth_element(g.begin(), g.begin() + g.size() / 2, g.end());
-                mid = std::clamp(g[g.size() / 2], -1.0f, 2.0f);
-            }
-            patch_down = mid < 0.03f ? mid : std::min(down, mid);
-#ifdef __APPLE__
-            printf("[shadow] frame %llu car %06X: not measured (%zu points, %zu over the road), gap %.3f, height %.3f\n",
-                   (unsigned long long)out.frame, car->node, patches.size() / 3, gaps.size(), mid, down);
-#endif
-        }
-    }
+    float patch_down = measured && !patches.empty() ? std::min(down, raw) : down;
     for (uint32_t k : patches) {
-        if (patch_down != 0.03f) lower(vs[k], patch_down - 0.03f);
+        if (patch_down > 0.03f) lower(vs[k], patch_down - 0.03f);
         set_down.insert(k);
     }
     };
