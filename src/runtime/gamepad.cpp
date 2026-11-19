@@ -52,6 +52,17 @@ int Gamepads::slot_of(uint32_t id) const {
     return -1;
 }
 
+#ifdef __APPLE__
+// SDL makes a pad's haptics engines at its first rumble, and each motor's
+// player at the first rumble that motor is given more than nothing: in the
+// race, on the thread that draws, a stutter. Both motors made to rumble at the
+// faintest there is (1 of 65535, not to be felt), then none, makes them all now
+static void ready_rumble(SDL_Gamepad* p) {
+    SDL_RumbleGamepad(p, 1, 1, 0);
+    SDL_RumbleGamepad(p, 0, 0, 0);
+}
+#endif
+
 void Gamepads::open(uint32_t id) {
     if (slot_of(id) >= 0) return;
     // A wheel that SDL also maps as a gamepad is wheel.cpp's
@@ -72,6 +83,9 @@ void Gamepads::open(uint32_t id) {
     const char* name = SDL_GetGamepadName(p);
     st.name = name ? name : "Gamepad";
     changed_ = true;
+#ifdef __APPLE__
+    ready_rumble(p);   // (ready before the first rumble of a race)
+#endif
     printf("[gamepad] %d: %s\n", i + 1, st.name.c_str());
 }
 
@@ -263,10 +277,7 @@ void Gamepads::restart_rumble() {
             slot_[i] = Slot{};
             continue;
         }
-        // The new engines are made at the first rumble: the faintest there is
-        // (1 of 65535, not to be felt), then none
-        SDL_RumbleGamepad(slot_[i].pad, 1, 0, 0);
-        SDL_RumbleGamepad(slot_[i].pad, 0, 0, 0);
+        ready_rumble(slot_[i].pad);
     }
 }
 #endif
