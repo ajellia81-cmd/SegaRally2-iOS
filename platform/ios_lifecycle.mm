@@ -48,7 +48,7 @@ static CHHapticEngine* g_knock_engine = nil;   // (ARC: CMakeLists.txt)
 static GCController* g_knock_pad = nil;
 static std::atomic<bool> g_knock_ok{false};
 
-void platform_crash_haptic(float strength, int where) {
+static void knock_now(float strength, int where) {
     if (strength <= 0.0f) return;
     {
         @autoreleasepool {
@@ -124,4 +124,15 @@ void platform_crash_haptic(float strength, int where) {
             }
         }
     }
+}
+
+// Called from the input poll, on the thread that draws: the work above goes to
+// a queue of its own. Making and starting the engine on the first knock took
+// that thread for a while (a long stutter at the first crash of a race)
+void platform_crash_haptic(float strength, int where) {
+    if (strength <= 0.0f) return;
+    static dispatch_queue_t queue = dispatch_queue_create("sr2.knock", DISPATCH_QUEUE_SERIAL);
+    dispatch_async(queue, ^{
+        knock_now(strength, where);
+    });
 }
