@@ -1387,6 +1387,9 @@ int main(int argc, char** argv) {
                 }
             }
 #endif
+#ifdef __APPLE__
+            if (g_sr2_foregrounded.exchange(false)) g_pads.restart_rumble();
+#endif
             bool to_background = g_sr2_backgrounded.exchange(false);
             if (to_background && g_opt.menu && !frontend.active()) {
                 frontend.open(Frontend::Screen::Pause);

@@ -47,6 +47,13 @@ public:
     std::vector<PadKey> take_keys();
     // Vibration, 0..1 per motor, scaled by the settings' strength
     void rumble(int i, float low, float high, int ms);
+#ifdef __APPLE__
+    // The app came back from the background: iOS stopped the pads' haptics
+    // engines there, and SDL makes them again only at the next rumble, on the
+    // thread that draws - a stutter in the race. Done here at once instead,
+    // with the pause menu up
+    void restart_rumble();
+#endif
 
 private:
     struct Slot {

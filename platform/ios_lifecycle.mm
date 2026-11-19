@@ -10,6 +10,7 @@ void compat_set_focus(bool focused);
 void compat_release_keys();
 
 std::atomic<bool> g_sr2_backgrounded{false};   // set when it goes; app.cpp opens the pause menu
+std::atomic<bool> g_sr2_foregrounded{false};   // set when it comes back; app.cpp starts the rumble again
 
 void platform_watch_lifecycle() {
     NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
@@ -23,7 +24,10 @@ void platform_watch_lifecycle() {
     [center addObserverForName:UIApplicationDidBecomeActiveNotification
                         object:nil
                          queue:nil
-                    usingBlock:^(NSNotification*) { compat_set_focus(true); }];
+                    usingBlock:^(NSNotification*) {
+                        compat_set_focus(true);
+                        g_sr2_foregrounded = true;
+                    }];
 }
 
 // The device's thermal state for the log (0 nominal, 1 fair, 2 serious,

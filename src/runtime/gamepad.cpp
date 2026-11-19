@@ -251,3 +251,22 @@ void Gamepads::rumble(int i, float low, float high, int ms) {
     (void)ok;
 #endif
 }
+
+#ifdef __APPLE__
+void Gamepads::restart_rumble() {
+    for (int i = 0; i < MAX; i++) {
+        if (!slot_[i].pad) continue;
+        SDL_JoystickID id = slot_[i].id;
+        SDL_CloseGamepad(slot_[i].pad);   // (the stopped engines go with it)
+        slot_[i].pad = SDL_OpenGamepad(id);
+        if (!slot_[i].pad) {
+            slot_[i] = Slot{};
+            continue;
+        }
+        // The new engines are made at the first rumble: the faintest there is
+        // (1 of 65535, not to be felt), then none
+        SDL_RumbleGamepad(slot_[i].pad, 1, 0, 0);
+        SDL_RumbleGamepad(slot_[i].pad, 0, 0, 0);
+    }
+}
+#endif

@@ -9,5 +9,7 @@ bool sr2_take_device_event(SDL_Event* e);
 // focus events elsewhere): app.cpp opens the pause menu
 extern std::atomic<bool> g_sr2_backgrounded;
 #ifdef __APPLE__
+// It came back (ios_lifecycle.mm): app.cpp has the pads' rumble started again
+extern std::atomic<bool> g_sr2_foregrounded;
 void platform_watch_lifecycle();
 #endif
