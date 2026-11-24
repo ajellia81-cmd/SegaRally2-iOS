@@ -1713,6 +1713,10 @@ int main(int argc, char** argv) {
             double now = qpc_seconds();
             double t = std::clamp((shown_time - built->time) / frame_period + 1.0, 0.0, 1.0);
             if (fixed_interp) t = std::clamp(atof(fixed_interp), 0.0, 1.0);
+            {
+                extern std::atomic<int> g_sr2_diag;   // (diagnosis: the left stick, app_input.cpp)
+                if (g_sr2_diag.load() == 2) t = 1.0;
+            }
             renderer.set_interpolation(float(t));
             // The back layers move with the 3D when their 2D frames are those
             // of the two 3D frames it goes between

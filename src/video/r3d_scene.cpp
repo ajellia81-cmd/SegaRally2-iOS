@@ -7,11 +7,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 #include <intrin.h>   // __popcnt: MSVC knows it without this, clang for Windows does not
+
+std::atomic<int> g_sr2_diag{0};   // (diagnosis, iOS port: the left stick, app_input.cpp)
 
 namespace {
 
@@ -200,7 +203,8 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
 // a car without a patch, far away, is left). The patch is set down with it,
 // just clear of the road. SR2_CAR_AS_IS=1 leaves the car as the game places it
 void R3DSceneBuilder::settle_player_car(R3DScene& out) {
-    static const bool as_is = getenv("SR2_CAR_AS_IS") != nullptr;
+    static const bool as_is_env = getenv("SR2_CAR_AS_IS") != nullptr;
+    const bool as_is = as_is_env || g_sr2_diag.load() == 1;
     static const bool log = getenv("SR2_CARLOG") != nullptr;
     const R3DViewport* world = nullptr;
     for (const R3DViewport& v : out.viewports)
@@ -220,6 +224,7 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
                (x.color & 0x00FFFFFFu) == 0 && (x.color >> 24) < 255;
     };
     std::unordered_set<uint32_t> set_down;   // the patches' vertices already lowered (two cars side by side)
+    const R3DViewport* first_car_ = nullptr;   // (diagnosis: the one logged)
     auto settle = [&](const R3DViewport* car, float& car_lift_, uint32_t& car_lift_skips_, uint64_t& patch_seen,
                       float& clear_ref) {
     // The car's bodywork (not its glass, its dust): where it is, its lowest point
@@ -373,6 +378,18 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
     }
     // (diagnosis on iOS, temporary: the frames where the measure and the
     // height kept part, or the height moves: the car bobbing after the start)
+    {   // (diagnosis, temporary: the car going up and down at the start in the
+        // mountain - its bodywork's lowest point, the patch's reading and the
+        // height taken off it, when one of them moves 1 cm or more)
+        static float last_low = 0, last_raw = -9, last_lift = -9;
+        static uint64_t last_frame = 0;
+        if (car == first_car_ && (std::fabs(low[1] - last_low) > 0.01f || std::fabs(raw - last_raw) > 0.01f ||
+                                  std::fabs(car_lift_ - last_lift) > 0.01f) && out.frame - last_frame >= 2) {
+            printf("[car] frame %llu lowest %.3f clear %.3f raw %.3f lift %.3f skips %u patch %zu\n",
+                   (unsigned long long)out.frame, low[1], clear, raw, car_lift_, unsigned(car_lift_skips_), patches.size());
+            last_low = low[1], last_raw = raw, last_lift = car_lift_, last_frame = out.frame;
+        }
+    }
     if (log)
         printf("[car] frame %llu car %06X patch %zu road %zu raw %.3f lowest %.3f lift %.3f skips %u\n",
                (unsigned long long)out.frame, car->node, patches.size(), road.size(), raw, low[1], car_lift_,
@@ -403,6 +420,7 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
         CarLift& lift = car_lifts_[v.node];
         if (out.frame - lift.frame > 30) lift.height = -1, lift.skips = 0;   // another race, another camera
         lift.frame = out.frame;
+        if (!first_car_) first_car_ = &v;
         settle(&v, lift.height, lift.skips, lift.patch, lift.clear);
     }
     for (auto it = car_lifts_.begin(); it != car_lifts_.end();)

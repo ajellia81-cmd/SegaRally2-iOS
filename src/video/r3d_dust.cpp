@@ -437,6 +437,32 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
     int world = -1;
     for (uint32_t i = 0; i < out.viewports.size(); i++)
         if (out.viewports[i].world) world = int(i);
+    {   // (diagnosis, temporary: the ending's dust as the game's own) Without a
+        // game world, once a second: each viewport's place and size, and how
+        // many of its see-through triangles look like the game's fans of dust
+        static uint64_t last = 0;
+        static int had = -1;
+        if (int(world >= 0) != had) {
+            had = int(world >= 0);
+            printf("[scene] frame %llu: %s\n", (unsigned long long)out.frame, had ? "a game world" : "no game world");
+        }
+        if (world < 0 && out.frame - last >= 57) {
+            last = out.frame;
+            printf("[scene] frame %llu no world, %zu viewports, %zu moving\n", (unsigned long long)out.frame,
+                   out.viewports.size(), out.moving);
+            for (uint32_t i = 0; i < out.viewports.size(); i++) {
+                const R3DViewport& v = out.viewports[i];
+                uint32_t fans = 0;
+                for (uint32_t k = v.trans_first; k + 2 < v.trans_first + v.trans_count && k < out.vertices.size(); k += 3)
+                    fans += is_fan(out.vertices[k]);
+                if (!v.opaque_count && !fans) continue;
+                printf("  vp %u pri %d at %.0f,%.0f size %.0fx%.0f opaque %u trans %u fans %u sun %.2f car %d\n", i,
+                       v.priority, v.x, v.y, v.w, v.h, v.opaque_count, v.trans_count, fans, v.sun_intensity,
+                       v.opaque_count && v.opaque_first < out.vertices.size() &&
+                           (out.vertices[v.opaque_first].flags & R3D_CAR) != 0);
+            }
+        }
+    }
 
     // The game's fans of dust: models it builds in polygon RAM, in world
     // coordinates (so their node's matrix is the camera's), drawn in the cars'

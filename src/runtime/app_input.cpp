@@ -13,11 +13,15 @@
 #include "wheel.h"
 #ifndef _WIN32
 #include "touch_controls.h"
+#ifdef __APPLE__
+#include <SDL3/SDL_gamepad.h>   // (the left stick: a diagnosis)
+#endif
 #endif
 
 bool g_menu_open = false;   // a menu has the controls
 Gamepads g_pads;
 int g_pad_rumble = 2;
+extern std::atomic<int> g_sr2_diag;   // r3d_scene.cpp
 #ifdef __APPLE__
 void platform_crash_haptic(float strength, int where = 0);   // platform/ios_lifecycle.mm (where: 0 default, 1 handles, 2 left handle)
 #endif
@@ -85,6 +89,21 @@ void poll_keyboard(HWND hwnd) {
 bool poll_gamepads(HWND hwnd) {
     bool focused = GetForegroundWindow() == hwnd;
     g_pads.poll(g_pad_rumble, focused, g_menu_open);
+#ifdef __APPLE__
+    {   // (diagnosis, temporary) The left stick pressed in goes round: as
+        // usual; the cars as the game places them (not set down on the
+        // road); no in-between frames (the game's own 57.5 a second)
+        static bool was = false;
+        int p = g_pads.first();
+        bool down = p >= 0 && g_pads.button_down(p, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+        if (down && !was) {
+            static const char* names[3] = {"as usual", "cars as the game places them", "no in-between frames"};
+            g_sr2_diag = (g_sr2_diag.load() + 1) % 3;
+            printf("[diag] mode %d: %s\n", g_sr2_diag.load(), names[g_sr2_diag.load()]);
+        }
+        was = down;
+    }
+#endif
     if (!focused || g_menu_open || !g_auto.events.empty()) return false;
     Inputs& in = g_inputs;
     auto keyboard_steer = [&] { return (float(in.steer) - 128.0f) / 127.0f; };
