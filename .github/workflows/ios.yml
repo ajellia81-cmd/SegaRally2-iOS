@@ -95,7 +95,15 @@ jobs:
           gh release view ipa --repo "$PRIVATE_REPO" >/dev/null 2>&1 || \
             gh release create ipa --repo "$PRIVATE_REPO" --title "SegaRally2.ipa (private build)" \
               --notes "The latest build, for the owner's own device (LiveContainer). Not for distribution."
-          gh release upload ipa build/SegaRally2.ipa --repo "$PRIVATE_REPO" --clobber
+          # Under a name of its own (the commit's), then the older ones deleted:
+          # replacing the one asset in place (--clobber) failed for hours with
+          # GitHub's HTTP 500 on deleting it, and the build was lost with it
+          name="SegaRally2-${GITHUB_SHA::7}.ipa"
+          cp build/SegaRally2.ipa "build/$name"
+          gh release upload ipa "build/$name" --repo "$PRIVATE_REPO" --clobber
+          for old in $(gh release view ipa --repo "$PRIVATE_REPO" --json assets -q ".assets[].name" | grep -vx "$name"); do
+            gh release delete-asset ipa "$old" --repo "$PRIVATE_REPO" --yes || echo "(could not delete $old: left for later)"
+          done
 
       - name: Clean up (ROM and build output off the runner)
         if: always()
