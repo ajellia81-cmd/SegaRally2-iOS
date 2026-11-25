@@ -46,106 +46,135 @@ double platform_refresh_period() {
     return period;
 }
 
-// A knock felt in the controller's hands when the car hits something (iOS
-// port; runtime.cpp hears the crash sounds, app_input.cpp calls this). SDL's
-// rumble is one endless pattern whose strength it changes and which it stops
-// after each quiet spell: the knocks at low speed, coming after such a spell,
-// were logged as sent at full and still not felt. Each knock here is a short
-// pattern of its own, played on an engine of our own: a sharp tap, then a
-// fading buzz
+// The pads' rumble (iOS port): gamepad.cpp's strengths, the same as SDL would
+// play them (the low part in the left handle, the high in the right, each
+// 0..1), on haptics engines of our own. SDL's endless haptic event went dead
+// after about 30 s, for good; here each buzz is a finite one, made new before
+// it runs out. All of it on a queue of its own: making and starting an engine
+// takes a while, and the thread that draws must not wait for it
 #import <CoreHaptics/CoreHaptics.h>
 #import <GameController/GameController.h>
+#import <QuartzCore/QuartzCore.h>
 #include <cstdio>
 
-static CHHapticEngine* g_knock_engine = nil;   // (ARC: CMakeLists.txt)
-static GCController* g_knock_pad = nil;
-static std::atomic<bool> g_knock_ok{false};
+static dispatch_queue_t rumble_queue() {
+    static dispatch_queue_t queue = dispatch_queue_create("sr2.rumble", DISPATCH_QUEUE_SERIAL);
+    return queue;
+}
 
-static void knock_now(float strength, int where) {
-    if (strength <= 0.0f) return;
-    {
-        @autoreleasepool {
-            GCController* pad = nil;
-            for (GCController* c in GCController.controllers)
-                if (c.haptics) {
-                    pad = c;
-                    break;
-                }
-            if (!pad) return;
-            static int logged = 0;   // (diagnosis: where the pad can vibrate)
-            if (!logged++) {
-                NSMutableString* list = [NSMutableString string];
-                for (GCHapticsLocality l in pad.haptics.supportedLocalities) [list appendFormat:@"%@ ", l];
-                printf("[knock] %s: haptics at %s\n", pad.vendorName.UTF8String, list.UTF8String);
-            }
-            NSError* error = nil;
-            static int engine_where = -1;
-            if (!g_knock_engine || !g_knock_ok.load() || g_knock_pad != pad || engine_where != where) {
-                if (g_knock_engine) [g_knock_engine stopWithCompletionHandler:nil];
-                engine_where = where;
-                g_knock_engine = [pad.haptics createEngineWithLocality:where == 1 ? GCHapticsLocalityHandles
-                                                                     : where == 2 ? GCHapticsLocalityLeftHandle
-                                                                                  : GCHapticsLocalityDefault];
-                g_knock_pad = pad;
-                if (!g_knock_engine) {
-                    printf("[knock] no haptics engine\n");
-                    return;
-                }
-                __weak CHHapticEngine* engine = g_knock_engine;
-                g_knock_engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) {
-                    g_knock_ok = false;
-                    printf("[knock] engine stopped (%ld)\n", long(reason));
-                };
-                g_knock_engine.resetHandler = ^{
-                    g_knock_ok = [engine startAndReturnError:nil];
-                };
-                if (![g_knock_engine startAndReturnError:&error]) {
-                    printf("[knock] engine not started: %s\n", error.localizedDescription.UTF8String);
-                    g_knock_engine = nil;
-                    return;
-                }
-                g_knock_ok = true;
-            }
-            float s = strength > 1.0f ? 1.0f : strength;
-            CHHapticEvent* tap = [[CHHapticEvent alloc]
-                initWithEventType:CHHapticEventTypeHapticTransient
-                       parameters:@[[[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:s],
-                                    [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness value:0.5f]]
-                     relativeTime:0];
-            CHHapticEvent* buzz = [[CHHapticEvent alloc]
-                initWithEventType:CHHapticEventTypeHapticContinuous
-                       parameters:@[[[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:s],
-                                    [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness value:0.2f]]
-                     relativeTime:0
-                         duration:0.25];
-            CHHapticParameterCurve* fade = [[CHHapticParameterCurve alloc]
-                initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl
-                      controlPoints:@[[[CHHapticParameterCurveControlPoint alloc] initWithRelativeTime:0 value:1.0f],
-                                      [[CHHapticParameterCurveControlPoint alloc] initWithRelativeTime:0.1 value:1.0f],
-                                      [[CHHapticParameterCurveControlPoint alloc] initWithRelativeTime:0.25 value:0.0f]]
-                       relativeTime:0];
-            CHHapticPattern* pattern = [[CHHapticPattern alloc] initWithEvents:@[tap, buzz] parameterCurves:@[fade] error:&error];
-            if (!pattern) {
-                printf("[knock] no pattern: %s\n", error.localizedDescription.UTF8String);
-                return;
-            }
-            id<CHHapticPatternPlayer> player = [g_knock_engine createPlayerWithPattern:pattern error:&error];
-            if (!player || ![player startAtTime:CHHapticTimeImmediate error:&error]) {
-                printf("[knock] not played: %s\n", error ? error.localizedDescription.UTF8String : "?");
-                g_knock_ok = false;   // a new engine next time
-                return;
-            }
+namespace {
+struct Motor {
+    CHHapticEngine* engine = nil;
+    id<CHHapticPatternPlayer> player = nil;
+    GCController* pad = nil;
+    double started = 0;   // when the player's buzz began (CACurrentMediaTime)
+};
+Motor g_motor[2];
+std::atomic<bool> g_motor_ok[2];
+constexpr double BUZZ_LENGTH = 20.0, BUZZ_RENEW = 15.0;   // (iOS ends one at 30 s)
+
+GCController* haptic_pad() {
+    for (GCController* c in GCController.controllers)
+        if (c.haptics) return c;
+    return nil;
+}
+
+// The motor's engine, made and started if there is none (or iOS stopped it)
+bool motor_engine(int m, GCController* pad) {
+    Motor& o = g_motor[m];
+    if (o.engine && g_motor_ok[m].load() && o.pad == pad) return true;
+    if (o.engine) [o.engine stopWithCompletionHandler:nil];
+    o = Motor{};
+    o.engine = [pad.haptics createEngineWithLocality:m == 0 ? GCHapticsLocalityLeftHandle : GCHapticsLocalityRightHandle];
+    if (!o.engine) return false;
+    o.pad = pad;
+    o.engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) {
+        g_motor_ok[m] = false;
+        printf("[rumble] engine %d stopped (%ld)\n", m, long(reason));
+    };
+    o.engine.resetHandler = ^{ g_motor_ok[m] = false; };
+    NSError* error = nil;
+    if (![o.engine startAndReturnError:&error]) {
+        printf("[rumble] engine %d not started: %s\n", m, error.localizedDescription.UTF8String);
+        o = Motor{};
+        return false;
+    }
+    g_motor_ok[m] = true;
+    return true;
+}
+
+void motor_stop(int m) {
+    Motor& o = g_motor[m];
+    if (o.player) [o.player stopAtTime:CHHapticTimeImmediate error:nil];
+    o.player = nil;
+}
+
+void motor_set(int m, GCController* pad, float level) {
+    if (level <= 0.0f) {
+        motor_stop(m);
+        return;
+    }
+    if (!motor_engine(m, pad)) return;
+    Motor& o = g_motor[m];
+    NSError* error = nil;
+    double now = CACurrentMediaTime();
+    if (o.player && now - o.started > BUZZ_RENEW) motor_stop(m);   // (a new buzz before this one runs out)
+    CHHapticDynamicParameter* p = [[CHHapticDynamicParameter alloc]
+        initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl value:level > 1.0f ? 1.0f : level relativeTime:0];
+    if (!o.player) {
+        CHHapticEvent* buzz = [[CHHapticEvent alloc]
+            initWithEventType:CHHapticEventTypeHapticContinuous
+                   parameters:@[[[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:1.0f]]
+                 relativeTime:0
+                     duration:BUZZ_LENGTH];
+        CHHapticPattern* pattern = [[CHHapticPattern alloc] initWithEvents:@[buzz] parameters:@[] error:&error];
+        o.player = pattern ? [o.engine createPlayerWithPattern:pattern error:&error] : nil;
+        if (!o.player || ![o.player sendParameters:@[p] atTime:CHHapticTimeImmediate error:&error] ||
+            ![o.player startAtTime:CHHapticTimeImmediate error:&error]) {
+            printf("[rumble] motor %d not played: %s\n", m, error ? error.localizedDescription.UTF8String : "?");
+            o.player = nil;
+            g_motor_ok[m] = false;   // (a new engine next time)
+            return;
         }
+        o.started = now;
+        return;
+    }
+    if (![o.player sendParameters:@[p] atTime:CHHapticTimeImmediate error:&error]) {
+        o.player = nil;
+        g_motor_ok[m] = false;
     }
 }
 
-// Called from the input poll, on the thread that draws: the work above goes to
-// a queue of its own. Making and starting the engine on the first knock took
-// that thread for a while (a long stutter at the first crash of a race)
-void platform_crash_haptic(float strength, int where) {
-    if (strength <= 0.0f) return;
-    static dispatch_queue_t queue = dispatch_queue_create("sr2.knock", DISPATCH_QUEUE_SERIAL);
-    dispatch_async(queue, ^{
-        knock_now(strength, where);
+std::atomic<uint64_t> g_rumble_serial{0};
+}  // namespace
+
+void platform_pad_rumble(float low, float high, int ms) {
+    uint64_t serial = ++g_rumble_serial;
+    dispatch_async(rumble_queue(), ^{
+        if (serial != g_rumble_serial.load()) return;   // (a newer one is on its way)
+        @autoreleasepool {
+            GCController* pad = haptic_pad();
+            if (!pad) return;
+            motor_set(0, pad, low);
+            motor_set(1, pad, high);
+        }
+    });
+    // Let go when the time asked for runs out with nothing newer (as SDL does)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, int64_t(ms > 0 ? ms : 1) * NSEC_PER_MSEC), rumble_queue(), ^{
+        if (serial != g_rumble_serial.load()) return;
+        @autoreleasepool {
+            motor_stop(0);
+            motor_stop(1);
+        }
+    });
+}
+
+// The engines made and started now (a pad connected, the app back from the
+// background), so that the first rumble does not wait for them
+void platform_pad_rumble_ready() {
+    dispatch_async(rumble_queue(), ^{
+        @autoreleasepool {
+            if (GCController* pad = haptic_pad()) motor_engine(0, pad), motor_engine(1, pad);
+        }
     });
 }

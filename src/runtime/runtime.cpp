@@ -38,10 +38,6 @@
 #include "../audio/audio_out.h"
 #include "../audio/sound_board.h"
 #include "../video/r3d_dust.h"
-
-#ifdef __APPLE__
-void midi_note(uint8_t b);   // (the crash sounds, below)
-#endif
 #include "../video/r3d_state.h"
 #include "stats.h"
 #include "telemetry.h"
@@ -409,9 +405,6 @@ void dev_write8(uint32_t a, uint8_t v) {
     if (a == 0xF0080000) {   // MIDI byte to the sound board
         g_irq_state &= ~0x40;
         g_sound.midi_write(v);
-#ifdef __APPLE__
-        ::midi_note(uint8_t(v));   // (the crash sounds: a knock in the pad's hands)
-#endif
         // Debugging aid: SR2_MIDI_LOG=file writes the bytes, a line per frame
         // with the select step (0x22435C) and the round (0x22CF48)
         static FILE* midi_log = getenv("SR2_MIDI_LOG") ? fopen(getenv("SR2_MIDI_LOG"), "w") : nullptr;
@@ -1243,34 +1236,6 @@ static void attract_guard_frame() {
 // above its slow part are a small part of their rumble (pad_rumble.cpp). Outside
 // the races the game stops the motor, so nothing pulls the wheel then.
 // SR2_FFB_LOG prints them as they change
-#ifdef __APPLE__
-// A crash: the game's own crash sound (iOS port). Its sound commands are three
-// bytes (Ax, a parameter, a value): A0 14 xx came with every knock on a wall
-// (the value: which of the crash sounds), A0 15 xx with the slower knocks
-// (several at once). The pads' rumble from the car (pad_rumble.cpp) leaves the
-// game's soft crashes out; each sound here sets off a knock of its own in the
-// controller (app_input.cpp, platform/ios_lifecycle.mm)
-std::atomic<uint32_t> g_crash_knocks{0};
-std::atomic<float> g_crash_knock_strength{0.0f};
-void midi_note(uint8_t b) {
-    static uint8_t msg[3];
-    static int len = 0;
-    if (b & 0x80) len = 0;
-    if (len < 3) msg[len++] = b;
-    if (len != 3) return;
-    len = 0;
-    if (msg[0] != 0xA0 || int32_t(rd32(SEQUENCE)) != 1) return;
-    if (msg[1] == 0x15) {
-        if (g_crash_knock_strength.load() < 0.8f) g_crash_knock_strength = 0.8f;
-        g_crash_knocks++;
-    }
-    if (msg[1] == 0x14) {
-        g_crash_knock_strength = 1.0f;
-        g_crash_knocks++;
-    }
-}
-#endif
-
 static void ffb_frame() {
     static const bool log = getenv("SR2_FFB_LOG") != nullptr;
     static float slow = 0;
