@@ -46,10 +46,6 @@ double platform_refresh_period() {
     return period;
 }
 
-int platform_thermal_state() {
-    return int([[NSProcessInfo processInfo] thermalState]);
-}
-
 // A knock felt in the controller's hands when the car hits something (iOS
 // port; runtime.cpp hears the crash sounds, app_input.cpp calls this). SDL's
 // rumble is one endless pattern whose strength it changes and which it stops
