@@ -451,6 +451,12 @@ void draw(const Frame& f, const Frame& before, std::vector<R3DVertex>& out) {
     }
     // Farthest first: they are blended over each other
     std::sort(order.begin(), order.end(), [](const Order& a, const Order& b) { return a.z < b.z; });
+#ifdef __APPLE__
+    // The drops last, by themselves: the renderer draws them at full
+    // resolution, the rest at half (iOS port: thin threads of water at half
+    // resolution were all but gone)
+    std::stable_partition(order.begin(), order.end(), [&](const Order& o) { return !g_parts[o.i].drop; });
+#endif
     const int corners[6] = {0, 1, 2, 0, 2, 3};
     for (const Order& o : order) {
         const Particle& p = g_parts[o.i];

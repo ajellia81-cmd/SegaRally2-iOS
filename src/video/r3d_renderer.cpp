@@ -2505,9 +2505,20 @@ void R3DRenderer::record_world(const Frame& f) {
                         }
                     };
                     if (pass == 1 && dust_half && is_dust(v)) {   // (after the pass, at half resolution)
-                        have_dust = true;
+                        // The puddles' drops (r3d_dust.cpp puts them last: tex
+                        // kind 1, bit 2 clear) here, at full resolution: thin
+                        // threads, at half they were all but gone
+                        uint32_t end = std::min<uint32_t>(v.trans_first + count, uint32_t(vs.size())), split = end;
+                        while (split >= v.trans_first + 3 && (vs[split - 1].tex & 7u) == 1u) split -= 3;
+                        if (split < end) {
+                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, translucent_);
+                            vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                               sizeof(pc), &pc);
+                            vkCmdDraw(cmd, end - split, 1, split, 0);
+                        }
+                        have_dust |= split > v.trans_first;
                         dust_vp = viewport, dust_sc = sc, dust_pc = pc;
-                        dust_first = v.trans_first, dust_count = count;
+                        dust_first = v.trans_first, dust_count = split - v.trans_first;
                         continue;
                     }
                     if (pass == 1) {
