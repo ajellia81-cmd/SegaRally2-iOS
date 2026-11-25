@@ -17,6 +17,10 @@
 #ifndef _WIN32
 #include "touch_controls.h"
 #endif
+#ifdef __APPLE__
+extern std::atomic<uint32_t> g_crash_knocks;   // runtime.cpp: each crash sound heard
+extern std::atomic<float> g_crash_knock_strength;   // ... and the strongest since the last one taken
+#endif
 
 bool g_menu_open = false;   // a menu has the controls
 Gamepads g_pads;
@@ -224,6 +228,23 @@ bool poll_gamepads(HWND hwnd) {
             static const bool no_ffb = getenv("SR2_NO_FFB_RUMBLE") != nullptr;
             if (!no_ffb) {   // the rumble from the player's car (pad_rumble.cpp)
                 float lo = g_pad_motor[0].exchange(0.0f), hi = g_pad_motor[1].exchange(0.0f);
+#ifdef __APPLE__
+                {   // A crash (the game's crash sound, runtime.cpp): a kick on top of
+                    // the car's rumble, in both motors, fading over half a second
+                    // as pad_rumble.cpp's hits do (iOS port: upstream has none)
+                    static uint32_t seen = g_crash_knocks.load();
+                    static float crash = 0;
+                    static double last = 0;
+                    double now = qpc_seconds();
+                    crash *= float(std::pow(0.94, (now - last) * 57.5));   // (as a hit fades, frame by game frame)
+                    last = now;
+                    if (uint32_t k = g_crash_knocks.load(); k != seen) {
+                        seen = k;
+                        crash = std::max(crash, g_crash_knock_strength.exchange(0.0f));
+                    }
+                    lo = std::max(lo, crash), hi = std::max(hi, crash);
+                }
+#endif
                 if (lo > 0.08f || hi > 0.08f) g_pads.rumble(i, lo, hi, 60);
                 // and the triggers' own
                 float tl = g_trigger_rumble[0].exchange(0.0f), tr = g_trigger_rumble[1].exchange(0.0f);
