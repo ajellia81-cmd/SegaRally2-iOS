@@ -23,13 +23,37 @@ layout(location = 10) in vec4 dust_light;   // DUST: the light bounced onto it (
 layout(set = 0, binding = 0) uniform usampler2D texture_ram;   // 2048x2048 R16_UINT
 layout(set = 0, binding = 1) uniform sampler2D replacements[];   // texture pack, RGBA8 with mips
 
+// The effects compiled in (R3DRenderer::feature_mask(), iOS port): the ones
+// that are off are left out, so the shader keeps fewer registers per pixel
+layout(constant_id = 0) const uint FEATURES = 0xFFFFFFFFu;
+const bool FEAT_SHADOW = (FEATURES & 1u) != 0u;
+const bool FEAT_HAZE = (FEATURES & 2u) != 0u;
+const bool FEAT_SOFT = (FEATURES & 4u) != 0u;
+const bool FEAT_SUN = (FEATURES & 8u) != 0u;
+const bool FEAT_ANISO = (FEATURES & 16u) != 0u;
+const bool FEAT_RT = (FEATURES & 32u) != 0u || FEATURES == 0xFFFFFFFFu;
+const bool FEAT_DEBUG = FEATURES == 0xFFFFFFFFu;
+
 layout(push_constant) uniform Viewport {
     mat4 proj;
     vec4 sun;
     vec4 fog_color;
     vec4 params;
     vec4 quality;
-} vp;
+} vp_pc;
+// The same values as the vertex shader read them (iOS port: MoltenVK gave the
+// fragment stage zeros for some viewports; r3d.vert)
+layout(location = 11) flat in vec4 vpo_sun;
+layout(location = 12) flat in vec4 vpo_fog_color;
+layout(location = 13) flat in vec4 vpo_params;
+layout(location = 14) flat in vec4 vpo_quality;
+struct ViewportValues {
+    vec4 sun;
+    vec4 fog_color;
+    vec4 params;
+    vec4 quality;
+};
+ViewportValues vp;
 
 layout(set = 1, binding = 0) uniform sampler2D shadow_map;     // sun shadows (depth seen from the sun)
 layout(set = 1, binding = 1) uniform sampler2D scene_depth;    // the opaque world's depth (soft particles)
@@ -51,8 +75,14 @@ layout(location = 2) out vec4 out_glow;     // bloom: the bright part of luminou
 
 // Sun shadows (not in the original): how much of the sun reaches this point
 // of the game world, 0..1, from the shadow map drawn from the sun this frame
+// The world's up, never NaN (no world: the view's up; iOS port)
+vec3 world_up_safe() {
+    vec3 u = atm.axes[1].xyz;
+    return dot(u, u) > 1e-8 ? normalize(u) : vec3(0.0, 1.0, 0.0);
+}
+
 bool sun_shadowed() {
-    return atm.shadow.x > 0.0 && vp.sun.w > 0.0 &&
+    return FEAT_SHADOW && atm.shadow.x > 0.0 && vp.sun.w > 0.0 &&
            ((flags & (WORLD | NO_SHADOW)) == WORLD || ((flags & CAR) != 0u && atm.car_shadow.x > 0.0));
 }
 #ifdef RAY_TRACING
@@ -253,9 +283,12 @@ float traced_shadow(vec4 disc, vec2 block) {
 }
 #endif
 
+vec4 fetch_wrapped(ivec2 base, ivec2 c, uint fmt);
 vec4 fetch(ivec2 base, ivec2 size, ivec2 c, uint fmt) {
-    c.x = wrap(c.x, size.x, (flags & MIRROR_U) != 0u);
-    c.y = wrap(c.y, size.y, (flags & MIRROR_V) != 0u);
+    return fetch_wrapped(base, ivec2(wrap(c.x, size.x, (flags & MIRROR_U) != 0u), wrap(c.y, size.y, (flags & MIRROR_V) != 0u)), fmt);
+}
+// c: already wrapped into the texture rectangle
+vec4 fetch_wrapped(ivec2 base, ivec2 c, uint fmt) {
     ivec2 p = ivec2((base.x + c.x) & 2047, (base.y & 1024) | ((base.y + c.y) & 1023));
     vec4 t = decode(texelFetch(texture_ram, p, 0).r, fmt);
     // Polygons without texture alpha show every texel, including the ones
@@ -265,14 +298,18 @@ vec4 fetch(ivec2 base, ivec2 size, ivec2 c, uint fmt) {
 }
 
 // Mip level positions inside a texture page (spec 6.4)
-const int MIP_X[12] = int[](0, 1024, 1536, 1792, 1920, 1984, 2016, 2032, 2040, 2044, 2046, 2047);
-const int MIP_Y[11] = int[](0, 512, 768, 896, 960, 992, 1008, 1016, 1020, 1022, 1023);
+// (0, 1024, 1536, ... 2047 across and 0, 512, 768, ... 1023 down: worked out
+// rather than looked up in a constant table, which Apple's GPUs read wrongly
+// when indexed by a variable; iOS port)
+int mip_x(int level) { return 2048 - (2048 >> level); }
+int mip_y(int level) { return 1024 - (1024 >> level); }
 
 // Bilinear sample of one mip level; st in level-0 texels. Premultiplied
 // result: the colour of transparent texels (often sky blue in the texture
 // data) must not bleed into the edges of foliage.
 vec4 bilinear(ivec2 base, ivec2 size, vec2 st, int level, uint fmt) {
-    ivec2 b = ivec2(MIP_X[level] + (base.x >> level), (base.y & 1024) | (MIP_Y[level] + ((base.y & 1023) >> level)));
+    level = clamp(level, 0, 10);
+    ivec2 b = ivec2(mip_x(level) + (base.x >> level), (base.y & 1024) | (mip_y(level) + ((base.y & 1023) >> level)));
     ivec2 s = max(size >> level, ivec2(1));
     vec2 p = st / float(1 << level) - 0.5;
     ivec2 i0 = ivec2(floor(p));
@@ -281,18 +318,25 @@ vec4 bilinear(ivec2 base, ivec2 size, vec2 st, int level, uint fmt) {
     // Axes without wrap smoothing (and all of an alpha-tested texture) repeat
     // without blending across the edge: both taps stay in the repetition the
     // sample falls in (spec 6.6)
-    bvec2 smooth_edge = bvec2((flags & SMOOTH_U) != 0u, (flags & SMOOTH_V) != 0u);
-    if ((flags & ALPHA_TEST) != 0u) smooth_edge = bvec2(false);
+    bool alpha_test = (flags & ALPHA_TEST) != 0u;
     ivec2 first = ivec2(floor((p + 0.5) / vec2(s))) * s;
-    for (int k = 0; k < 2; k++)
-        if (!smooth_edge[k]) {
-            i0[k] = clamp(i0[k], first[k], first[k] + s[k] - 1);
-            i1[k] = clamp(i1[k], first[k], first[k] + s[k] - 1);
-        }
-    vec4 a = fetch(b, s, i0, fmt);
-    vec4 bb = fetch(b, s, ivec2(i1.x, i0.y), fmt);
-    vec4 c = fetch(b, s, ivec2(i0.x, i1.y), fmt);
-    vec4 d = fetch(b, s, i1, fmt);
+    // (axis by axis, without indexing a vector by a variable: iOS port)
+    if (alpha_test || (flags & SMOOTH_U) == 0u) {
+        i0.x = clamp(i0.x, first.x, first.x + s.x - 1);
+        i1.x = clamp(i1.x, first.x, first.x + s.x - 1);
+    }
+    if (alpha_test || (flags & SMOOTH_V) == 0u) {
+        i0.y = clamp(i0.y, first.y, first.y + s.y - 1);
+        i1.y = clamp(i1.y, first.y, first.y + s.y - 1);
+    }
+    // Each coordinate wrapped once, not once per tap (the Lost World port)
+    bool mu = (flags & MIRROR_U) != 0u, mv = (flags & MIRROR_V) != 0u;
+    int x0 = wrap(i0.x, s.x, mu), x1 = wrap(i1.x, s.x, mu);
+    int y0 = wrap(i0.y, s.y, mv), y1 = wrap(i1.y, s.y, mv);
+    vec4 a = fetch_wrapped(b, ivec2(x0, y0), fmt);
+    vec4 bb = fetch_wrapped(b, ivec2(x1, y0), fmt);
+    vec4 c = fetch_wrapped(b, ivec2(x0, y1), fmt);
+    vec4 d = fetch_wrapped(b, ivec2(x1, y1), fmt);
     a.rgb *= a.a;
     bb.rgb *= bb.a;
     c.rgb *= c.a;
@@ -328,16 +372,21 @@ vec4 sample_texture(vec2 duv_dx, vec2 duv_dy) {
         vec2 dx = duv_dx * vec2(size), dy = duv_dy * vec2(size);
         float lx = length(dx), ly = length(dy);
         float pmax = max(lx, ly), pmin = max(min(lx, ly), 1e-6);
-        float taps = clamp(ceil(pmax / pmin), 1.0, max_aniso);
+        // (no NaN or infinity past here: Apple's GPUs make a loop of none
+        // of them, and the texture black; iOS port)
+        if (isnan(pmax) || isinf(pmax)) pmax = 1.0;
+        if (isnan(pmin) || isinf(pmin)) pmin = 1.0;
+        float taps = FEAT_ANISO ? clamp(ceil(min(pmax / pmin, 64.0)), 1.0, max(max_aniso, 1.0)) : 1.0;
         // Levels are stored while both sides are >= 4 before halving
         int max_level = max(findMSB(min(size.x, size.y)) - 1, 0);
         float lod = clamp(log2(max(pmax / taps, 1e-6)), 0.0, float(max_level));
-        int l0 = int(floor(lod));
+        int l0 = clamp(int(floor(lod)), 0, max_level);
         int l1 = min(l0 + 1, max_level);
         float lf = lod - float(l0);
         vec2 axis = lx > ly ? dx : dy;
         sum = vec4(0.0);
-        int n = int(taps);
+        int n = clamp(int(taps), 1, 16);
+        taps = float(n);
         for (int i = 0; i < n; i++) {
             vec2 p = st + axis * ((float(i) + 0.5) / taps - 0.5);
             vec4 s = bilinear(base, size, p, l0, fmt);
@@ -345,6 +394,11 @@ vec4 sample_texture(vec2 duv_dx, vec2 duv_dy) {
             sum += s;
         }
         sum /= taps;
+    }
+    // Nothing came out (iOS port): the texel under the pixel, unfiltered
+    if (!(sum.a > 0.0) || any(isnan(sum))) {
+        sum = fetch(base, size, ivec2(floor(st)), fmt);
+        sum.rgb *= sum.a;
     }
     sum.rgb = sum.a > 0.0 ? sum.rgb / sum.a : vec3(0.0);
     return sum;
@@ -358,7 +412,7 @@ vec4 sample_texture(vec2 duv_dx, vec2 duv_dy) {
 // turns towards blue, as shadows do outdoors on a clear day, against the
 // warm light of the sun
 vec3 sky_ambient(vec3 n) {
-    vec3 up = normalize(atm.axes[1].xyz);
+    vec3 up = world_up_safe();
     float h = length(n) > 0.0 ? dot(normalize(n), up) : 0.5;
     vec3 horizon = dot(atm.haze.rgb, vec3(1.0)) > 0.05 ? atm.haze.rgb : vec3(0.85, 0.9, 1.0);
     vec3 zenith = horizon * vec3(0.5, 0.72, 1.15);
@@ -392,14 +446,22 @@ vec2 spotlight() {
 // wheels. tex: kind in bits 0-1, a seed in bits 8-23; params.x: age 0..1;
 // params.z: a puff's radius, a clod's length over its width. The normal is
 // the direction to the eye (they face it)
+// (octaves: 3 for a puff of a few hundred pixels or less; a puff that fills
+// much of the picture, about the camera in another car's cloud, needs fewer:
+// its fine billows are larger than the eye can follow there, and a dozen such
+// puffs one over another, each worked out in full, halved the frame rate on
+// the phone; iOS port)
+int g_dust_octaves = 3;
 float dust_fbm(vec3 p) {
-    float s = 0.0, a = 0.5;
+    float s = 0.0, a = 0.5, total = 0.0;
     for (int i = 0; i < 3; i++) {
+        if (i >= g_dust_octaves) break;
         s += a * atm_noise(p);
+        total += a;
         p = p * 2.07 + vec3(1.7, 9.2, 3.1);
         a *= 0.5;
     }
-    return s / 0.875;
+    return s / total;
 }
 
 vec4 dust() {
@@ -407,10 +469,10 @@ vec4 dust() {
     float seed = float((tex >> 8) & 0xFFFFu) / 65535.0;
     float t = params.x;
     vec3 eye = normalize(normal);
-    vec3 up = normalize(atm.axes[1].xyz);
+    vec3 up = world_up_safe();
     vec3 sun_dir = length(vp.sun.xyz) > 0.01 ? normalize(vp.sun.xyz) : up;
     float sun = vp.sun.w, ambient = vp.params.x;
-    if (atm.sunlight.z > 0.0) {   // clear outdoor scenes (SUN), as the world is lit
+    if (FEAT_SUN && atm.sunlight.z > 0.0) {   // clear outdoor scenes (SUN), as the world is lit
         sun *= atm.sunlight.x;
         ambient *= atm.sunlight.y;
     }
@@ -471,6 +533,7 @@ vec4 dust() {
 }
 
 void main() {
+    vp = ViewportValues(vpo_sun, vpo_fog_color, vpo_params, vpo_quality);
     // (quality.z: with DLSS upscaling, the size of the 3D image over that of
     // the picture it makes: the textures are filtered for the latter)
     float lod_scale = vp.quality.z > 0.0 ? vp.quality.z : 1.0;
@@ -482,16 +545,76 @@ void main() {
     out_motion = vec4((clip_before.xy / clip_before.w - ndc) * px_per_ndc, 0.0, 0.0);
     gl_SampleMask[0] = -1;   // a statically written mask must be set on every path
     vec4 col = color;
+    int dbg = FEAT_DEBUG ? int(atm.axes[0].w + 0.5) : 0;
+    // 27: the polygon's own numbers, exact in the 3D image (captures' .f16):
+    // flags, texture word, pack slot, low bytes; 28: depth, pass, debug view
+    if (dbg == 27) {
+        out_color = vec4(float(flags & 255u), float(tex & 255u), float(replace & 255u), 255.0) / 255.0;
+        out_glow = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    if (dbg == 28) {
+        out_color = vec4(gl_FragCoord.z, vp.quality.x / 16.0, float(dbg) / 32.0, 1.0);
+        out_glow = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    // 24: every fragment red, before anything else (do they reach the image?)
+    if (dbg == 24) {
+        out_color = vec4(1.0, 0.0, 0.0, 1.0);
+        out_glow = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    // 17: no shine layer (the cars' see-through self-lit layer); 18: the
+    // same, and the texture pack's pictures as they are, unlit (iOS port)
+    if ((dbg == 17 || dbg == 18 || dbg == 19 || dbg == 22 || dbg == 25) && (flags & (LUMINOUS | TEX_ALPHA)) == (LUMINOUS | TEX_ALPHA)) discard;
+    // 19: which texture each pixel shows, a colour per texture word (in both
+    // passes, solid; untextured: magenta)
+    if (dbg == 19 || dbg == 22 || dbg == 25) {
+        uint h = tex * 2654435761u;
+        out_color = (flags & TEXTURED) != 0u ? vec4(float((h >> 8) & 255u), float((h >> 16) & 255u), float((h >> 24) & 255u), 255.0) / 255.0
+                                             : vec4(1.0, 0.0, 1.0, 1.0);
+        out_glow = vec4(0.0, 0.0, 0.0, 1.0);
+        out_motion = vec4(0.0);
+        gl_SampleMask[0] = -1;
+        return;
+    }
+    if (dbg == 18 && replace != 0u) {
+        out_color = vec4(textureGrad(replacements[nonuniformEXT(replace & 0xFFFFu)], uv, dFdx(uv), dFdy(uv)).rgb, 1.0);
+        out_glow = vec4(0.0, 0.0, 0.0, 1.0);
+        out_motion = vec4(0.0);
+        gl_SampleMask[0] = -1;
+        return;
+    }
+    vec3 d_light = vec3(-1.0);
+    vec4 d_lit = vec4(0.0), d_coat = vec4(0.0);
     if ((flags & DUST) != 0u) {   // only in the translucent pass
         if (vp.quality.x <= -1000.0 || vp.quality.x > 0.0 || vp.fog_color.w < 0.0) discard;
         bool puff = (tex & 3u) == 0u;
+        {   // how big the puff is on the screen (its uv spans -1..1), taken before
+            // any pixel of the 2x2 block is discarded
+            float w = max(fwidth(uv.x), fwidth(uv.y)) * (vp.quality.z < 0.0 ? 0.5 : 1.0);   // (half resolution: as at full)
+            g_dust_octaves = w < 0.004 ? 1 : w < 0.012 ? 2 : 3;
+        }
         // Not in the eye's face: the cloud the camera drives through thins out
         // over the last few metres before it (it would wall the picture off)
         // (the player's own car's cloud, tex bit 4, a little closer: it is only
         // a few metres in front of the chase camera)
-        float fade = puff ? ((tex & 16u) != 0u ? smoothstep(0.5, 2.5, -view_pos.z) : smoothstep(0.8, 4.0, -view_pos.z))
+        // (the iOS build, FEATURES not all set: the puffs give way from 1.2 to 3.5 m;
+        // in another car's cloud dozens of them, each over much of the picture,
+        // went one over another before it: 5 ms more on the phone)
+        float fade = puff ? (FEATURES != ~0u              ? smoothstep(1.2, 3.5, -view_pos.z)
+                             : (tex & 16u) != 0u ? smoothstep(0.5, 2.5, -view_pos.z)
+                                                 : smoothstep(0.8, 4.0, -view_pos.z))
                           : smoothstep(0.8, 2.2, -view_pos.z);
-        if (atm.soft.x > 0.0) {   // soft where it meets the road and what stands behind, over its size
+        if (vp.quality.z < 0.0) {
+            // At half resolution, after the 3D pass (iOS port, r3d_renderer.cpp
+            // record_world): no depth buffer, the depth of all that was drawn
+            // read here, a little softly (a hard edge, upscaled, would step)
+            ivec2 at = min(ivec2(gl_FragCoord.xy * 2.0), textureSize(scene_depth, 0) - 1);
+            float d = texelFetch(scene_depth, at, 0).r;
+            float soft = puff ? clamp(params.z * 0.25, 0.08, 0.4) : 0.05;
+            if (d > 0.0) fade *= clamp((view_pos.z + 1e-3 / d) / soft, 0.0, 1.0);
+        } else if (FEAT_SOFT && atm.soft.x > 0.0) {   // soft where it meets the road and what stands behind, over its size
             float d = texelFetch(scene_depth, ivec2(gl_FragCoord.xy), 0).r;
             // (a puff's own soft edge is short: the cloud lies low over the road,
             // and over its whole size it faded into nothing against it)
@@ -508,7 +631,7 @@ void main() {
         c.rgb = min(c.rgb, vec3(atm.soft.z > 0.5 ? 8.0 : 1.0));
         float fog = params.y * clamp(vp.params.z + (-view_pos.z) * vp.params.y, 0.0, 1.0);
         if (fog > 0.0) c.rgb = mix(c.rgb, vp.fog_color.rgb * vp.fog_color.a * mist_light(view_pos), fog);
-        if (atm.haze.a > 0.0) c.rgb = distance_haze(c.rgb, view_pos, fog);
+        if (FEAT_HAZE && atm.haze.a > 0.0) c.rgb = distance_haze(c.rgb, view_pos, fog);
         out_color = c;
         out_glow = vec4(0.0, 0.0, 0.0, c.a);
         // Where the cloud is dense its own motion, not that of the road behind
@@ -519,6 +642,19 @@ void main() {
         return;
     }
     if ((flags & TRANSLATOR) != 0u) col.rgb *= 16.0;
+
+    // Early depth (quality -3000, record_world; iOS port): the solid surfaces'
+    // depth laid down first, so that the costly shading after it runs about
+    // once per pixel (a shader that can discard gets no hidden surface removal
+    // on Apple's GPUs). Only what can never be see-through: the rest is left
+    // to the opaque pass as it was. The see-through texels of texture alpha
+    // and alpha test are left out below, after the texture (the trees and
+    // bushes, layer upon layer, were shaded in full at every layer)
+    if (vp.quality.x <= -3000.0) {
+        if ((flags & DUST) != 0u || col.a < 1.0 / 32.0) discard;
+        if ((flags & (TEX_ALPHA | ALPHA_TEST)) == 0u) return;
+        if (vp.quality.x <= -3500.0) discard;   // (solid surfaces only: the opaque pass keeps its depth writes)
+    }
 
     // Sun shadow pass (fog_color.w < 0): only what stands near the ground casts
     // shadows; canopies and roofs high above would put whole scenes in the dark
@@ -531,6 +667,12 @@ void main() {
         if ((flags & INVERT_RGB) != 0u) t.rgb = 1.0 - t.rgb;
         if ((flags & (TEX_ALPHA | ALPHA_TEST)) == 0u) t.a = 1.0;
         if ((flags & ALPHA_TEST) != 0u && t.a < 32.0 / 255.0) discard;
+    }
+    // (early depth: the opaque pass's own tests on alpha, then no more)
+    if (vp.quality.x <= -3000.0) {
+        float a = t.a * col.a;
+        if (a < 1.0 / 32.0 || ((flags & TEX_ALPHA) != 0u && a < 1.0)) discard;
+        return;
     }
 
     float ambient = vp.params.x;
@@ -608,13 +750,13 @@ void main() {
         vec3 light = vec3(s * vp.sun.w + ambient);
         // Clear outdoor scenes (SUN): a stronger, warmer sun and a softer,
         // slightly bluer ambient (light from the sky) for more contrast
-        if (atm.sunlight.z > 0.0 && (flags & WORLD) != 0u) {
+        if (FEAT_SUN && atm.sunlight.z > 0.0 && (flags & WORLD) != 0u) {
             float w = atm.sunlight.z;
             light = s * vp.sun.w * atm.sunlight.x * vec3(1.0, 1.0 - 0.05 * w, 1.0 - 0.14 * w) +
                     ambient * atm.sunlight.y * vec3(1.0 - 0.06 * w, 1.0, 1.0 + 0.08 * w);
         }
         // Global illumination: the ambient light in the colour of the sky
-        if (atm.gi.y > 0.0 && atm.sunlight.z > 0.0) {
+        if (FEAT_RT && atm.gi.y > 0.0 && atm.sunlight.z > 0.0) {
             bool clear = (flags & WORLD) != 0u;
             float w = atm.sunlight.z;
             float a = ambient * (clear ? atm.sunlight.y : 1.0);
@@ -668,7 +810,7 @@ void main() {
         if (fill > 0.0 && car_body && length(normal) > 0.0) {
             vec3 fn = normalize(normal);
             if (dot(fn, view_pos) > 0.0) fn = -fn;
-            float down = 0.5 - 0.5 * dot(fn, normalize(atm.axes[1].xyz));
+            float down = 0.5 - 0.5 * dot(fn, world_up_safe());
             float world_sun = max(vp.sun.w, 0.0) * (atm.sunlight.z > 0.0 ? atm.sunlight.x : 1.0);
             // (the ground round a car in the shade is mostly in the shade too: less of it)
             light += vec3(1.0, 0.92, 0.80) * world_sun * fill * (0.6 + 0.4 * down) * mix(0.35, 1.0, probe.x) * probe.y;
@@ -676,15 +818,18 @@ void main() {
         // The spotlight: a flat lobe, as in the original
         if ((flags & WORLD) != 0u && atm.spot.z > 0.0) light += atm.spot_color.rgb * spotlight().x;
         c.rgb *= light;
+        d_light = light;
         if ((flags & SPECULAR) != 0u) {
             uint shin = (flags >> 10) & 3u;
-            float powers[4] = float[](8.0, 16.0, 32.0, 64.0);
-            float scales[4] = float[](1.6, 1.6, 2.4, 3.2);
-            float f = pow(max(s, 0.0), powers[shin]) * scales[shin] * params.z * vp.sun.w *
+            // (worked out, not looked up: a GPU keeps an indexed table in slow memory)
+            float power = float(8u << shin);                          // 8, 16, 32, 64
+            float scale = shin < 2u ? 1.6 : 0.8 * float(shin + 1u);   // 1.6, 1.6, 2.4, 3.2
+            float f = pow(max(s, 0.0), power) * scale * params.z * vp.sun.w *
                       (atm.sunlight.z > 0.0 && (flags & WORLD) != 0u ? atm.sunlight.x : 1.0);
             c.rgb += f;
         }
     }
+    d_lit = c;
     // Sega Rally 2 (not in the original): clear coat on the cars' paint, and
     // their glass. The game marks both specular; the cars are the player's
     // (CAR: its own viewport) and the others (ACTOR), whose paint is
@@ -706,7 +851,7 @@ void main() {
         // Rally cars are not showroom cars: a satin, dusty paint. Less of a
         // mirror (the Fresnel rise held back too), and dirtier low down and on
         // the sides, where the wheels throw the dust, than on the roof and bonnet
-        vec3 world_up = normalize(atm.axes[1].xyz);
+        vec3 world_up = world_up_safe();
         float clean = mix(0.35, 1.0, smoothstep(-0.3, 0.7, dot(nn, world_up)));
         // The glass: blotches of dried mud and dust, fixed to it (its texture
         // coordinates), that break the reflection up and veil it, heavier towards
@@ -733,7 +878,7 @@ void main() {
         // With ray tracing the world itself: the scenery, the stands and the
         // other cars mirrored where the reflected ray meets them, lit by the
         // sun and the ambient as the scene is, fading into the sky with distance
-        if (atm.rt.x > 0.0 && atm.mirror.w > 0.5) {
+        if (FEAT_RT && atm.rt.x > 0.0 && atm.mirror.w > 0.5) {
             vec3 hit_colour;
             float hit_dist;
             vec3 from = view_pos + nn * (0.03 + 0.002 * length(view_pos));
@@ -758,6 +903,7 @@ void main() {
     // The original clips the light at white; with HDR lighting the highlights
     // (sunlit surfaces, fire, specular) keep going and the composition's tone
     // curve rolls them off
+    d_coat = c;
     c.rgb = min(c.rgb, vec3(atm.soft.z > 0.5 ? 8.0 : 1.0));
 
     float fog = params.y * clamp(vp.params.z + (-view_pos.z) * vp.params.y, 0.0, 1.0);
@@ -765,7 +911,7 @@ void main() {
     if ((flags & WORLD) != 0u && fog > 0.0) fog_color = fog_color * mist_light(view_pos) + atm.spot_fog.rgb * spotlight().y;
     c.rgb = mix(c.rgb, fog_color, fog);
     // Optional distance haze
-    if ((flags & WORLD) != 0u && atm.haze.a > 0.0)
+    if (FEAT_HAZE && (flags & WORLD) != 0u && atm.haze.a > 0.0)
         c.rgb = distance_haze(c.rgb, view_pos, fog);
     // Opaque pass: the colour written is always solid, since a filtered alpha
     // would let the 2D background show through. With MSAA, alpha-tested edges
@@ -797,7 +943,7 @@ void main() {
     // nothing. Told by its distance from the eye changing across the screen
     // as that of the surface behind does (a sprite standing in the ground, a
     // cloud, change otherwise)
-    if (vp.quality.x < 0.0 && atm.soft.x > 0.0 && (flags & (WORLD | TEXTURED)) == (WORLD | TEXTURED)) {
+    if (FEAT_SOFT && vp.quality.x < 0.0 && atm.soft.x > 0.0 && (flags & (WORLD | TEXTURED)) == (WORLD | TEXTURED)) {
         ivec2 at = ivec2(gl_FragCoord.xy), last = textureSize(scene_depth, 0) - 1;
         float d = texelFetch(scene_depth, at, 0).r;
         bool lying = false;
@@ -812,6 +958,42 @@ void main() {
         }
         if (d > 0.0 && !lying) c.a *= clamp((view_pos.z + 1e-3 / d) / atm.soft.y, 0.0, 1.0);
     }
+    // A NaN or an infinity left by the lighting: the PC's GPUs happened to
+    // draw it as light, Apple's as black. The unlit colour instead (iOS port)
+    // Debugging aid (iOS port): a three-finger tap cycles what is drawn (atm.axes[0].w):
+    // 1 vertex colour, 2 texture, 3 light, 4 lit, 5 after the clear coat, 6 final,
+    // 7 normal, 8 shade/fog/spec. NaN magenta, infinity cyan
+    if (dbg > 0 && dbg < 17) {
+        vec4 v = dbg == 1 ? vec4(col.rgb, 1.0) : dbg == 2 ? vec4(t.rgb, 1.0) : dbg == 3 ? vec4(d_light * 0.5, 1.0)
+               : dbg == 4 ? d_lit : dbg == 5 ? d_coat : dbg == 6 ? c
+               : dbg == 7 ? vec4(normal * 0.5 + 0.5, 1.0) : dbg == 8 ? vec4(params, 1.0)
+               : dbg == 9 ? vec4(vp_pc.params.x, vp_pc.sun.w, 0.0, 1.0) : dbg == 10 ? vec4(vp.params.x, vp.sun.w, 0.0, 1.0)
+               // 11: which texture (red: texture pack, green: with the game's dirt over it, blue: textured at all)
+               : dbg == 11 ? vec4(replace != 0u ? 1.0 : 0.0, (replace >> 16) != 0u ? 1.0 : 0.0, (flags & TEXTURED) != 0u ? 1.0 : 0.0, 1.0)
+               // 12: the texture pack's picture alone (no dirt); 13: the dirt layer's colour, 14: its opacity
+               // 15: the texture RAM texel under the pixel, level 0, no filtering; 16: level 0 filtered
+               : dbg == 15 ? ((flags & TEXTURED) != 0u && replace == 0u
+                              ? vec4(fetch(ivec2(int(tex & 2047u), int((tex >> 11) & 2047u)),
+                                           ivec2(32 << int((tex >> 22) & 7u), 32 << int((tex >> 25) & 7u)),
+                                           ivec2(floor(uv * vec2(ivec2(32 << int((tex >> 22) & 7u), 32 << int((tex >> 25) & 7u))))),
+                                           (tex >> 28) & 15u).rgb, 1.0)
+                              : vec4(0.0, 0.0, 0.3, 1.0))
+               : dbg == 16 ? ((flags & TEXTURED) != 0u && replace == 0u
+                              ? vec4(bilinear(ivec2(int(tex & 2047u), int((tex >> 11) & 2047u)),
+                                              ivec2(32 << int((tex >> 22) & 7u), 32 << int((tex >> 25) & 7u)),
+                                              uv * vec2(ivec2(32 << int((tex >> 22) & 7u), 32 << int((tex >> 25) & 7u))), 0,
+                                              (tex >> 28) & 15u).rgb, 1.0)
+                              : vec4(0.0, 0.0, 0.3, 1.0))
+               : dbg == 12 ? (replace != 0u ? vec4(textureGrad(replacements[nonuniformEXT(replace & 0xFFFFu)], uv, duv_dx, duv_dy).rgb, 1.0) : vec4(0.0, 0.0, 0.3, 1.0))
+               : dbg == 13 ? ((replace >> 16) != 0u ? vec4(textureGrad(replacements[nonuniformEXT(replace >> 16)], uv, duv_dx, duv_dy).rgb, 1.0) : vec4(0.0, 0.0, 0.3, 1.0))
+               : ((replace >> 16) != 0u ? vec4(vec3(textureGrad(replacements[nonuniformEXT(replace >> 16)], uv, duv_dx, duv_dy).a), 1.0) : vec4(0.0, 0.0, 0.3, 1.0));
+        bool bad_nan = any(isnan(v)) || (dbg == 7 && any(isnan(normal)));
+        bool bad_inf = any(isinf(v));
+        out_color = bad_nan ? vec4(1.0, 0.0, 1.0, 1.0) : bad_inf ? vec4(0.0, 1.0, 1.0, 1.0) : vec4(clamp(v.rgb, 0.0, 1.0), 1.0);
+        out_glow = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    if (any(isnan(c)) || any(isinf(c))) c = vec4(clamp(t.rgb * col.rgb, 0.0, 1.0), isnan(c.a) ? 1.0 : clamp(c.a, 0.0, 1.0));
     out_color = c;
     // Bloom source: fire, explosions and lights are drawn unlit (luminous);
     // only their bright part glows. Everything else writes no glow, so it

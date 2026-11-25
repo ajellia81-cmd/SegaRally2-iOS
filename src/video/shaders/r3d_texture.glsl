@@ -7,7 +7,7 @@
 const uint TEXTURED = 1u, ALPHA_TEST = 2u, MIRROR_U = 4u, MIRROR_V = 8u, SMOOTH_U = 16u, SMOOTH_V = 32u,
            LUMINOUS = 64u, FIXED_SHADE = 128u, SPECULAR = 256u, TEX_ALPHA = 512u, INVERT_RGB = 4096u,
            TRANSLATOR = 8192u, WORLD = 65536u, CAR = 131072u, ACTOR = 262144u, NO_SHADOW = 1048576u,
-           DUST = 8388608u;
+           PATCH = 2097152u, DUST = 8388608u;
 
 // Sega Rally 2: the spectators' camera flashes (and the like: self-lit
 // pictures with an alpha of their own, alpha tested, not shiny; the cars'
@@ -36,9 +36,11 @@ vec4 decode(uint t, uint fmt) {
 }
 
 // Wraps a texel coordinate inside the texture rectangle (repeat or mirror)
+// (the sizes are powers of two: the wrap is a mask, not two integer
+// divisions, which cost a GPU dearly; iOS port)
 int wrap(int c, int size, bool mirror) {
     int period = mirror ? size * 2 : size;
-    int m = ((c % period) + period) % period;
+    int m = c & (period - 1);
     return (mirror && m >= size) ? period - 1 - m : m;
 }
 

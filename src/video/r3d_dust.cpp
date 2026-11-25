@@ -852,7 +852,14 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
         fflush(log);
     }
 
-    if (world < 0 || g_parts.empty()) {
+    // No game world (the ending: the car in a scene of its own): drawn in
+    // the first viewport that had a fan, with its camera and light (iOS port;
+    // the game's own fans showed there, as the dust's place was the world's)
+    int place = world;
+    if (place < 0)
+        for (uint32_t vi = 0; vi < out.viewports.size() && place < 0; vi++)
+            if (has_fan[vi]) place = int(vi);
+    if (place < 0 || g_parts.empty()) {
         g_before = f;
         return;
     }
@@ -870,7 +877,7 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
     // see-through polygons too (the shadow the game lays under the car is one,
     // in the car's viewport: drawn after the dust, it cut its shape out of it).
     // It is not the world again (nothing of it is solid, lit or tracked)
-    R3DViewport own = out.viewports[size_t(world)];
+    R3DViewport own = out.viewports[size_t(place)];
     own.world = false;
     own.opaque_first = own.trans_first = uint32_t(out.vertices.size());
     own.opaque_count = 0;
@@ -878,7 +885,7 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
     own.back_first = own.back_count = 0;
     own.scroll_fog = 0;
     out.vertices.insert(out.vertices.end(), add.begin(), add.end());
-    size_t at = size_t(world) + 1;
+    size_t at = size_t(place) + 1;
     while (at < out.viewports.size() && out.viewports[at].priority == own.priority) at++;
     out.viewports.insert(out.viewports.begin() + ptrdiff_t(at), own);
 }

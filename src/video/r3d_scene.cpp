@@ -11,9 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
-#ifdef _WIN32
-#include <intrin.h>   // __popcnt: MSVC knows it without this, clang for Windows does not
-#endif
+#include <intrin.h>   // __popcnt: MSVC knows it without this, clang for Windows does not (iOS port: platform/compat)
 
 namespace {
 
@@ -207,6 +205,12 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
         for (uint32_t i = v.trans_first; i < v.trans_first + v.trans_count; i++) out.vertices[i].flags |= R3D_CAR;
     }
     settle_player_car(out);
+    // The cars' dark patches (their shadows) marked: r3d.vert draws them a
+    // little nearer (iOS port)
+    for (R3DVertex& x : out.vertices)
+        if ((x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) == (R3D_WORLD | R3D_LUMINOUS) &&
+            (x.color & 0x00FFFFFFu) == 0 && (x.color >> 24) < 255)
+            x.flags |= R3D_PATCH;
     static const float shine = getenv("SR2_SHINE") ? float(atof(getenv("SR2_SHINE"))) : 0.0f;   // the cars' painted shine layer, F of its strength: left out (it veiled the paint, a grey box over the roof); SR2_SHINE=F brings it back
     // (Not the glows the game draws with a texture alpha too, alpha tested,
     // which the shine layer never is: the spectators' camera flashes, turned

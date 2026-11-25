@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <map>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -59,6 +60,18 @@
 #include "../video/vk_presenter.h"
 #include "app_internal.h"
 #include "settings_bridge.h"
+
+#ifndef _WIN32
+// iOS port: SDL starts the app (SDL_main), the files' folders, touch controls
+#include <SDL3/SDL_main.h>
+#include "platform_files.h"
+#include "touch_controls.h"
+#include "sdl_events.h"
+#ifdef __APPLE__
+int platform_thermal_state();   // platform/ios_lifecycle.mm
+#endif
+TouchControls g_touch;
+#endif
 
 Options g_opt;   // command line and menu settings (options.h)
 int g_max_fps = 0;             // MAX FPS: 0 the monitor's refresh rate, -1 unlimited
@@ -242,17 +255,25 @@ static void save_settings(const FrontendSettings& s) {
 // 1440p (the game starts in a window, but full screen is the screen's size).
 // A card or a build without DLSS falls back to MSAA as it always did.
 static bool nvidia_card() {
+#ifndef _WIN32
+    return false;   // iOS port: no DLSS
+#else
     DISPLAY_DEVICEA d{};
     d.cb = sizeof(d);
     for (DWORD i = 0; EnumDisplayDevicesA(nullptr, i, &d, 0); i++)
         if (strstr(d.DeviceString, "NVIDIA")) return true;
     return false;
+#endif
 }
 
 // The height in pixels of the screen the window is on (0: not known)
 // (debugging aid: SR2_SCREEN_HEIGHT=2160 stands for a screen of that height)
 static int screen_height(HWND hwnd) {
     if (const char* e = getenv("SR2_SCREEN_HEIGHT")) return atoi(e);
+#ifndef _WIN32
+    (void)hwnd;
+    return 0;
+#else
     MONITORINFOEXA mi{};
     mi.cbSize = sizeof(mi);
     DEVMODEA mode{};
@@ -260,6 +281,7 @@ static int screen_height(HWND hwnd) {
     if (!GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi)) return 0;
     if (!EnumDisplaySettingsA(mi.szDevice, ENUM_CURRENT_SETTINGS, &mode)) return 0;   // (real pixels, whatever the scaling)
     return int(std::min(mode.dmPelsWidth, mode.dmPelsHeight));   // (the shorter side: a screen turned upright too)
+#endif
 }
 
 static std::atomic<bool> g_terminal_prompt{false};   // started from a terminal, nothing redirected: its prompt to bring back
@@ -288,6 +310,7 @@ static void attach_parent_console() {
 void console_prompt() {
     if (!g_terminal_prompt.exchange(false)) return;
     fflush(stdout);
+#ifdef _WIN32
     HANDLE in = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0,
                             nullptr);
     if (in == INVALID_HANDLE_VALUE) return;
@@ -304,6 +327,7 @@ void console_prompt() {
     DWORD written = 0;
     WriteConsoleInputA(in, key, 2, &written);
     CloseHandle(in);
+#endif
 }
 
 // The picture options of `o` on the renderer: at launch, and again whenever
@@ -331,6 +355,11 @@ static void apply_picture_options(R3DRenderer& renderer, const Options& o) {
 }
 
 int main(int argc, char** argv) {
+#ifndef _WIN32
+    platform_prepare_files();
+    // The 3D view as wide as the screen (2868 x 1320 on an iPhone 18 Pro Max: 2.17:1)
+    g_opt.max_aspect = 3.0f;
+#endif
     attach_parent_console();
     setvbuf(stdout, nullptr, _IONBF, 0);   // keep logs even if the process dies
     // The menus (and the settings they save) are left out of test runs, so
@@ -351,6 +380,51 @@ int main(int argc, char** argv) {
         aa_auto = !ini.aa_saved && nvidia_card();
         if (aa_auto) ini.aa = 1;   // DLAA; DLSS QUALITY or FXAA once the screen and the GPU are known
         else if (!ini.aa_saved) ini.aa = 7;   // no DLSS on other cards: FXAA, cheap (MSAA 4x cost old cards a lot)
+#ifndef _WIN32
+        // iOS port: the starting settings, once (the marker file; the options
+        // menu changes them after that): the 3D at the screen's full resolution
+        // and every refresh (SMOOTH motion, 120 Hz), everything else as the
+        // arcade had it: no edge smoothing, no added haze, glow, occlusion,
+        // sunlight, sun shadows, soft particles, HDR, sharpening or HD text,
+        // the game's own dust, the original colours
+        if (GetFileAttributesA("save/ios_profile_3") == INVALID_FILE_ATTRIBUTES) {
+            ini.render_scale = 100;
+            ini.smooth = true;
+            ini.aa = 2;   // off
+            ini.haze = false;
+            ini.bloom = 0;
+            ini.ao = false;
+            ini.sun = false;
+            ini.shadows = false;
+            ini.ray_tracing = 0;
+            ini.soft = false;
+            ini.hdr = false;
+            ini.reflections = false;
+            ini.gi = 0;
+            ini.dust = false;
+            ini.sharpen = false;
+            ini.saturation = 100;
+            ini.gamma = 100;
+            ini.car_probes = false;
+            ini.car_shadows = false;
+            if (FILE* f = fopen("save/settings.ini", "w")) {
+                fputs(ini.text().c_str(), f);
+                fclose(f);
+            }
+            if (FILE* f = fopen("save/ios_profile_3", "w")) fclose(f);
+        }
+        // Settings the iOS menu no longer has, kept where they belong
+        ini.aa = 2;
+        ini.ray_tracing = 0;
+        ini.reflections = false;
+        ini.gi = 0;
+        ini.rear_boost = 0;
+        if (ini.speakers == 1) ini.speakers = 0;   // surround 4.0: stereo
+        // The arcade's texture filtering: trilinear, one tap. The Model 3 keeps
+        // each texture's mip levels in texture RAM (spec 6.4) and filters
+        // between them; the base level alone (0) would shimmer in the distance
+        g_opt.aniso = 1;
+#endif
         options_from_settings(g_opt, ini);
         g_pad_rumble = ini.vibration;
         g_trigger_share = ini.trigger_rumble / 100.0f;
@@ -431,6 +505,148 @@ int main(int argc, char** argv) {
     // many calls: run it on a thread with 512 MB of native stack.
     if (g_opt.headless) {
         HANDLE t = CreateThread(nullptr, 512u << 20, game_thread, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+        // Debugging aid (iOS port): SR2_SCENESTATS=N, every N frames the 3D
+        // scene is built as for drawing and each viewport's polygons summed up
+        if (const char* every = getenv("SR2_SCENESTATS")) {
+            uint64_t n = std::max(1, atoi(every));
+            R3DSceneBuilder sb;
+            TexturePack tp;
+            tp.init("textures", "", "save/clean_textures");
+            sb.set_texture_pack(&tp, &g_texture_ram);
+            uint64_t last = 0;
+            while (WaitForSingleObject(t, 5) != WAIT_OBJECT_0) {
+                std::shared_ptr<const R3DFrameState> st;
+                {
+                    std::lock_guard<std::mutex> lock(g_r3d_mutex);
+                    st = g_r3d_latest;
+                }
+                if (!st || st->frame / n == last / n) continue;
+                last = st->frame;
+                R3DScene sc;
+                sb.build(*st, sc);
+                {
+                    char path[64];
+                    snprintf(path, sizeof(path), "out/texram_%llu.bin", (unsigned long long)st->frame);
+                    g_texture_ram.dump(path);
+                }
+                printf("[scene] frame %llu: %zu viewports, %zu vertices\n", (unsigned long long)st->frame, sc.viewports.size(), sc.vertices.size());
+                for (const R3DViewport& v : sc.viewports) {
+                    uint32_t count = v.opaque_count + v.trans_count;
+                    if (!count) continue;
+                    uint32_t any = 0, all = ~0u;
+                    double r = 0, g = 0, b = 0, shade = 0, fog = 0, spec = 0;
+                    size_t replaced = 0, m = 0;
+                    double zsum = 0, nlen = 0;
+                    auto add = [&](uint32_t first, uint32_t cnt) {
+                        for (uint32_t i = first; i < first + cnt && i < sc.vertices.size(); i++) {
+                            const R3DVertex& x = sc.vertices[i];
+                            any |= x.flags, all &= x.flags;
+                            r += x.color & 0xFF, g += (x.color >> 8) & 0xFF, b += (x.color >> 16) & 0xFF;
+                            shade += x.shade, fog += x.fog, spec += x.spec;
+                            zsum += -x.pos[2];
+                            nlen += std::sqrt(x.nrm[0] * x.nrm[0] + x.nrm[1] * x.nrm[1] + x.nrm[2] * x.nrm[2]);
+                            replaced += x.replace != 0;
+                            m++;
+                        }
+                    };
+                    add(v.opaque_first, v.opaque_count);
+                    add(v.trans_first, v.trans_count);
+                    {   // untextured polygons by flags and colour, in drawing order
+                        std::map<std::pair<uint32_t, uint32_t>, std::pair<int, uint32_t>> un;
+                        auto scan = [&](uint32_t first, uint32_t cnt, int list) {
+                            for (uint32_t i = first; i < first + cnt && i < sc.vertices.size(); i++) {
+                                const R3DVertex& q = sc.vertices[i];
+                                if (q.flags & 1) continue;
+                                auto& e = un[{q.flags | (list << 31), q.color}];
+                                if (!e.first) e.second = i;
+                                e.first++;
+                            }
+                        };
+                        scan(v.opaque_first, v.opaque_count, 0);
+                        scan(v.trans_first, v.trans_count, 1);
+                        for (auto& [k, e] : un)
+                            printf("    untextured %s flags %06x colour %08x: %d verts from %u\n", (k.first >> 31) ? "trans" : "opaque",
+                                   k.first & 0x7FFFFFFF, k.second, e.first, e.second);
+                        // and the textured ones' first index
+                        std::map<uint32_t, uint32_t> firsts;
+                        for (uint32_t i = v.opaque_first; i < v.opaque_first + v.opaque_count; i++)
+                            if ((sc.vertices[i].flags & 1) && !firsts.count(sc.vertices[i].tex)) firsts[sc.vertices[i].tex] = i;
+                        for (auto& [t, i] : firsts) printf("    opaque tex %08x from %u\n", t, i);
+                    }
+                    if (true) {   // its texture RAM textures, decoded as the shader does
+                        std::map<uint32_t, int> texs;
+                        auto count_tex = [&](uint32_t first, uint32_t cnt) {
+                            for (uint32_t i = first; i < first + cnt && i < sc.vertices.size(); i++)
+                                if ((sc.vertices[i].flags & 1) && !sc.vertices[i].replace) texs[sc.vertices[i].tex]++;
+                        };
+                        count_tex(v.opaque_first, v.opaque_count);
+                        count_tex(v.trans_first, v.trans_count);
+                        std::vector<uint16_t> ram;
+                        g_texture_ram.copy_all(ram);
+                        for (auto& [tex, cnt] : texs) {
+                            int bx = tex & 2047, by = (tex >> 11) & 2047;
+                            int w = 32 << ((tex >> 22) & 7), h = 32 << ((tex >> 25) & 7);
+                            unsigned fmt = (tex >> 28) & 15;
+                            double sr = 0, sg = 0, sb = 0, sa = 0;
+                            int k = 0;
+                            std::vector<std::pair<int, int>> pts;
+                            float umin = 1e9, umax = -1e9, vmin = 1e9, vmax = -1e9;
+                            uint32_t fany = 0, fall = ~0u;
+                            for (const R3DVertex& q : sc.vertices)
+                                if (q.tex == tex) {
+                                    fany |= q.flags, fall &= q.flags;
+                                    int x = int(std::floor(q.uv[0] * w)), y = int(std::floor(q.uv[1] * h));
+                                    umin = std::min(umin, q.uv[0]), umax = std::max(umax, q.uv[0]);
+                                    vmin = std::min(vmin, q.uv[1]), vmax = std::max(vmax, q.uv[1]);
+                                    pts.push_back({((x % w) + w) % w, ((y % h) + h) % h});
+                                }
+                            printf("    uv %.2f..%.2f %.2f..%.2f flags any %06x all %06x\n", umin, umax, vmin, vmax, fany, fall);
+                            {   // the texture itself, raw texels, for a look
+                                char path[96];
+                                snprintf(path, sizeof(path), "out/tex_%08x.bin", tex);
+                                if (FILE* f = fopen(path, "wb")) {
+                                    for (int y = 0; y < h; y++)
+                                        for (int x = 0; x < w; x++) {
+                                            uint16_t t = ram[size_t((by & 1024) | ((by + y) & 1023)) * 2048 + ((bx + x) & 2047)];
+                                            fwrite(&t, 2, 1, f);
+                                        }
+                                    fclose(f);
+                                }
+                            }
+                            for (auto [x, y] : pts) {
+                                    int px = (bx + x) & 2047, py = (by & 1024) | ((by + y) & 1023);
+                                    unsigned t = ram[size_t(py) * 2048 + px];
+                                    float r, g, b, a;
+                                    switch (fmt) {
+                                    case 0: r = ((t >> 10) & 31) / 31.f, g = ((t >> 5) & 31) / 31.f, b = (t & 31) / 31.f, a = (t & 0x8000) ? 0 : 1; break;
+                                    case 7: r = ((t >> 12) & 15) / 15.f, g = ((t >> 8) & 15) / 15.f, b = ((t >> 4) & 15) / 15.f, a = (t & 15) / 15.f; break;
+                                    case 1: r = g = b = (t & 15) / 15.f, a = ((t >> 4) & 15) / 15.f; break;
+                                    case 2: r = g = b = ((t >> 4) & 15) / 15.f, a = (t & 15) / 15.f; break;
+                                    case 3: r = g = b = ((t >> 8) & 15) / 15.f, a = ((t >> 12) & 15) / 15.f; break;
+                                    case 4: r = g = b = ((t >> 12) & 15) / 15.f, a = ((t >> 8) & 15) / 15.f; break;
+                                    case 5: r = g = b = (t & 255) / 255.f, a = (t & 255) == 255 ? 0 : 1; break;
+                                    case 6: r = g = b = ((t >> 8) & 255) / 255.f, a = ((t >> 8) & 255) == 255 ? 0 : 1; break;
+                                    default: {
+                                        unsigned n = (t >> (4 * (fmt - 8))) & 15;
+                                        r = g = b = n / 15.f, a = n == 15 ? 0 : 1;
+                                    }
+                                    }
+                                    sr += r, sg += g, sb += b, sa += a, k++;
+                                }
+                            printf("    tex %08x fmt %u at %d,%d %dx%d: %d verts, mean rgba %.2f %.2f %.2f %.2f\n", tex, fmt, bx,
+                                   by, w, h, cnt, sr / k, sg / k, sb / k, sa / k);
+                        }
+                    }
+                    if (!m) continue;
+                    printf("  vp %.0f,%.0f %.0fx%.0f world %d: %zu verts flags any %06x all %06x  rgb %.0f %.0f %.0f  "
+                           "shade %.2f fog %.2f spec %.2f replaced %zu z %.1f |n| %.2f fa %.2f | sun %.2f %.2f %.2f x%.2f ambient %.2f fog %.2f %.2f %.2f d%.4f s%.2f\n",
+                           v.x, v.y, v.w, v.h, v.world ? 1 : 0, m, any, all, r / m, g / m, b / m, shade / m, fog / m, spec / m,
+                           replaced, zsum / m, nlen / m, v.fog_ambient, v.sun[0], v.sun[1], v.sun[2], v.sun_intensity, v.ambient, v.fog_color[0], v.fog_color[1],
+                           v.fog_color[2], v.fog_density, v.fog_start);
+                }
+                fflush(stdout);
+            }
+        }
         WaitForSingleObject(t, INFINITE);
         return 0;
     }
@@ -451,6 +667,13 @@ int main(int argc, char** argv) {
     printf("GPU: %s\n", presenter.device_name().c_str());
     if (aa_auto) g_opt.dlss = screen_height(presenter.hwnd()) > 1440 ? 1 : 0;   // DLSS QUALITY above 1440p
     g_pads.trigger_rumble = g_opt.trigger_rumble;
+#ifndef _WIN32
+    {   // the 3D view fills the screen; settings.ini may not narrow it
+        RECT rc;
+        GetClientRect(presenter.hwnd(), &rc);
+        if (rc.bottom > 0) g_opt.max_aspect = std::max(g_opt.max_aspect, float(rc.right) / float(rc.bottom));
+    }
+#endif
     g_pads.init();
     timeBeginPeriod(1);
     QueryPerformanceFrequency(&g_qpf);
@@ -511,6 +734,22 @@ int main(int argc, char** argv) {
     if (dlss_failed) g_opt.dlaa = false, g_opt.dlss = 0, g_opt.fxaa = true, g_opt.msaa = 1;
     renderer.set_fxaa(g_opt.fxaa);
     apply_picture_options(renderer, g_opt);
+#ifndef _WIN32
+    renderer.set_supersample(float(ini.render_scale) / 100.0f);   // RESOLUTION (iOS port)
+    // The race HUD's corners stop at the safe area (the rounded corners and
+    // the camera cut-out), not at the screen's edge
+    auto hud_inset = [&] {
+        RECT rc;
+        GetClientRect(presenter.hwnd(), &rc);
+        VkPresenter::SafeArea sa = presenter.safe_area();
+        if (rc.bottom <= 0) return;
+        ScreenLayout lay = compute_layout(float(rc.right), float(rc.bottom), g_opt.max_aspect);
+        float inset = float(std::max(sa.left, sa.right)) - lay.ox;
+        renderer.set_hud_inset(inset > 0 && lay.scale > 0 ? inset / lay.scale : 0.0f);
+    };
+    hud_inset();
+    renderer.refresh_features();   // (iOS port: the world shader with only the effects that are on)
+#endif
     if (g_opt.haze > 0) printf("[video] distance haze on (strength %.2f)\n", g_opt.haze);
     if (aa_auto) {   // what the first run got: the menu shows it, and saves it with the first setting changed
         ini.aa = g_opt.dlss ? 2 + g_opt.dlss : g_opt.dlaa ? 1 : g_opt.fxaa ? 7 : 0;
@@ -806,6 +1045,13 @@ int main(int argc, char** argv) {
     std::vector<uint32_t> toast_pixels;
     bool toast_shown = toast.init("third_party/fonts") && toast_layer.init(presenter);
     toast.set_volume(g_opt.volume);
+#ifndef _WIN32
+    // Touch controls, over everything
+    UiOverlay touch_layer;
+    std::vector<uint32_t> touch_pixels;
+    bool touch_shown = touch_layer.init(presenter);
+    presenter.touch_hook = [&](const SDL_Event& e, float x, float y) { return g_touch.on_event(e, x, y); };
+#endif
 
     // Composes the 2D layers of a vblank (out.frame, its layer memory in
     // out.vram) for the renderer. One composition at a time (prep_mutex): the
@@ -1121,7 +1367,11 @@ int main(int argc, char** argv) {
             double now = qpc_seconds();
             if (!no_limit && step > 0 && due > 0 && due > now) {
                 if (due - now > 0.002) Sleep(DWORD((due - now) * 1000) - 1);
-                if (!vsync) while (qpc_seconds() < due) YieldProcessor();   // (without vsync nothing else paces it)
+#ifdef _WIN32
+                if (!vsync) while (qpc_seconds() < due) YieldProcessor();
+#else
+                if (!vsync) while (qpc_seconds() < due) {}
+#endif   // (without vsync nothing else paces it)
             }
             now = qpc_seconds();
             due = step <= 0 ? 0 : due > 0 && now - due < step ? std::max(due + step, now + 0.25 * step) : now + step;
@@ -1343,6 +1593,10 @@ int main(int argc, char** argv) {
                     g_opt.saturation = s.saturation / 100.0f;
                     g_opt.gamma = s.gamma / 100.0f;
                     apply_picture_options(renderer, g_opt);
+#ifndef _WIN32
+                    renderer.set_supersample(float(s.render_scale) / 100.0f);
+                    renderer.refresh_features();   // (an effect on or off: the world shader without the others)
+#endif
                     g_opt.telemetry = s.telemetry;   // (telemetry_frame opens or closes the socket at the next frame)
                     g_opt.telemetry_port = s.telemetry_port;
                     g_opt.telemetry_format = s.telemetry_format;
@@ -1606,6 +1860,64 @@ int main(int argc, char** argv) {
                 pad_in_menu = true;
             }
         }
+#ifndef _WIN32
+        {   // touch controls: hidden while a controller is connected; pause and BACK act as Esc
+            bool any_pad = false;
+            for (int i = 0; i < Gamepads::MAX; i++) any_pad = any_pad || g_pads.pad(i).connected;
+            Frontend::Screen sc = frontend.screen();
+            bool back = sc == Frontend::Screen::Options || sc == Frontend::Screen::Records ||
+                        sc == Frontend::Screen::Play || sc == Frontend::Screen::Debug || sc == Frontend::Screen::Pause;
+            RECT rc;
+            GetClientRect(presenter.hwnd(), &rc);
+            VkPresenter::SafeArea sa = presenter.safe_area();
+            static VkPresenter::SafeArea last_sa{};
+            if (sa.left != last_sa.left || sa.right != last_sa.right) last_sa = sa, hud_inset();
+            g_touch.set_window(rc.right, rc.bottom, {sa.left, sa.top, sa.right, sa.bottom});
+            // (nothing over the unseen run to SELECT GAME nor the splash)
+            g_touch.set_state(frontend.active() || g_boot_skip, back, any_pad);
+            // The app sent to the background in a race: the pause menu, as
+            // the pause button would
+#ifdef __APPLE__
+            {   // Away from the app (in the background, or a call or the control
+                // centre over it): the game waits and every sound stops, in the
+                // menus too, until it is back
+                extern std::atomic<bool> g_app_away;
+                void platform_audio_suspend(bool away);
+                bool away = GetForegroundWindow() == nullptr;
+                if (away != g_app_away.load()) {
+                    g_app_away = away;
+                    platform_audio_suspend(away);
+                    printf("[app] %s\n", away ? "away: the game waits, no sound" : "back");
+                }
+            }
+#endif
+#ifdef __APPLE__
+            if (g_sr2_foregrounded.exchange(false)) g_pads.restart_rumble();
+#endif
+            bool to_background = g_sr2_backgrounded.exchange(false);
+            if (to_background && g_opt.menu && !frontend.active()) {
+                frontend.open(Frontend::Screen::Pause);
+                g_menu_open = g_hold = true;
+            }
+            if (g_touch.take_escape()) {
+                if (frontend.active()) frontend.key(VK_ESCAPE);
+                else if (g_opt.menu) {
+                    frontend.open(Frontend::Screen::Pause);
+                    g_menu_open = g_hold = true;
+                }
+            }
+            int tw = 0, th = 0;
+            {
+                extern std::atomic<int> g_sr2_fps_toggle;
+                static int toggles = 0;
+                if (g_sr2_fps_toggle.load() != toggles) {
+                    toggles = g_sr2_fps_toggle.load();
+                    g_touch.toggle_fps();
+                }
+            }
+            if (touch_shown && g_touch.draw(touch_pixels, tw, th)) touch_layer.set_image(touch_pixels.data(), uint32_t(tw), uint32_t(th));
+        }
+#endif
         if (pad_pause && g_opt.menu && !frontend.active()) {
             frontend.open(Frontend::Screen::Pause);
             pad_in_menu = true;
@@ -1843,6 +2155,17 @@ int main(int argc, char** argv) {
             }
         }
         int y0, y1, tex_dirty_rows = 0;
+        {   // Debugging aid (iOS port): each capture request (three fingers) checks
+            // the GPU's texture RAM and logs the scene's textures
+            extern std::atomic<int> g_sr2_capture_request;
+            static int checked = 0;
+            if (g_sr2_capture_request.load() != checked) {
+                checked = g_sr2_capture_request.load();
+                std::vector<uint16_t> cpu;
+                g_texture_ram.copy_all(cpu);
+                renderer.verify_texture_ram(cpu);
+            }
+        }
         if (g_texture_ram.take_dirty(tex_rows, y0, y1)) {
             double from = qpc_seconds();
             renderer.upload_texture_rows(tex_rows, y0, y1);
@@ -1954,6 +2277,22 @@ int main(int argc, char** argv) {
             renderer.set_back_shift(paired ? float(1 - t) : 0.0f);
             if (g_pacing_log) pacing_sample(now, display, built->time - frame_period * (1 - t), *built);
         }
+        {   // Debugging aid (iOS port): three fingers save the screen as shown
+            // (out/capture/<n>.png) and the next 2D composition's layers (out/2d)
+            extern std::atomic<int> g_sr2_capture_request;
+            static int request = 0;
+            if (g_sr2_capture_request.load() > request) {
+                request = g_sr2_capture_request.load();
+                CreateDirectoryA("out", nullptr);
+                CreateDirectoryA("out/capture", nullptr);
+                char path[96];
+                snprintf(path, sizeof(path), "out/capture/%02d.png", request);
+                presenter.capture_next(path);
+                capture_2d = true;
+                printf("[debug] capture %02d: %s and the 2D layers in out/2d (frame %llu)\n", request, path,
+                       (unsigned long long)(shown == ~0ull ? 0 : shown));
+            }
+        }
         static int film_presents = 0;
         if (!film.empty() && ++film_presents == 3) {
             char path[64];
@@ -1978,6 +2317,9 @@ int main(int argc, char** argv) {
             renderer.record(cmd, view, extent);
             ui.record(cmd, view, extent);
             if (toast_shown) toast_layer.record(cmd, view, extent);   // over the menus too: their backdrop is opaque
+#ifndef _WIN32
+            if (touch_shown) touch_layer.record(cmd, view, extent);
+#endif
         });
         {   // this image's turn, for out/slow.log
             const VkPresenter::LastFrame& f = presenter.last_frame();
@@ -2036,6 +2378,55 @@ int main(int argc, char** argv) {
                      (unsigned long long)(presents * 1000 / (now - last_title)), (unsigned long long)(shown == ~0ull ? 0 : shown),
                      scene->polygons, game_ms, prep_ms, scene_ms, t.record * per, (t.gpu_wait + t.present) * per);
             SetWindowTextA(presenter.hwnd(), title);
+#ifdef __APPLE__
+            {   // the frame rate on screen (four fingers), with the GPU's time per image
+                int images = 0;
+                double gpu = renderer.take_gpu_ms(images);
+                char fps[64];
+                unsigned long long hz = (unsigned long long)(presents * 1000 / (now - last_title));
+                if (images > 0) snprintf(fps, sizeof fps, "%llu FPS  GPU %.1f MS", hz, gpu / images);
+                else snprintf(fps, sizeof fps, "%llu FPS", hz);
+                g_touch.set_fps(fps);
+                // the same in the log, every second, shown or not (to read
+                // the frame rate afterwards, scene by scene)
+                static const char* const heat[] = {"nominal", "fair", "serious", "critical"};
+                int th = platform_thermal_state();
+                {   // The 3D's size from the GPU's own time (iOS port): over 7.4 ms
+                    // an image (the 120 Hz frame is 8.3) one step smaller, each
+                    // second; back up a step once the time there would have been
+                    // under 6.6 ms for 5 s. A hot phone lowers the GPU's clock
+                    // (some 20-30% already at "fair", Snowy fell to 80 fps)
+                    static const float steps[] = {1.0f, 0.92f, 0.85f, 0.78f, 0.7f};
+                    // (the composition, some 1.6 ms, does not shrink with the 3D:
+                    // reckoned apart when going back up, or it stayed at 70%;
+                    // and a second left out after each change, which it straddled)
+                    static int level = 0, calm = 0, settle = 0;
+                    if (images >= 30 && settle > 0) settle--;
+                    else if (images >= 30) {
+                        double per = gpu / images;
+                        int was = level;
+                        if (per > 7.4 && level < 4) {
+                            level++;
+                            calm = 0;
+                        } else if (level > 0) {
+                            const double fixed = 1.6;
+                            double up = steps[level - 1] / steps[level];
+                            calm = fixed + std::max(per - fixed, 0.0) * up * up < 6.8 ? calm + 1 : 0;
+                            if (calm >= 5) level--, calm = 0;
+                        }
+                        if (level != was) settle = 1;
+                        if (level != was) {
+                            renderer.set_thermal_scale(steps[level]);
+                            printf("[res] GPU %.1f ms, heat %s: the 3D at %d%% of its size\n", per,
+                                   th >= 0 && th < 4 ? heat[th] : "?", int(steps[level] * 100.0f + 0.5f));
+                        }
+                    }
+                }
+                printf("[fps] %llu  GPU %.1f ms  %zu polygons  frame %llu  heat %s\n", hz, images > 0 ? gpu / images : 0.0,
+                       scene->polygons, (unsigned long long)(shown == ~0ull ? 0 : shown), th >= 0 && th < 4 ? heat[th] : "?");
+                fflush(stdout);
+            }
+#endif
             static ULONGLONG last_log = now;
             if (now - last_log >= 5000) {   // the same, in the log, every 5 s
                 last_log = now;
@@ -2060,11 +2451,15 @@ int main(int argc, char** argv) {
     fflush(stdout);
     ui.shutdown();
     if (toast_shown) toast_layer.shutdown();
+#ifndef _WIN32
+    if (touch_shown) touch_layer.shutdown();
+#endif
     toast.shutdown();
     frontend.shutdown();
     renderer.shutdown();
     presenter.shutdown();
     g_pads.shutdown();
+#ifdef _WIN32
     if (g_restart) {   // RESTART NOW: the same exe, command line, folder and environment, straight to the main menu
         SetEnvironmentVariableA("SR2_RESTARTED", "1");
         for (const char* aid : {"LW_MENU_KEYS", "LW_MENU_SHOT", "LW_MENU_FILM", "LW_MENU_FILM_KEYS", "LW_MENU_FILM_NOW"})
@@ -2102,6 +2497,7 @@ int main(int argc, char** argv) {
         }
         ExitProcess(0);
     }
+#endif
     console_prompt();
     ExitProcess(0);
 }

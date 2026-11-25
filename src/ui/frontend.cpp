@@ -12,7 +12,11 @@
 
 #include <shellapi.h>
 
+#ifdef _WIN32
 #include <wincodec.h>
+#else
+#include "../video/image_io.h"   // iOS port: pictures through stb_image
+#endif
 
 #include "ui_draw.h"
 #include "../common/clock.h"
@@ -82,6 +86,24 @@ bool Frontend::init(const std::string& font_dir) {
 }
 
 // Any picture format Windows can read (WIC), as BGRA with straight alpha
+#ifndef _WIN32
+bool Frontend::load_image(const std::wstring& path, std::vector<uint32_t>& px, int& w_out, int& h_out) {
+    std::vector<uint8_t> rgba;
+    int w = 0, h = 0;
+    if (!png_load(std::string(path.begin(), path.end()), w, h, rgba) || w <= 0 || h <= 0) {
+        px.clear();
+        w_out = h_out = 0;
+        return false;
+    }
+    px.resize(size_t(w) * size_t(h));
+    for (size_t i = 0; i < px.size(); i++)
+        px[i] = uint32_t(rgba[i * 4 + 2]) | uint32_t(rgba[i * 4 + 1]) << 8 | uint32_t(rgba[i * 4]) << 16 |
+                uint32_t(rgba[i * 4 + 3]) << 24;
+    w_out = w;
+    h_out = h;
+    return true;
+}
+#else
 bool Frontend::load_image(const std::wstring& path, std::vector<uint32_t>& px, int& w_out, int& h_out) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IWICImagingFactory* wic = nullptr;
@@ -112,6 +134,7 @@ bool Frontend::load_image(const std::wstring& path, std::vector<uint32_t>& px, i
     h_out = int(h);
     return true;
 }
+#endif
 
 void Frontend::shutdown() {
     video_.close();
@@ -133,6 +156,24 @@ const wchar_t* const Frontend::TAB_NAMES[Frontend::TAB_COUNT] = {L"EXPERIENCE", 
 // shown. SOFT PARTICLES (settings.soft: only the spectators' camera flashes)
 // has no row in Sega Rally 2. A tab whose rows do not fit the page scrolls.
 const Frontend::OptionTab Frontend::OPTION_TABS[] = {
+#ifdef __APPLE__
+    // iOS port: no window, display mode or refresh choices (the phone's screen,
+    // every refresh), no anti-aliasing choice (off), no ray tracing (MoltenVK
+    // has none), no telemetry, no rear speakers, no trigger motors
+    {OPT_EXPERIENCE, EXPERIENCE_TAB, L"EDITION"}, {OPT_ARCADE_ASPECT, EXPERIENCE_TAB},
+    {OPT_ASPECT, DISPLAY_TAB, L"SCREEN"}, {OPT_HUD_AREA, DISPLAY_TAB}, {OPT_SCALE, DISPLAY_TAB}, {OPT_MOTION, DISPLAY_TAB},
+    {OPT_SAT, DISPLAY_TAB, L"PICTURE"}, {OPT_GAMMA, DISPLAY_TAB}, {OPT_SHARPEN, DISPLAY_TAB},
+    {OPT_SUN, LIGHTING_TAB, L"LIGHTING"}, {OPT_SHADOWS, LIGHTING_TAB}, {OPT_CAR_PROBES, LIGHTING_TAB}, {OPT_CAR_SHADOWS, LIGHTING_TAB}, {OPT_HDR, LIGHTING_TAB}, {OPT_AO, LIGHTING_TAB},
+    {OPT_BLOOM, LIGHTING_TAB}, {OPT_HAZE, LIGHTING_TAB},
+    {OPT_OBJECTS, LIGHTING_TAB, L"WORLD"},
+    {OPT_DUST, LIGHTING_TAB, L"ARCADE ART"}, {OPT_HUD, LIGHTING_TAB}, {OPT_LIVERIES, LIGHTING_TAB},
+    {OPT_VOLUME, AUDIO_TAB, L"VOLUME"}, {OPT_MUSIC, AUDIO_TAB}, {OPT_MENU_MUSIC, AUDIO_TAB},
+    {OPT_SPEAKERS, AUDIO_TAB, L"SOUND"}, {OPT_SAMPLES, AUDIO_TAB},
+    {OPT_CONNECTED, CONTROLS_TAB, L"DEVICES"},
+    {OPT_BIND, CONTROLS_TAB, L"KEYS"},
+    {OPT_VIBRATION, CONTROLS_TAB, L"GAMEPAD"},
+    {OPT_WHEEL, WHEEL_TAB, L"CONTROLS"},
+#else
     {OPT_EXPERIENCE, EXPERIENCE_TAB, L"EDITION"}, {OPT_ARCADE_ASPECT, EXPERIENCE_TAB},
     {OPT_TELEMETRY, EXPERIENCE_TAB, L"EXPERIMENTAL"}, {OPT_TELEMETRY_FORMAT, EXPERIENCE_TAB},
     {OPT_DISPLAY, DISPLAY_TAB, L"SCREEN"}, {OPT_RESOLUTION, DISPLAY_TAB}, {OPT_ASPECT, DISPLAY_TAB}, {OPT_HUD_AREA, DISPLAY_TAB}, {OPT_SCALE, DISPLAY_TAB}, {OPT_MOTION, DISPLAY_TAB},
@@ -149,6 +190,7 @@ const Frontend::OptionTab Frontend::OPTION_TABS[] = {
     {OPT_BIND, CONTROLS_TAB, L"KEYS"},   // (its heading: bind_lines' group, KEYBOARD KEYS or GAMEPAD BUTTONS)
     {OPT_VIBRATION, CONTROLS_TAB, L"GAMEPAD"}, {OPT_TRIGGERS, CONTROLS_TAB},
     {OPT_WHEEL, WHEEL_TAB, L"CONTROLS"},   // (its headings: each wheel_lines row's group)
+#endif
 };   // (DIFFICULTY: in PLAY > ARCADE CLASSIC's race set-up)
 
 // Under each section's name in the column at the left
@@ -210,8 +252,10 @@ std::vector<Frontend::Item> Frontend::items() const {
     case Screen::Main: {
         std::vector<Item> list = {{PLAY, L"PLAY", L"", L"The original arcade game"},
                                   {OPTIONS, L"OPTIONS", L"", L"Display, sound and controls"},
-                                  {RECORDS, L"RECORDS", L"", L"Achievements and statistics"},
-                                  {QUIT, L"QUIT", L"", L"Close the game"}};
+                                  {RECORDS, L"RECORDS", L"", L"Achievements and statistics"}};
+#ifndef __APPLE__   // (iOS port: an iPhone app does not quit itself)
+        list.push_back({QUIT, L"QUIT", L"", L"Close the game"});
+#endif
         // DEBUG is for testing only: hidden unless SR2_DEBUG_MENU is set
         // (kShowDebugMenu true shows it always)
         constexpr bool kShowDebugMenu = false;
@@ -581,11 +625,19 @@ void Frontend::activate(const Item& it, int dir) {
         break;
     }
     case OPT_SCALE: {
+#ifdef __APPLE__
+        // iOS port: up to the screen's own resolution, applied at once (app.cpp: no restart on a phone)
+        static const int STEPS[] = {50, 67, 75, 85, 100};
+#else
         static const int STEPS[] = {50, 67, 75, 85, 100, 125, 150, 175, 200};
+#endif
         int n = int(std::size(STEPS)), i = 4;
         for (int k = 0; k < n; k++)
             if (STEPS[k] <= settings.render_scale) i = k;
         settings.render_scale = STEPS[(i + dir + n) % n];
+#ifdef __APPLE__
+        scale_at_launch = settings.render_scale;
+#endif
         push(Action::SettingsChanged);
         break;
     }
@@ -620,7 +672,11 @@ void Frontend::activate(const Item& it, int dir) {
     case OPT_TELEMETRY: settings.telemetry = !settings.telemetry; push(Action::SettingsChanged); break;
     case OPT_TELEMETRY_FORMAT: settings.telemetry_format = (settings.telemetry_format + 1) % 2; push(Action::SettingsChanged); break;
     case OPT_MENU_MUSIC: settings.menu_music = !settings.menu_music; push(Action::SettingsChanged); break;
+#ifdef __APPLE__
+    case OPT_SPEAKERS: settings.speakers = settings.speakers == 2 ? 0 : 2; push(Action::SettingsChanged); break;   // stereo, headphones
+#else
     case OPT_SPEAKERS: settings.speakers = (settings.speakers + dir + 3) % 3; push(Action::SettingsChanged); break;
+#endif
     case OPT_REAR: settings.rear_boost = (settings.rear_boost + 3 * dir + 15) % 15; push(Action::SettingsChanged); break;
     case OPT_SAMPLES: settings.cubic_samples = !settings.cubic_samples; push(Action::SettingsChanged); break;
     case OPT_AA: {   // (AA_ORDER)

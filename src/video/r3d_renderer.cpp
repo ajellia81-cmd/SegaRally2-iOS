@@ -1,7 +1,13 @@
 #include "r3d_renderer.h"
+#include <atomic>
+#include "image_io.h"
+#include <windows.h>
+
+#include <atomic>
 
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <mutex>
 #include <cmath>
 #include <cstdio>
@@ -21,6 +27,12 @@
 #include "r3d.vert.h"
 #include "r3d_rt.vert.h"
 #include "tilegen.h"
+
+// Debugging aid (iOS port): what r3d.frag draws instead (0: the picture; a
+// three-finger tap cycles it, platform/vk_presenter_sdl.cpp)
+std::atomic<int> g_sr2_debug_view{0};
+std::atomic<int> g_sr2_capture_request{0};
+std::atomic<int> g_sr2_fps_toggle{0};   // iOS port: four fingers (vk_presenter_sdl.cpp)   // iOS port: three fingers ask for the debug captures (app.cpp)
 
 namespace {
 
@@ -210,7 +222,9 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
         if (counts & s) samples_ = VkSampleCountFlagBits(s);
 
     const VkImageUsageFlags sampled = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    if (!create_image(texture_ram_, 2048, 2048, VK_FORMAT_R16_UINT, sampled, VK_IMAGE_ASPECT_COLOR_BIT)) return false;
+    if (!create_image(texture_ram_, 2048, 2048, VK_FORMAT_R16_UINT, sampled | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                      VK_IMAGE_ASPECT_COLOR_BIT))
+        return false;
     if (!create_image(back_, BACK_W, SCREEN_H, VK_FORMAT_B8G8R8A8_UNORM, sampled, VK_IMAGE_ASPECT_COLOR_BIT)) return false;
     if (!create_image(front_, SCREEN_W, SCREEN_H, VK_FORMAT_B8G8R8A8_UNORM, sampled, VK_IMAGE_ASPECT_COLOR_BIT)) return false;
     if (!create_buffer(texture_staging_, 2048 * 2048 * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) return false;
@@ -369,13 +383,13 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     li.flags = 0;
     li.pNext = nullptr;
     // The second sets (issue #158): images that some pass draws into
-    VkDescriptorSetLayoutBinding fxb[4];
-    for (uint32_t i = 0; i < 4; i++)
+    VkDescriptorSetLayoutBinding fxb[5];
+    for (uint32_t i = 0; i < 5; i++)
         fxb[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
     li.bindingCount = 3;   // shadow map, world depth, the cars' light probes
     li.pBindings = fxb;
     vkCreateDescriptorSetLayout(dev_, &li, nullptr, &r3d_aux_layout_);
-    li.bindingCount = 4;   // bloom, exposure, diffusion, tight bloom
+    li.bindingCount = 5;   // bloom, exposure, diffusion, tight bloom; the dust at half resolution (iOS port)
     vkCreateDescriptorSetLayout(dev_, &li, nullptr, &compose_fx_layout_);
     // Bloom passes: one source image each
     li.bindingCount = 1;
@@ -441,6 +455,7 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
             put(s, 1, nearest_, s == compose_fx_measure_set_ ? blank_color_.view : exposure_.view);
             put(s, 2, linear_, blank_color_.view);
             put(s, 3, linear_, blank_color_.view);
+            put(s, 4, linear_, blank_color_.view);
         }
     }
 
@@ -540,7 +555,8 @@ void R3DRenderer::bind_r3d_sets(VkCommandBuffer cmd, VkDescriptorSet aux) {
 VkPipeline R3DRenderer::make_pipeline(const PipelineDesc& d) {
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, d.vs, "main"};
-    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, d.fs, "main"};
+    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, d.fs, "main",
+                 d.fs_spec};
 
     VkVertexInputBindingDescription binding{0, sizeof(R3DVertex), VK_VERTEX_INPUT_RATE_VERTEX};
     VkVertexInputAttributeDescription attrs[9] = {
@@ -584,6 +600,11 @@ VkPipeline R3DRenderer::make_pipeline(const PipelineDesc& d) {
         ds.front.compareMask = ds.front.writeMask = 0xFF;
         ds.front.reference = 0;
         ds.back = ds.front;
+    }
+    if (d.bias != 0 || d.slope_bias != 0) {
+        rs.depthBiasEnable = VK_TRUE;
+        rs.depthBiasSlopeFactor = d.slope_bias;
+        rs.depthBiasConstantFactor = d.bias;
     }
     VkPipelineColorBlendAttachmentState cbas[3]{};
     VkPipelineColorBlendAttachmentState& cba = cbas[0];
@@ -640,6 +661,11 @@ VkPipeline R3DRenderer::make_pipeline(const PipelineDesc& d) {
     // Bloom source: blended like the colour. With it the motion slot is always
     // there (without an image when DLAA is off)
     cbas[2] = cba;
+#ifdef __APPLE__
+    // Without BLOOM nothing reads the glow image: not written, nor kept
+    // (iOS port; a whole-screen image less for every surface drawn)
+    if (!(features_ & 32u)) cbas[2].colorWriteMask = 0;
+#endif
     if (d.depth_only)
         for (auto& c : cbas) c.colorWriteMask = 0;
     uint32_t attachments = d.glow ? 3 : d.motion ? 2 : 1;
@@ -694,15 +720,27 @@ bool R3DRenderer::create_pipelines() {
     VkShaderModule probe_fs = rt_.ready() ? vk_->shader_module(spv_car_probe_rt_frag, sizeof(spv_car_probe_rt_frag))
                                           : vk_->shader_module(spv_car_probe_frag, sizeof(spv_car_probe_frag));
     bool motion = motion_pass_ = dlaa_.ready();
+    // r3d.frag leaves out the effects that are off (constant_id 0, iOS)
+    features_ = feature_mask();
+    const VkSpecializationMapEntry feat_entry{0, 0, sizeof(uint32_t)};
+    const VkSpecializationInfo r3d_spec{1, &feat_entry, sizeof(features_), &features_};
     // The world: 3D geometry into the HDR image, with the motion and glow slots
     PipelineDesc world{.vs = r3d_vs, .fs = r3d_fs, .layout = r3d_layout_, .color = VK_FORMAT_R16G16B16A16_SFLOAT,
                        .depth = true, .depth_write = true, .vertex_input = true, .samples = samples_,
-                       .motion = motion, .glow = true, .stencil = true};
+                       .motion = motion, .glow = true, .stencil = true, .fs_spec = &r3d_spec};
     opaque_ = make_pipeline(world);
     PipelineDesc translucent = world;
     translucent.depth_write = false;
     translucent.blend = true;
     translucent_ = make_pipeline(translucent);
+    {   // The dust at half resolution (iOS port): one image, no depth (r3d.frag
+        // tests it against the world's depth itself)
+        PipelineDesc half = translucent;
+        half.depth = false;
+        half.samples = VK_SAMPLE_COUNT_1_BIT;
+        half.motion = half.glow = false;
+        dust_half_ = make_pipeline(half);
+    }
     PipelineDesc trans_depth = world;
     trans_depth.depth_only = true;
     trans_depth_ = make_pipeline(trans_depth);
@@ -716,8 +754,26 @@ bool R3DRenderer::create_pipelines() {
     PipelineDesc blob = translucent;
     blob.once = true;
     blob_ = make_pipeline(blob);
+#ifdef __APPLE__
+    // The solid surfaces' depth first (r3d.frag, quality -3000), a hair
+    // farther than they draw so that the opaque pass then passes the test
+    // (the Lost World port's early-Z)
+    {
+        PipelineDesc ez = world;
+        ez.depth_only = true;
+        ez.bias = -8.0f;
+        ez.slope_bias = -1.0f;
+        early_z_ = make_pipeline(ez);
+        // The shading after it: the depth is all there, so none is written
+        // (with depth writes, a shader that can discard is tested late on
+        // Apple's GPUs: every layer of the foliage was shaded)
+        PipelineDesc oz = world;
+        oz.depth_write = false;
+        opaque_ez_ = make_pipeline(oz);
+    }
+#endif
     shadow_ = make_pipeline({.vs = r3d_vs, .fs = r3d_fs, .layout = r3d_layout_, .color = VK_FORMAT_UNDEFINED,
-                             .depth = true, .depth_write = true, .vertex_input = true});
+                             .depth = true, .depth_write = true, .vertex_input = true, .fs_spec = &r3d_spec});
     // Full-screen passes: a triangle over the target, no vertex input
     compose_format_ = vk_->swap_format();
     PipelineDesc compose{.vs = c_vs, .fs = c_fs, .layout = compose_layout_, .color = compose_format_};
@@ -746,6 +802,37 @@ bool R3DRenderer::create_pipelines() {
     return opaque_ && translucent_ && blob_ && trans_depth_ && shadow_ && compose_measure_ && compose_ && bloom_ && ao_pass_ && ao_apply_ && ao_apply_glow_ && alpha_taa_ && car_probe_pass_;
 }
 
+// The FEAT_ bits of r3d.frag for what is on now (iOS port; all of them elsewhere)
+uint32_t R3DRenderer::feature_mask() const {
+#ifdef __APPLE__
+    uint32_t m = 0;
+    if (shadow_strength_ > 0) m |= 1u;   // FEAT_SHADOW
+    if (haze_strength_ > 0) m |= 2u;     // FEAT_HAZE
+    if (soft_particles_) m |= 4u;        // FEAT_SOFT
+    if (sun_) m |= 8u;                   // FEAT_SUN
+    if (aniso_ > 1.0f) m |= 16u;         // FEAT_ANISO: more than one tap
+    if (bloom_strength_ > 0) m |= 32u;   // the bloom's glow image written (not a shader bit)
+    return m;                            // (no ray tracing, no debug views)
+#else
+    return ~0u;
+#endif
+}
+
+void R3DRenderer::destroy_pipelines() {
+    for (VkPipeline* p : {&opaque_, &translucent_, &blob_, &trans_depth_, &shadow_, &compose_measure_, &compose_,
+                          &bloom_, &compose_glow_, &ao_pass_, &ao_apply_, &ao_apply_glow_, &alpha_taa_, &car_probe_pass_, &early_z_, &opaque_ez_, &dust_half_})
+        if (*p) vkDestroyPipeline(dev_, *p, nullptr), *p = VK_NULL_HANDLE;
+}
+
+void R3DRenderer::refresh_features() {
+    if (!dev_ || feature_mask() == features_) return;
+    vkDeviceWaitIdle(dev_);
+    uint32_t was = features_;
+    destroy_pipelines();
+    if (!create_pipelines()) fprintf(stderr, "[vulkan] could not make the pipelines again (effects)\n");
+    printf("[video] shader effects %02X -> %02X\n", was, features_);
+}
+
 // w, h: the 3D image as drawn; up_w, up_h: as DLSS hands it on (the same but with DLSS upscaling)
 void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t up_h) {
     if (color_.image && color_.w == w && color_.h == h && (!dlaa_out_.image || (dlaa_out_.w == up_w && dlaa_out_.h == up_h)))
@@ -758,10 +845,11 @@ void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t
     destroy_image(dlaa_out_);
     destroy_image(alpha_out_);
     destroy_image(alpha_history_);
-    for (Image* img : {&glow_, &glow_ms_, &bloom_a_, &bloom_b_, &bloom_c_, &depth_resolved_, &ao_, &diff_a_, &diff_b_})
+    for (Image* img : {&glow_, &glow_ms_, &bloom_a_, &bloom_b_, &bloom_c_, &depth_resolved_, &ao_, &diff_a_, &diff_b_, &dust_half_img_})
         destroy_image(*img);
     create_image(color_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
-                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                 VK_IMAGE_ASPECT_COLOR_BIT);
     VkImageViewCreateInfo avi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     avi.image = color_.image;
     avi.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -896,6 +984,19 @@ void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t
         }
         vkUpdateDescriptorSets(dev_, 3, dw, 0, nullptr);
     }
+    // The dust (DUST: ENHANCED) at half resolution, laid over the 3D image by
+    // the composition (iOS port, record_world)
+    create_image(dust_half_img_, (w + 1) / 2, (h + 1) / 2, VK_FORMAT_R16G16B16A16_SFLOAT, target, VK_IMAGE_ASPECT_COLOR_BIT);
+    for (VkDescriptorSet set : {compose_fx_set_, compose_fx_inner_set_, compose_fx_measure_set_}) {
+        VkDescriptorImageInfo src{linear_, dust_half_img_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet dw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        dw.dstSet = set;
+        dw.dstBinding = 4;   // (set 1, compose.frag's dust_half)
+        dw.descriptorCount = 1;
+        dw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        dw.pImageInfo = &src;
+        vkUpdateDescriptorSets(dev_, 1, &dw, 0, nullptr);
+    }
     composed_view_ = VK_NULL_HANDLE;
     if (dlaa_.ready()) bind_scene_image(dlaa_out_.view, alpha_out_.view);
     else bind_scene_image(color_.view, color_.alpha_view);
@@ -941,6 +1042,28 @@ void R3DRenderer::set_layers(const uint32_t* back, const uint32_t* front) {
     memcpy(dst, back, BACK_W * SCREEN_H * 4);
     memcpy(dst + BACK_W * SCREEN_H * 4, front, SCREEN_W * SCREEN_H * 4);
     layers_dirty_ = true;
+    // Whether the foreground's outermost columns are each one colour (within
+    // 6%): compose repeats them beside the 4:3 picture only then (iOS port)
+    // (a few pixels apart allowed: the game over screen's white had one
+    // see-through pixel in its top left corner, and the whole left side
+    // beside it stayed black)
+    front_edges_plain_ = 0;
+    for (int side = 0; side < 2; side++) {
+        int x = side ? SCREEN_W - 1 : 0;
+        uint32_t ref = front[(SCREEN_H / 2) * SCREEN_W + x];
+        int apart = 0;
+        for (int y = 0; y < SCREEN_H; y++) {
+            uint32_t p = front[y * SCREEN_W + x];
+            for (int k = 0; k < 4; k++) {
+                int d = int((p >> (8 * k)) & 255) - int((ref >> (8 * k)) & 255);
+                if (d >= 16 || d <= -16) {
+                    apart++;
+                    break;
+                }
+            }
+        }
+        if (apart <= 4) front_edges_plain_ |= 1 << side;
+    }
     // Average colour of each row of the back layer, for the horizon colour
     // (over the 200 columns past each side it always had, as before the
     // margin grew for ultrawide views)
@@ -982,6 +1105,202 @@ void R3DRenderer::set_sky_coords(const uint32_t* coords) {
 void R3DRenderer::set_text_atlas(const TextHD& text) {
     if (text.atlas_rgba.empty()) return;
     upload_slot(compose_set_, 5, overlay_sampler_, 0, text.atlas_w, text.atlas_h, text.atlas_rgba);
+}
+
+void R3DRenderer::verify_texture_ram(const std::vector<uint16_t>& cpu) {
+    if (tex_y0_ < tex_y1_ || cpu.size() != 2048u * 2048u) {
+        printf("[texcheck] skipped (uploads pending)\n");
+        return;
+    }
+    Buffer rb;
+    if (!create_buffer(rb, 2048 * 2048 * 2, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+        printf("[texcheck] no read back buffer\n");
+        return;
+    }
+    vk_->run_once([&](VkCommandBuffer cmd) {
+        transition(cmd, texture_ram_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        VkBufferImageCopy c{};
+        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        c.imageExtent = {2048, 2048, 1};
+        vkCmdCopyImageToBuffer(cmd, texture_ram_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb.buffer, 1, &c);
+        transition(cmd, texture_ram_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    const uint16_t* gpu = static_cast<const uint16_t*>(rb.mapped);
+    const uint16_t* stg = static_cast<const uint16_t*>(texture_staging_.mapped);
+    // Per 128x128 tile: texels where the GPU differs from the staging copy, and the staging copy from the CPU
+    int gpu_bad = 0, stg_bad = 0, gpu_zero_tiles = 0;
+    std::string tiles;
+    for (int ty = 0; ty < 16; ty++)
+        for (int tx = 0; tx < 16; tx++) {
+            int g = 0, s = 0, gz = 0, cz = 0;
+            for (int y = ty * 128; y < ty * 128 + 128; y++)
+                for (int x = tx * 128; x < tx * 128 + 128; x++) {
+                    size_t i = size_t(y) * 2048 + x;
+                    g += gpu[i] != stg[i];
+                    s += stg[i] != cpu[i];
+                    gz += gpu[i] == 0;
+                    cz += cpu[i] == 0;
+                }
+            gpu_bad += g, stg_bad += s;
+            if (gz == 128 * 128 && cz < 128 * 128) gpu_zero_tiles++;
+            if (g || s) {
+                char b[64];
+                snprintf(b, sizeof(b), " %d,%d:%d/%d", tx * 128, ty * 128, g, s);
+                tiles += b;
+            }
+        }
+    printf("[texcheck] gpu!=uploaded %d texels, uploaded!=cpu %d texels, gpu-empty tiles %d%s\n", gpu_bad, stg_bad,
+           gpu_zero_tiles, tiles.empty() ? "" : " | tiles x,y:gpu/cpu");
+    if (!tiles.empty()) printf("[texcheck]%s\n", tiles.c_str());
+    int shown = 0;
+    for (size_t i = 0; i < cpu.size() && shown < 8; i++)
+        if (gpu[i] != stg[i] || stg[i] != cpu[i]) {
+            printf("[texcheck] at %zu,%zu gpu %04x uploaded %04x cpu %04x\n", i % 2048, i / 2048, gpu[i], stg[i], cpu[i]);
+            shown++;
+        }
+    // What the scene's textured polygons use: texture word, flags, texels,
+    // the range of their texture coordinates; each texture once as a picture
+    // in out/texuse/ (as the GPU has it)
+    if (scene_) {
+        struct Use {
+            int n = 0;
+            uint32_t rep = 0;
+            float u0 = 1e9f, u1 = -1e9f, v0 = 1e9f, v1 = -1e9f;
+        };
+        std::map<std::pair<uint32_t, uint32_t>, Use> used;
+        // which list each vertex is in: 0 opaque, 1 translucent (bit 30 of the key)
+        std::vector<uint8_t> in_trans(scene_->vertices.size(), 0);
+        for (const R3DViewport& vw : scene_->viewports)
+            for (uint32_t i = vw.trans_first; i < vw.trans_first + vw.trans_count && i < in_trans.size(); i++)
+                in_trans[i] = 1;
+        for (size_t vi = 0; vi < scene_->vertices.size(); vi++) {
+            const R3DVertex& v = scene_->vertices[vi];
+            if (v.flags & R3D_TEXTURED) {
+                Use& u = used[{v.tex, v.flags | (v.replace ? 0x80000000u : 0u) | (in_trans[vi] ? 0x40000000u : 0u)}];
+                u.n++;
+                u.rep = v.replace;
+                u.u0 = std::min(u.u0, v.uv[0]), u.u1 = std::max(u.u1, v.uv[0]);
+                u.v0 = std::min(u.v0, v.uv[1]), u.v1 = std::max(u.v1, v.uv[1]);
+            }
+        }
+        for (const R3DViewport& vw : scene_->viewports)
+            printf("[texuse] viewport: opaque %u+%u translucent %u+%u world %d\n", vw.opaque_first, vw.opaque_count,
+                   vw.trans_first, vw.trans_count, int(vw.world));
+        static std::map<uint32_t, int> dumped;   // texture word -> times seen changed
+        CreateDirectoryA("out/texuse", nullptr);
+        int listed = 0;
+        for (auto& [key, use] : used) {
+            if (listed++ >= 80) break;
+            uint32_t tex = key.first;
+            int bx = tex & 2047, by = (tex >> 11) & 2047, w = 32 << ((tex >> 22) & 7), h = 32 << ((tex >> 25) & 7);
+            uint32_t fmt = tex >> 28;
+            std::vector<uint8_t> rgba(size_t(w) * h * 4);
+            uint64_t sum = 1469598103934665603ull;
+            int b15 = 0;
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
+                    uint16_t t = gpu[size_t((by & 1024) | ((by + y) & 1023)) * 2048 + ((bx + x) & 2047)];
+                    sum = (sum ^ t) * 1099511628211ull;
+                    b15 += t >> 15;
+                    uint8_t* o = &rgba[(size_t(y) * w + x) * 4];
+                    switch (fmt) {
+                    case 0: o[0] = ((t >> 10) & 31) * 255 / 31, o[1] = ((t >> 5) & 31) * 255 / 31, o[2] = (t & 31) * 255 / 31,
+                            o[3] = (t & 0x8000) ? 0 : 255; break;
+                    case 7: o[0] = ((t >> 12) & 15) * 17, o[1] = ((t >> 8) & 15) * 17, o[2] = ((t >> 4) & 15) * 17,
+                            o[3] = (t & 15) * 17; break;
+                    case 1: o[0] = o[1] = o[2] = (t & 15) * 17, o[3] = ((t >> 4) & 15) * 17; break;
+                    case 2: o[0] = o[1] = o[2] = ((t >> 4) & 15) * 17, o[3] = (t & 15) * 17; break;
+                    case 3: o[0] = o[1] = o[2] = ((t >> 8) & 15) * 17, o[3] = ((t >> 12) & 15) * 17; break;
+                    case 4: o[0] = o[1] = o[2] = ((t >> 12) & 15) * 17, o[3] = ((t >> 8) & 15) * 17; break;
+                    case 5: o[0] = o[1] = o[2] = t & 255, o[3] = (t & 255) == 255 ? 0 : 255; break;
+                    case 6: o[0] = o[1] = o[2] = t >> 8, o[3] = (t >> 8) == 255 ? 0 : 255; break;
+                    default: {
+                        unsigned n = (t >> (4 * (fmt - 8))) & 15;
+                        o[0] = o[1] = o[2] = n * 17, o[3] = n == 15 ? 0 : 255;
+                    }
+                    }
+                }
+            printf("[texuse] tex %08x fmt %u %d,%d %dx%d flags %08x replace %08x verts %d uv %.2f..%.2f %.2f..%.2f | bit15 %.2f data %08x\n",
+                   tex, fmt, bx, by, w, h, key.second, use.rep, use.n, use.u0, use.u1, use.v0, use.v1, double(b15) / (w * h),
+                   uint32_t(sum));
+            if (dumped[tex]++ < 3) {
+                char path[96];
+                snprintf(path, sizeof(path), "out/texuse/%08x_%08x.png", tex, uint32_t(sum));
+                png_save(path, w, h, rgba.data());
+            }
+        }
+    }
+    if (gpu_bad) {   // the uploaded copy again, whole
+        tex_y0_ = 0;
+        tex_y1_ = 2048;
+        printf("[texcheck] the whole texture RAM goes up again\n");
+    }
+    fflush(stdout);
+    destroy_buffer(rb);
+}
+
+// Debugging aid (iOS port): the 3D image as the last frame left it, before
+// compose, to <stem>_raw.png (colour; NaN or infinite: green), _rawalpha.png
+// and _raw.f16 (the values)
+void R3DRenderer::dump_3d(const char* stem) {
+    // The 3D image itself as the last frame left it (before compose): colour,
+    // alpha, and NaN/infinite texels marked (iOS port: debug captures)
+    {
+        Buffer cb;
+        size_t bytes = size_t(color_.w) * color_.h * 8;
+        if (create_buffer(cb, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+            VkImageLayout was = color_.layout;
+            vk_->run_once([&](VkCommandBuffer cmd) {
+                transition(cmd, color_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                VkBufferImageCopy c{};
+                c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                c.imageExtent = {color_.w, color_.h, 1};
+                vkCmdCopyImageToBuffer(cmd, color_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, cb.buffer, 1, &c);
+                transition(cmd, color_, was == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : was);
+            });
+            auto half = [](uint16_t h) {
+                uint32_t s = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+                if (e == 31) return m ? NAN : (s ? -INFINITY : INFINITY);
+                float v = e ? std::ldexp(float(m | 1024), int(e) - 25) : std::ldexp(float(m), -24);
+                return s ? -v : v;
+            };
+            const uint16_t* px = static_cast<const uint16_t*>(cb.mapped);
+            uint32_t w = color_.w, h = color_.h;
+            std::vector<uint8_t> rgb(size_t(w) * h * 4), alpha(size_t(w) * h * 4);
+            int bad = 0;
+            for (size_t i = 0; i < size_t(w) * h; i++) {
+                float v[4];
+                bool nan = false;
+                for (int k = 0; k < 4; k++) {
+                    v[k] = half(px[i * 4 + k]);
+                    nan |= !std::isfinite(v[k]);
+                }
+                bad += nan;
+                for (int k = 0; k < 3; k++) rgb[i * 4 + k] = nan ? (k == 1 ? 255 : 0) : uint8_t(std::clamp(v[k], 0.0f, 1.0f) * 255.0f + 0.5f);
+                rgb[i * 4 + 3] = 255;
+                uint8_t a = nan ? 0 : uint8_t(std::clamp(v[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+                alpha[i * 4] = alpha[i * 4 + 1] = alpha[i * 4 + 2] = a;
+                alpha[i * 4 + 3] = 255;
+            }
+            CreateDirectoryA("out/capture", nullptr);
+            std::string path = std::string(stem) + "_raw.png";
+            png_save(path.c_str(), int(w), int(h), rgb.data());
+            path = std::string(stem) + "_rawalpha.png";
+            png_save(path.c_str(), int(w), int(h), alpha.data());
+            // and the exact values, half floats, for the debug views that write numbers
+            path = std::string(stem) + "_raw.f16";
+            int view = g_sr2_debug_view.load();
+            if (view != 27 && view != 28) {
+            } else if (FILE* f = fopen(path.c_str(), "wb")) {
+                uint32_t hdr[2] = {w, h};
+                fwrite(hdr, 4, 2, f);
+                fwrite(px, 8, size_t(w) * h, f);
+                fclose(f);
+            }
+            printf("[capture] %s: 3D image %ux%u, %d NaN or infinite texels\n", stem, w, h, bad);
+            destroy_buffer(cb);
+        }
+    }
 }
 
 void R3DRenderer::upload_texture_rows(const std::vector<uint16_t>& rows, int y0, int y1) {
@@ -1030,41 +1349,61 @@ void R3DRenderer::upload_slot(VkDescriptorSet set, uint32_t binding, VkSampler s
         img.w = uint32_t(w);
         img.h = uint32_t(h);
 
-        Buffer staging;
-        if (!create_buffer(staging, rgba.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) return;
-        memcpy(staging.mapped, rgba.data(), rgba.size());
-        vk_->run_once([&](VkCommandBuffer cmd) {
-            auto barrier = [&](uint32_t level, VkImageLayout from, VkImageLayout to) {
-                VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-                b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-                b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-                b.oldLayout = from;
-                b.newLayout = to;
-                b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                b.image = img.image;
-                b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
-                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
-                                     nullptr, 0, nullptr, 1, &b);
-            };
-            barrier(0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            VkBufferImageCopy c{};
-            c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            c.imageExtent = {img.w, img.h, 1};
-            vkCmdCopyBufferToImage(cmd, staging.buffer, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
-            // Mip chain: each level is a filtered blit of the previous one
-            for (uint32_t l = 1; l < mips; l++) {
-                barrier(l - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-                barrier(l, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-                VkImageBlit blit{};
-                blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l - 1, 0, 1};
-                blit.srcOffsets[1] = {int32_t(std::max(1u, img.w >> (l - 1))), int32_t(std::max(1u, img.h >> (l - 1))), 1};
-                blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
-                blit.dstOffsets[1] = {int32_t(std::max(1u, img.w >> l)), int32_t(std::max(1u, img.h >> l)), 1};
-                vkCmdBlitImage(cmd, img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, img.image,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-                barrier(l - 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        // The mip chain made here, each level a 2x2 box average of the one
+        // above (iOS port: MoltenVK's image blits left the levels of some
+        // pictures black, and the cars' paint with them), all levels copied
+        // in from one staging buffer
+        std::vector<VkBufferImageCopy> copies;
+        std::vector<uint8_t> chain(rgba.begin(), rgba.end());
+        {
+            size_t offset = 0;
+            uint32_t lw = img.w, lh = img.h;
+            for (uint32_t l = 0; l < mips; l++) {
+                VkBufferImageCopy c{};
+                c.bufferOffset = offset;
+                c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
+                c.imageExtent = {lw, lh, 1};
+                copies.push_back(c);
+                if (l + 1 == mips) break;
+                uint32_t nw = std::max(1u, lw / 2), nh = std::max(1u, lh / 2);
+                size_t next = chain.size();
+                chain.resize(next + size_t(nw) * nh * 4);
+                const uint8_t* src = chain.data() + offset;
+                uint8_t* dst = chain.data() + next;
+                for (uint32_t y = 0; y < nh; y++)
+                    for (uint32_t x = 0; x < nw; x++) {
+                        uint32_t x0 = std::min(2 * x, lw - 1), x1 = std::min(2 * x + 1, lw - 1);
+                        uint32_t y0 = std::min(2 * y, lh - 1), y1 = std::min(2 * y + 1, lh - 1);
+                        for (int k = 0; k < 4; k++) {
+                            uint32_t sum = src[(size_t(y0) * lw + x0) * 4 + k] + src[(size_t(y0) * lw + x1) * 4 + k] +
+                                           src[(size_t(y1) * lw + x0) * 4 + k] + src[(size_t(y1) * lw + x1) * 4 + k];
+                            dst[(size_t(y) * nw + x) * 4 + k] = uint8_t((sum + 2) / 4);
+                        }
+                    }
+                offset = next;
+                lw = nw, lh = nh;
             }
-            barrier(mips - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        Buffer staging;
+        if (!create_buffer(staging, chain.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) return;
+        memcpy(staging.mapped, chain.data(), chain.size());
+        vk_->run_once([&](VkCommandBuffer cmd) {
+            VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = img.image;
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1};
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr,
+                                 0, nullptr, 1, &b);
+            vkCmdCopyBufferToImage(cmd, staging.buffer, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   uint32_t(copies.size()), copies.data());
+            b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr,
+                                 0, nullptr, 1, &b);
         });
         destroy_buffer(staging);
         img.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -1093,8 +1432,11 @@ void R3DRenderer::upload_slot(VkDescriptorSet set, uint32_t binding, VkSampler s
 }
 
 void R3DRenderer::add_replacements(const std::vector<RgbaImage>& images) {
-    for (const RgbaImage& src : images)
+    for (const RgbaImage& src : images) {
+        size_t before = replacements_.size();
         upload_slot(r3d_set_, 1, replace_sampler_, src.slot, src.w, src.h, src.rgba);
+        printf("[pack] slot %u %dx%d %s\n", src.slot, src.w, src.h, replacements_.size() > before ? "uploaded" : "FAILED");
+    }
 }
 
 void R3DRenderer::add_overlays(const std::vector<RgbaImage>& images) {
@@ -1110,7 +1452,14 @@ void R3DRenderer::add_sky_pictures(const std::vector<RgbaImage>& images) {
 // The background layers continue beside the 4:3 area only while the 3D
 // scene is widened too; a small 3D window (camera effects) keeps black sides
 bool R3DRenderer::back_layer_extended() const {
+#ifdef __APPLE__
+    // iOS port: on a 2D screen (no 3D: the stages' title cards) black sides.
+    // As wide as a phone's screen, the back layers' margin showed what earlier
+    // screens had left there
+    if (!scene_ || scene_->viewports.empty()) return false;
+#else
     if (!scene_ || scene_->viewports.empty()) return true;
+#endif
     int scene_priority = scene_->viewports.front().priority;
     for (const R3DViewport& v : scene_->viewports)
         if (v.priority == scene_priority && v.x <= 0.5f && v.w >= SCREEN_W - 0.5f) return true;
@@ -1193,6 +1542,14 @@ void R3DRenderer::update_atmosphere(const ScreenLayout& lay, uint32_t target_w, 
         for (const R3DViewport& v : scene_->viewports)
             if (v.world) w = &v;
     WorldPose pose = world_pose(w);
+    if (!w) {
+        // No world (the menus' car, the selection screens): the world's axes as
+        // the view's, not zero; the shaders normalise them (the cars' clear
+        // coat: normalize(0) is NaN, and Apple's GPUs drew those cars black). iOS port
+        for (int k = 0; k < 3; k++)
+            for (int i = 0; i < 3; i++) u.axes[k * 4 + i] = k == i ? 1.0f : 0.0f;
+    }
+    u.axes[3] = float(g_sr2_debug_view.load());
     if (w) {
         // Game time (about 57.5 frames per second), so a replay drifts the same way
         float time = (float(scene_->frame % 100000) + interp_) / 57.5f;
@@ -1314,7 +1671,7 @@ void R3DRenderer::update_atmosphere(const ScreenLayout& lay, uint32_t target_w, 
             // the sun's shadows were faint, more so with the light the global
             // illumination puts back into them. SR2_SHADOW_DEPTH: debugging aid)
             static const float depth = getenv("SR2_SHADOW_DEPTH") ? float(atof(getenv("SR2_SHADOW_DEPTH"))) : 1.0f;
-            u.shadow[0] = std::min(shadow_strength_, 1.0f) * depth;
+            u.shadow[0] = g_sr2_debug_view.load() == 26 ? 0.0f : std::min(shadow_strength_, 1.0f) * depth;   // debug view 26: none
             u.shadow[1] = 1.0f / float(SHADOW_SIZE);
             u.shadow[2] = 2.5f * texel;   // normal offset
             u.shadow[3] = 1.5f * texel / zr;   // depth bias
@@ -1755,6 +2112,29 @@ void R3DRenderer::record_world(const Frame& f) {
     const bool sr2_on = sr2_hud_on();
     // 3D pass
     bool msaa = samples_ != VK_SAMPLE_COUNT_1_BIT;
+    // The dust (DUST: ENHANCED, its own viewport at the end of the world's
+    // priority, r3d_dust.cpp) drawn at half resolution after the 3D pass, and
+    // laid over its image by the composition (iOS port: in another car's cloud
+    // a dozen puffs one over another, each over much of the picture, took the
+    // GPU from 5.7 to 11.5 ms; a quarter of the pixels)
+    auto is_dust = [&](const R3DViewport& v) {
+        return !v.world && v.trans_count && v.opaque_count == 0 && v.trans_first < scene_->vertices.size() &&
+               (scene_->vertices[v.trans_first].flags & R3D_DUST);
+    };
+    dust_half_ready_ = false;
+    bool dust_half = false;
+#ifdef __APPLE__
+    {
+        static const bool full = getenv("SR2_DUST_FULL") != nullptr;   // (as on PC: in the 3D pass)
+        if (!msaa && !full && dust_half_ && scene_ && f.vcount && !dlaa_.ready())
+            for (const R3DViewport& v : scene_->viewports) dust_half |= is_dust(v);
+    }
+#endif
+    bool have_dust = false;
+    VkViewport dust_vp{};
+    VkRect2D dust_sc{};
+    ViewportPush dust_pc{};
+    uint32_t dust_first = 0, dust_count = 0;
     color_.layout = VK_IMAGE_LAYOUT_UNDEFINED;   // contents are cleared every frame
     color_ms_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
     depth_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1778,10 +2158,12 @@ void R3DRenderer::record_world(const Frame& f) {
     ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     ca.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     // The ambient occlusion splits the 3D pass in two: the first part must keep everything
-    bool ao_on = (ao_strength_ > 0 || rt_gi_) && scene_ &&
+    const int dbg_view = g_sr2_debug_view.load();
+    bool ao_on = (ao_strength_ > 0 || rt_gi_) && scene_ && dbg_view != 21 &&   // debug views 21-28: none
+                 !(dbg_view >= 22 && dbg_view <= 28) &&
                  std::any_of(scene_->viewports.begin(), scene_->viewports.end(), [](const R3DViewport& v) { return v.world; });
     // Soft particles need the world's depth too, so they split it as well
-    bool split = ao_on || (soft_particles_ && scene_ &&
+    bool split = g_sr2_debug_view.load() != 25 && ao_on || (g_sr2_debug_view.load() != 25 && soft_particles_ && scene_ &&
                            std::any_of(scene_->viewports.begin(), scene_->viewports.end(),
                                        [](const R3DViewport& v) { return v.world; }));
     ca.storeOp = msaa && !split ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
@@ -1793,12 +2175,18 @@ void R3DRenderer::record_world(const Frame& f) {
     ca.clearValue.color = {{0, 0, 0, 0}};
     cas[2] = ca;   // bloom source, cleared to no glow
     cas[2].imageView = msaa ? glow_ms_.view : glow_.view;
+#ifdef __APPLE__
+    if (bloom_strength_ <= 0) {   // (no bloom: neither cleared nor stored, iOS port)
+        cas[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        cas[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    }
+#endif
     if (msaa) cas[2].resolveImageView = glow_.view;
     VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     da.imageView = depth_.attach_view;
     da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    da.storeOp = motion_pass_ || split ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    da.storeOp = motion_pass_ || split || dust_half ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
     if (split && msaa) {   // sample 0 of the depth, readable without multisampling
         transition(cmd, depth_resolved_, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
         da.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
@@ -1814,14 +2202,62 @@ void R3DRenderer::record_world(const Frame& f) {
     ri.pDepthAttachment = &da;
     ri.pStencilAttachment = &da;   // the same image (the cars' patch: blob_)
     vkCmdBeginRendering(cmd, &ri);
+    // The depth for the dust at half resolution (record_world's end), taken
+    // with no rendering in progress
+    bool depth_taken = false;
+    auto take_depth = [&] {
+        transition(cmd, depth_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        depth_resolved_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        transition(cmd, depth_resolved_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        VkImageCopy copy{};
+        copy.srcSubresource = copy.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+        copy.extent = {out_w, out_h, 1};
+        vkCmdCopyImage(cmd, depth_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, depth_resolved_.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        transition(cmd, depth_resolved_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        depth_taken = true;
+    };
 
+#ifdef __APPLE__
+    {   // (measuring run, iOS port: the early depth with the alpha-tested
+        // surfaces (0) and without them (1), in turn every 1.5 s; the picture
+        // is the same)
+        static const bool prof = getenv("SR2_EZBENCH") != nullptr;
+        // (measured on an iPhone 18 Pro Max: the same or a little slower with
+        // the alpha-tested surfaces, as in the Lost World port; solid only)
+        prof_ = prof && scene_ && scene_->polygons > 5000 ? int((prof_frames_++ / 180) % 2) : 1;
+    }
+#endif
     if (vcount) {
         VkDeviceSize zero = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &vertices_.buffer, &zero);
+        VkDescriptorSet aux_now = r3d_aux_opaque_set_;   // (bound again after a clear, below; iOS port)
         bind_r3d_sets(cmd, r3d_aux_opaque_set_);   // (the world depth is not readable yet: a stand-in)
         float sx = float(out_w) / lay.view_w, sy = float(out_h) / SCREEN_H;
         float widen = lay.view_w / SCREEN_W;
         const auto& vps = scene_->viewports;
+        // Where each viewport goes on the screen
+        auto place = [&](const R3DViewport& v, bool& full, VkViewport& viewport, VkRect2D& sc) {
+            full = v.x <= 0.5f && v.w >= SCREEN_W - 0.5f;
+            float vx = full ? 0.0f : v.x + lay.game_x0, vw = full ? lay.view_w : v.w;
+            // A small viewport of the HUD (the rev counter's needle)
+            // goes with its corner of the 2D HUD
+            if (!full && sr2_on) {
+                const int* s = sr2_split_;
+                bool top = v.y + v.h <= SR2_HUD_TOP_ROWS, bottom = v.y >= SR2_HUD_BOTTOM_ROW - 8;
+                bool top_left = v.y + v.h <= SR2_HUD_LEFT_ROWS;
+                // (as far as the 2D HUD moves: up to the safe area's inset, iOS port)
+                float moved = std::max(0.0f, lay.hud_x - hud_inset_);
+                if ((top_left && v.x + v.w <= s[0]) || (bottom && s[2] > 0 && v.x + v.w <= s[2])) vx = v.x + lay.game_x0 - moved;
+                else if ((top && s[1] > 0 && v.x >= s[1]) || (bottom && s[2] > 0 && v.x >= s[2]))
+                    vx = v.x + lay.game_x0 + moved;
+            }
+            viewport = VkViewport{vx * sx + jitter_x, v.y * sy + jitter_y, vw * sx, v.h * sy, 0.0f, 1.0f};
+            int32_t x0 = std::max(0, int32_t(vx * sx)), y0 = std::max(0, int32_t(v.y * sy));
+            sc = VkRect2D{{x0, y0},
+                        {std::min(out_w - uint32_t(x0), uint32_t(vw * sx + 0.5f)),
+                         std::min(out_h - uint32_t(y0), uint32_t(v.h * sy + 0.5f))}};
+        };
         size_t i = 0;
         bool first_priority = true;
         while (i < vps.size()) {
@@ -1830,8 +2266,48 @@ void R3DRenderer::record_world(const Frame& f) {
             if (!first_priority) {   // each priority starts with a cleared depth buffer
                 VkClearAttachment clr{VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, {}};
                 clr.clearValue.depthStencil = {0.0f, 0};
-                VkClearRect rect{{{0, 0}, {out_w, out_h}}, 0, 1};
-                vkCmdClearAttachments(cmd, 1, &clr, 1, &rect);
+                std::vector<VkClearRect> rects{{{{0, 0}, {out_w, out_h}}, 0, 1}};
+                if (dust_half && !depth_taken) {   // (only where its viewports are: the world's depth stays for the dust)
+                    rects.clear();
+                    uint64_t area = 0;
+                    for (size_t k = i; k < j; k++) {
+                        bool full;
+                        VkViewport vpt;
+                        VkRect2D r;
+                        place(vps[k], full, vpt, r);
+                        if (r.extent.width && r.extent.height) rects.push_back({r, 0, 1});
+                        if (vps[k].opaque_count + vps[k].trans_count) area += uint64_t(r.extent.width) * r.extent.height;
+                    }
+                    // A later priority over much of the screen (the start's
+                    // 3, 2, 1 and the like) would clear the world's depth there:
+                    // the dust behind a wall came through it whole. The depth
+                    // is taken before it then, the pass going on after
+                    if (have_dust && area * 4 > uint64_t(out_w) * out_h) {
+                        vkCmdEndRendering(cmd);
+                        take_depth();
+                        transition(cmd, depth_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+                        VkRenderingAttachmentInfo again[3] = {cas[0], cas[1], cas[2]};
+                        VkRenderingAttachmentInfo dagain = da;
+                        for (auto& a : again)
+                            if (a.storeOp == VK_ATTACHMENT_STORE_OP_STORE) a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                        dagain.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                        VkRenderingInfo rag = ri;
+                        rag.pColorAttachments = again;
+                        rag.pDepthAttachment = &dagain;
+                        vkCmdBeginRendering(cmd, &rag);
+                        rects.assign(1, {{{0, 0}, {out_w, out_h}}, 0, 1});
+                    }
+                }
+                if (!rects.empty()) vkCmdClearAttachments(cmd, 1, &clr, uint32_t(rects.size()), rects.data());
+                // MoltenVK clears inside a pass by drawing with its own
+                // pipeline, which leaves the 3D set unbound on Metal: what
+                // followed read texture RAM, the texture pack and the
+                // atmosphere as 0 (the selection screen's car and the
+                // countdown's numbers came out black). Bound again (iOS port,
+                // as in the Lost World port)
+                VkDeviceSize zero = 0;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &vertices_.buffer, &zero);
+                bind_r3d_sets(cmd, aux_now);
             }
             first_priority = false;
             bool world_here = false;
@@ -1839,6 +2315,10 @@ void R3DRenderer::record_world(const Frame& f) {
             // Steps: opaque, the occlusion, translucent
             for (int step = 0; step < 3; step++) {
                 int pass = step == 2 ? 1 : 0;
+                // debug views 22 and 23: no translucent pass (22: as TEX ID)
+                if (step == 2 && (g_sr2_debug_view.load() == 22 || g_sr2_debug_view.load() == 23 ||
+                                  g_sr2_debug_view.load() == 27 || g_sr2_debug_view.load() == 28))
+                    continue;
                 // Between the opaque and the translucent surfaces of the world:
                 // the ambient occlusion, from its depth (the HUD clears it later)
                 if (step == 1 && split && world_here) {
@@ -1865,34 +2345,25 @@ void R3DRenderer::record_world(const Frame& f) {
                     vkCmdBeginRendering(cmd, &rag);
                     vkCmdBindVertexBuffers(cmd, 0, 1, &vertices_.buffer, &zero);
                     bind_r3d_sets(cmd, r3d_aux_set_);   // now with the world depth
+                    aux_now = r3d_aux_set_;
                 }
                 if (step == 1) continue;
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pass == 0 ? opaque_ : translucent_);
+                // (iOS: the opaque pass in two: the solid surfaces' depth, then the shading)
+                const bool early_z = pass == 0 && early_z_ != VK_NULL_HANDLE;
+                for (int sub = early_z ? 0 : 1; sub < 2; sub++) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  sub == 0 ? early_z_ : pass == 0 ? (early_z && prof_ == 0 ? opaque_ez_ : opaque_) : translucent_);
                 for (size_t k = i; k < j; k++) {
                     const R3DViewport& v = vps[k];
                     uint32_t count = pass == 0 ? v.opaque_count : v.trans_count;
                     if (!count) continue;
                     // Full-screen viewports are widened (wider horizontal field of
                     // view, same vertical one); smaller ones keep their 4:3 place
-                    bool full = v.x <= 0.5f && v.w >= SCREEN_W - 0.5f;
-                    float vx = full ? 0.0f : v.x + lay.game_x0, vw = full ? lay.view_w : v.w;
-                    // A small viewport of the HUD (the rev counter's needle)
-                    // goes with its corner of the 2D HUD
-                    if (!full && sr2_on) {
-                        const int* s = sr2_split_;
-                        bool top = v.y + v.h <= SR2_HUD_TOP_ROWS, bottom = v.y >= SR2_HUD_BOTTOM_ROW - 8;
-                        bool top_left = v.y + v.h <= SR2_HUD_LEFT_ROWS;
-                        if ((top_left && v.x + v.w <= s[0]) || (bottom && s[2] > 0 && v.x + v.w <= s[2]))
-                            vx = v.x + lay.game_x0 - lay.hud_x;
-                        else if ((top && s[1] > 0 && v.x >= s[1]) || (bottom && s[2] > 0 && v.x >= s[2]))
-                            vx = v.x + lay.game_x0 + lay.hud_x;
-                    }
-                    VkViewport viewport{vx * sx + jitter_x, v.y * sy + jitter_y, vw * sx, v.h * sy, 0.0f, 1.0f};
+                    bool full = false;
+                    VkViewport viewport;
+                    VkRect2D sc;
+                    place(v, full, viewport, sc);
                     vkCmdSetViewport(cmd, 0, 1, &viewport);
-                    int32_t x0 = std::max(0, int32_t(vx * sx)), y0 = std::max(0, int32_t(v.y * sy));
-                    VkRect2D sc{{x0, y0},
-                                {std::min(out_w - uint32_t(x0), uint32_t(vw * sx + 0.5f)),
-                                 std::min(out_h - uint32_t(y0), uint32_t(v.h * sy + 0.5f))}};
                     vkCmdSetScissor(cmd, 0, 1, &sc);
                     ViewportPush pc{};
                     // Its lens at this image's t (R3DScene::proj_at), and at the
@@ -1945,47 +2416,132 @@ void R3DRenderer::record_world(const Frame& f) {
                         return (x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) == (R3D_WORLD | R3D_LUMINOUS) &&
                                (x.color & 0x00FFFFFFu) == 0 && (x.color >> 24) < 255;
                     };
-                    auto draw_runs = [&](VkPipeline other, VkPipeline blob) {
-                        if (!v.world) {
-                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, other);
+                    // (the push constants again after each pipeline bound: with
+                    // MoltenVK a draw could see the previous ones, the depth
+                    // pre-pass's or another moment's positions; iOS port)
+                    // The depth pre-pass leaves out what r3d.frag would discard in it
+                    // anyway (quality -1000: texture alpha, alpha test, self-lit
+                    // effects other than the patch, dust, nearly invisible): the
+                    // dust and spray clouds, layer upon layer over much of the
+                    // picture, were drawn twice (iOS port)
+                    auto needs_depth = [&](uint32_t i) {
+                        const R3DVertex& x = vs[i];
+                        if ((x.flags & R3D_DUST) || (x.color >> 24) < 8) return false;
+                        return (x.flags & (R3D_TEX_ALPHA | R3D_ALPHA_TEST | R3D_LUMINOUS)) == 0 || is_blob(i);
+                    };
+                    // (the push constants again after each pipeline bound: with
+                    // MoltenVK a draw could see the previous ones, the depth
+                    // pre-pass's or another moment's positions; iOS port)
+                    auto draw_runs = [&](VkPipeline other, VkPipeline blob, const ViewportPush& push, bool prepass) {
+                        auto bind = [&](VkPipeline p) {
+                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+                            vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                               0, sizeof(push), &push);
+                        };
+                        uint32_t end = std::min<uint32_t>(v.trans_first + count, uint32_t(vs.size()));
+                        if (!v.world && !prepass) {
+                            bind(other);
                             vkCmdDraw(cmd, count, 1, v.trans_first, 0);
                             return;
                         }
-                        uint32_t end = std::min<uint32_t>(v.trans_first + count, uint32_t(vs.size()));
+                        // 0: left out (pre-pass), 1: as it is, 2: the cars' patch
+                        auto kind = [&](uint32_t i) {
+                            if (prepass && !needs_depth(i)) return 0;
+                            return v.world && is_blob(i) ? 2 : 1;
+                        };
+                        VkPipeline bound = VK_NULL_HANDLE;
                         for (uint32_t a = v.trans_first; a < end;) {
-                            bool here = is_blob(a);
+                            int here = kind(a);
                             uint32_t b = a + 3;
-                            while (b < end && is_blob(b) == here) b += 3;
+                            while (b < end && kind(b) == here) b += 3;
                             b = std::min(b, end);
-                            if (VkPipeline p = here ? blob : other) {
-                                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-                                vkCmdDraw(cmd, b - a, 1, a, 0);
+                            VkPipeline want = here == 2 ? blob : here == 1 ? other : VK_NULL_HANDLE;
+                            if (want == VK_NULL_HANDLE || (here == 2 && g_sr2_debug_view.load() == 29)) {   // (debug view 29: no blobs)
+                                a = b;
+                                continue;
                             }
+                            if (want != bound) bind(want), bound = want;
+                            vkCmdDraw(cmd, b - a, 1, a, 0);
                             a = b;
                         }
                     };
+                    if (pass == 1 && dust_half && is_dust(v)) {   // (after the pass, at half resolution)
+                        have_dust = true;
+                        dust_vp = viewport, dust_sc = sc, dust_pc = pc;
+                        dust_first = v.trans_first, dust_count = count;
+                        continue;
+                    }
                     if (pass == 1) {
                         ViewportPush pd = pc;
                         pd.quality[0] = -1000.0f;
                         vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                            0, sizeof(pd), &pd);
-                        draw_runs(trans_depth_, VK_NULL_HANDLE);
+                        if (g_sr2_debug_view.load() != 20)   // debug view 20: no depth pre-pass
+                            draw_runs(trans_depth_, VK_NULL_HANDLE, pd, true);
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, translucent_);
                     }
                     vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                                        sizeof(pc), &pc);
+                    if (sub == 0) {
+                        ViewportPush pz = pc;
+                        pz.quality[0] = prof_ == 1 ? -3500.0f : -3000.0f;
+                        vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                           sizeof(pz), &pz);
+                        vkCmdDraw(cmd, count, 1, v.opaque_first, 0);
+                        continue;
+                    }
                     if (pass == 0) {
                         vkCmdDraw(cmd, count, 1, v.opaque_first, 0);
                         continue;
                     }
-                    draw_runs(translucent_, blob_);
+                    draw_runs(translucent_, blob_, pc, false);
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, translucent_);
+                }
                 }
             }
             i = j;
         }
     }
     vkCmdEndRendering(cmd);
+    if (have_dust) {
+        // The depth of everything drawn, readable (r3d.frag tests each puff
+        // against it, softly), unless taken before a later priority
+        if (!depth_taken) take_depth();
+        // The dust alone, premultiplied, over nothing (0, 0, 0, 0)
+        dust_half_img_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        transition(cmd, dust_half_img_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo ha{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        ha.imageView = dust_half_img_.view;
+        ha.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        ha.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        ha.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        ha.clearValue.color = {{0, 0, 0, 0}};
+        VkRenderingInfo hr{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        hr.renderArea = {{0, 0}, {dust_half_img_.w, dust_half_img_.h}};
+        hr.layerCount = 1;
+        hr.colorAttachmentCount = 1;
+        hr.pColorAttachments = &ha;
+        vkCmdBeginRendering(cmd, &hr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dust_half_);
+        VkDeviceSize zero = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vertices_.buffer, &zero);
+        bind_r3d_sets(cmd, r3d_aux_set_);   // (set 1: the world depth just taken, r3d.frag's scene_depth)
+        VkViewport hv = dust_vp;
+        hv.x *= 0.5f, hv.y *= 0.5f, hv.width *= 0.5f, hv.height *= 0.5f;
+        vkCmdSetViewport(cmd, 0, 1, &hv);
+        int32_t x0 = dust_sc.offset.x / 2, y0 = dust_sc.offset.y / 2;
+        int32_t x1 = std::min<int32_t>(int32_t(dust_half_img_.w), (dust_sc.offset.x + int32_t(dust_sc.extent.width) + 1) / 2);
+        int32_t y1 = std::min<int32_t>(int32_t(dust_half_img_.h), (dust_sc.offset.y + int32_t(dust_sc.extent.height) + 1) / 2);
+        VkRect2D hs{{x0, y0}, {uint32_t(std::max(0, x1 - x0)), uint32_t(std::max(0, y1 - y0))}};
+        vkCmdSetScissor(cmd, 0, 1, &hs);
+        dust_pc.quality[2] = -1.0f;   // half resolution: r3d.frag tests the depth itself
+        vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                           sizeof(dust_pc), &dust_pc);
+        vkCmdDraw(cmd, dust_count, 1, dust_first, 0);
+        vkCmdEndRendering(cmd);
+        transition(cmd, dust_half_img_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        dust_half_ready_ = true;
+    }
     transition(cmd, color_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     transition(cmd, glow_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
@@ -2178,16 +2734,22 @@ R3DRenderer::ComposePush R3DRenderer::compose_push(const Frame& f) const {
     float W = float(extent.width), H = float(extent.height);
     bool extend_back = back_layer_extended();
     const bool sr2_on = sr2_hud_on();
+    // The foreground's plain edge columns go on beside the 4:3 picture only
+    // with a game world behind (a race and its fades): the screens without one
+    // (the game over's white, like the title and the results) stay 4:3 (iOS port)
+    const bool world = scene_ && std::any_of(scene_->viewports.begin(), scene_->viewports.end(),
+                                             [](const R3DViewport& v) { return v.world; });
+    const int edges = world ? front_edges_plain_ : 0;
     ComposePush pc{.scale = {lay.view_w * lay.scale * lay.px_aspect / W, SCREEN_H * lay.scale / H},
                    .offset = {lay.ox / W, lay.oy / H},
                    .sharpen = {sharpen_, fxaa() ? 1.0f : 0.0f},
                    .window = {W, H},
                    .layer2d = {lay.game_x0 / lay.view_w, SCREEN_W / lay.view_w},
                    .filter2d = {smooth_2d_ ? 1.0f : 0.0f, lay.scale},
-                   .hud = {sr2_on ? lay.hud_x : 0.0f, hdr_ ? 1.0f : 0.0f,
+                   .hud = {sr2_on ? std::max(0.0f, lay.hud_x - hud_inset_) : 0.0f, hdr_ ? 1.0f : 0.0f,
                            overlay_brightness_, extend_back ? 1.0f : 0.0f},
-                   .sky = {0, 0, 0, sr2_between_screens() ? 4.0f : 0.0f},
-                   .effects = {bloom_strength_, saturation_, gamma_, 0},
+                   .sky = {float(edges), 0, 0, sr2_between_screens() ? 4.0f : 0.0f},
+                   .effects = {bloom_strength_, saturation_, gamma_, dust_half_ready_ ? 1.0f : 0.0f},
                    // w: the race HUD's splits, in 2-pixel steps, one per byte (top left, top right, bottom)
                    .motion = {back_shift_, 0, 0,
                               sr2_on ? float(sr2_split_[0] / 2 | (sr2_split_[1] / 2) << 8 | (sr2_split_[2] / 2) << 16)
@@ -2391,8 +2953,10 @@ void R3DRenderer::record(VkCommandBuffer cmd, VkImageView target, VkExtent2D ext
     f.cmd = cmd;
     f.extent = extent;
     f.lay = compute_layout(float(extent.width), float(extent.height), max_aspect_, px_aspect_);
-    f.up_w = std::max(1u, uint32_t(f.lay.view_w * f.lay.scale * f.lay.px_aspect * supersample_));
-    f.up_h = std::max(1u, uint32_t(SCREEN_H * f.lay.scale * supersample_));
+    // (iOS port: thermal_scale_, the 3D's share from the GPU's own time, app.cpp)
+    const float ss = supersample_ * thermal_scale_;
+    f.up_w = std::max(1u, uint32_t(f.lay.view_w * f.lay.scale * f.lay.px_aspect * ss));
+    f.up_h = std::max(1u, uint32_t(SCREEN_H * f.lay.scale * ss));
     f.full_w = upscale_ > 1.0f ? std::max(1u, uint32_t(float(f.up_w) / upscale_ + 0.5f)) : f.up_w;
     f.full_h = upscale_ > 1.0f ? std::max(1u, uint32_t(float(f.up_h) / upscale_ + 0.5f)) : f.up_h;
     {   // (once per size: the 3D's own resolution, RENDER SCALE / --scale)
@@ -2501,6 +3065,7 @@ void R3DRenderer::record(VkCommandBuffer cmd, VkImageView target, VkExtent2D ext
     if (gpu_times_) {
         gpu_time_mark(cmd, GPU_COMPOSE);
         gpu_pending_ = true;
+        prof_pending_ = prof_;
     }
 }
 
@@ -2552,6 +3117,26 @@ void R3DRenderer::gpu_time_report(uint32_t out_w, uint32_t out_h) {
         return;
     auto ms = [&](uint32_t from, uint32_t to) { return double(t[to] - t[from]) * timestamp_period_ * 1e-6; };
     double total = ms(GPU_START, GPU_COMPOSE);
+    if (total >= 0 && total < 1000.0) gpu_recent_ms_ += total, gpu_recent_n_++;   // (the frame rate on screen)
+    // (profiling run: each way's time, the first 20 images after a change left
+    // out; a line after each round of the six)
+    if (prof_frames_ > 0 && total >= 0 && total < 1000.0) {
+        int v = prof_pending_;
+        if (v != prof_last_) {
+            if (v == 0 && prof_last_ == 1) {
+                auto avg = [&](int i) { return prof_n_[i] ? prof_sum_[i] / prof_n_[i] : 0.0; };
+                printf("[ezbench] GPU ms: alpha-tested in the early depth %.2f | solid only %.2f  (%zu polygons)\n",
+                       avg(0), avg(1), scene_ ? scene_->polygons : size_t(0));
+                fflush(stdout);
+                std::fill(std::begin(prof_sum_), std::end(prof_sum_), 0.0);
+                std::fill(std::begin(prof_n_), std::end(prof_n_), 0);
+            }
+            prof_last_ = v;
+            prof_settle_ = 20;
+        }
+        if (prof_settle_ > 0) prof_settle_--;
+        else prof_sum_[v] += total, prof_n_[v]++;
+    }
     update_dynamic_scale(total);
     if (total > gpu_worst_ms_ && total < 1000.0) {
         char text[320];
@@ -2605,13 +3190,13 @@ void R3DRenderer::gpu_time_mark(VkCommandBuffer cmd, uint32_t index) {
 void R3DRenderer::shutdown() {
     if (!dev_) return;
     vkDeviceWaitIdle(dev_);
-    for (auto p : {opaque_, translucent_, blob_, trans_depth_, shadow_, compose_measure_, compose_, bloom_, compose_glow_, ao_pass_, ao_apply_, ao_apply_glow_, alpha_taa_, car_probe_pass_})
+    for (auto p : {opaque_, translucent_, blob_, trans_depth_, shadow_, compose_measure_, compose_, bloom_, compose_glow_, ao_pass_, ao_apply_, ao_apply_glow_, alpha_taa_, car_probe_pass_, early_z_, opaque_ez_, dust_half_})
         if (p) vkDestroyPipeline(dev_, p, nullptr);
     dlaa_.shutdown();
     rt_.shutdown();
     if (gpu_times_) vkDestroyQueryPool(dev_, gpu_times_, nullptr);
     for (Image* img : {&texture_ram_, &back_, &front_, &text_cells_, &sky_coords_, &color_, &color_ms_, &depth_, &motion_, &dlaa_out_, &alpha_out_, &alpha_history_,
-                        &glow_, &glow_ms_, &bloom_a_, &bloom_b_, &bloom_c_, &depth_resolved_, &ao_, &shadow_map_, &exposure_, &diff_a_, &diff_b_, &blank_color_, &blank_depth_, &car_probe_})
+                        &glow_, &glow_ms_, &bloom_a_, &bloom_b_, &bloom_c_, &depth_resolved_, &ao_, &shadow_map_, &exposure_, &diff_a_, &diff_b_, &blank_color_, &blank_depth_, &car_probe_, &dust_half_img_})
         destroy_image(*img);
     for (Image& img : replacements_) destroy_image(img);
     for (auto& [slot, img] : overlay_images_) destroy_image(img);

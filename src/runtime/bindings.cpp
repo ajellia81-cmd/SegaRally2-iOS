@@ -97,6 +97,7 @@ int key_from_ini(const std::string& s) {
 
 // The row's name of a key: the keyboard's own for the signs (a Spanish one's Ñ...)
 std::string key_label(int vk) {
+#ifdef _WIN32
     if (vk >= VK_OEM_1 && vk <= VK_OEM_102 && vk != VK_OEM_PLUS && vk != VK_OEM_MINUS) {
         UINT sc = MapVirtualKeyW(UINT(vk), MAPVK_VK_TO_VSC);
         wchar_t w[32] = {};
@@ -109,6 +110,7 @@ std::string key_label(int vk) {
             if (!out.empty()) return out;
         }
     }
+#endif
     if (vk == VK_OEM_PLUS) return "+";
     if (vk == VK_OEM_MINUS) return "-";
     std::string n = key_ini_name(vk);

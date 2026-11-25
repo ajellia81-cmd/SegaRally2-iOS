@@ -64,6 +64,13 @@ public:
     // The motors in the triggers (Xbox One / Series pads), 0..1 each, scaled
     // the same; nothing on pads without them
     void rumble_triggers(int i, float left, float right, int ms);
+#ifdef __APPLE__
+    // The app came back from the background: iOS stopped the pads' haptics
+    // engines there, and SDL makes them again only at the next rumble, on the
+    // thread that draws - a stutter in the race. Done here at once instead,
+    // with the pause menu up
+    void restart_rumble();
+#endif
 
 private:
     struct Slot {
@@ -72,8 +79,9 @@ private:
         bool nintendo = false;   // A on the right: accept and back swap
         bool trigger_motors = false;   // SDL can drive motors in its triggers
         bool buttons[32] = {}, left_trigger = false, right_trigger = false;
-        bool menu_held[32] = {};
-        bool act_was[16] = {};     // the car's actions held at the last poll (bindings.h's BindAct): shifting on a press   // held when the menu closed: nothing in the game until let go (gamepad.cpp)
+        bool menu_held[32] = {};   // held when the menu closed: nothing in the game until let go (gamepad.cpp)
+        double up_at[32] = {};     // when a held button was first seen up (debounce, see poll)
+        bool act_was[16] = {};     // the car's actions held at the last poll (bindings.h's BindAct): shifting on a press
         // Menu direction held, for the key repeat
         int dir = -1;
         double next_repeat = 0;

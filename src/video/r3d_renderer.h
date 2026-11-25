@@ -70,6 +70,10 @@ public:
     void set_text_atlas(const TextHD& text);
     void set_text_cells(const uint32_t* cells);
     void upload_texture_rows(const std::vector<uint16_t>& rows, int y0, int y1);
+    // Debugging aid (iOS port): the texture RAM image read back from the GPU
+    // and compared with what was uploaded (the staging copy) and with `cpu`
+    void verify_texture_ram(const std::vector<uint16_t>& cpu);
+    void dump_3d(const char* stem);
     // Texture pack images, uploaded with a full mip chain into their slots
     void add_replacements(const std::vector<RgbaImage>& images);
     // 2D replacement pictures (those on screen are listed in the text cells,
@@ -93,6 +97,14 @@ public:
     void set_smooth_2d(bool smooth) { smooth_2d_ = smooth; }
     // true: HUD elements at the sides go to the edges of a widescreen window
     void set_hud_edges(bool edges) { hud_edges_ = edges; }
+    // How far in from the 3D view's edges the race HUD's corners stop, in 2D
+    // pixels (iOS port: the screen's safe area)
+    void set_hud_inset(float px) { hud_inset_ = px > 0 ? px : 0; }
+    // The internal 3D resolution as a share of the target's (iOS port: RESOLUTION)
+    void set_supersample(float s) { supersample_ = s < 0.5f ? 0.5f : s > 4.0f ? 4.0f : s; }
+    // iOS port: the 3D drawn smaller while the phone is hot (app.cpp), times RESOLUTION
+    void set_thermal_scale(float s) { thermal_scale_ = s < 0.5f ? 0.5f : s > 1.0f ? 1.0f : s; }
+    float thermal_scale() const { return thermal_scale_; }
     // false while the top of the 2D screen is a picture rather than a HUD
     void set_hud_band(bool hud) { hud_band_ = hud; }
     // Position between the previous (0) and the current (1) game frame
@@ -192,7 +204,20 @@ private:
         bool stencil = false;                  // the depth image has a stencil (the 3D pass)
         bool once = false;                     // blended once at each pixel: only where the stencil
                                                // is still clear, and it is marked (the cars' patch, blob_)
+        float bias = 0;                        // depth bias (constant factor; < 0: farther)
+        float slope_bias = 0;                  // ... and its slope factor
+        const VkSpecializationInfo* fs_spec = nullptr;   // the fragment shader's specialization constants
     };
+    // iOS port: the effects r3d.frag is compiled with (constant_id 0, its FEAT_
+    // bits); the ones that are off are left out of the shader, which then
+    // keeps fewer registers per pixel. ~0u: all of them (other platforms)
+    uint32_t features_ = ~0u;
+    uint32_t feature_mask() const;
+    void destroy_pipelines();
+public:
+    // Between frames: the world shader made again if an effect went on or off
+    void refresh_features();
+private:
     VkPipeline make_pipeline(const PipelineDesc& d);
     void bind_scene_image(VkImageView view, VkImageView alpha);
     void update_atmosphere(const ScreenLayout& lay, uint32_t target_w, uint32_t target_h);
@@ -223,6 +248,7 @@ private:
     VkPresenter* vk_ = nullptr;
     VkDevice dev_ = VK_NULL_HANDLE;
     float supersample_ = 1.0f;
+    float thermal_scale_ = 1.0f;
     VkSampleCountFlagBits samples_ = VK_SAMPLE_COUNT_1_BIT;
     float aniso_ = 0.0f;
     uint32_t texture_slots_ = 0;   // texture pack images the GPU can hold at once (init)
@@ -294,10 +320,28 @@ private:
     };
     VkQueryPool gpu_times_ = VK_NULL_HANDLE;
     float timestamp_period_ = 1;
+    // Profiling run (iOS port, temporary): the 3D pass drawn a different way
+    // every 1.5 s, the GPU's time of each logged ([prof]); 0 as it is
+    int prof_ = 0, prof_pending_ = 0;
+    uint64_t prof_frames_ = 0;
+    double prof_sum_[6] = {};
+    int prof_n_[6] = {};
+    int prof_last_ = -1, prof_settle_ = 0;
     double gpu_sum_[GPU_MARKS] = {};   // ms of the pass that ends at each mark, summed
     int gpu_frames_ = 0;
     bool gpu_pending_ = false;
     double gpu_worst_ms_ = 0;
+    double gpu_recent_ms_ = 0;   // the GPU's time per image since take_gpu_ms
+    int gpu_recent_n_ = 0;
+public:
+    // The GPU's time per image summed since the last call, and how many images (iOS port: on screen)
+    double take_gpu_ms(int& images) {
+        images = gpu_recent_n_;
+        double s = gpu_recent_ms_;
+        gpu_recent_ms_ = 0, gpu_recent_n_ = 0;
+        return s;
+    }
+private:
     std::string gpu_worst_;
     std::mutex gpu_worst_mutex_;
     bool gpu_ao_marked_ = false;       // this frame's ambient occlusion has its two marks
@@ -385,7 +429,12 @@ private:
     void bind_r3d_sets(VkCommandBuffer cmd, VkDescriptorSet aux);
     VkPipelineLayout r3d_layout_ = VK_NULL_HANDLE, compose_layout_ = VK_NULL_HANDLE;
     VkPipeline opaque_ = VK_NULL_HANDLE, translucent_ = VK_NULL_HANDLE, blob_ = VK_NULL_HANDLE, compose_ = VK_NULL_HANDLE;
+    VkPipeline early_z_ = VK_NULL_HANDLE;   // iOS: the solid surfaces' depth first
+    VkPipeline opaque_ez_ = VK_NULL_HANDLE;  // iOS: the opaque pass after it (no depth writes: tested early)
     VkPipeline trans_depth_ = VK_NULL_HANDLE;   // nearest translucent surface, depth only (spec 7.2)
+    VkPipeline dust_half_ = VK_NULL_HANDLE;     // iOS: the dust (DUST: ENHANCED) drawn at half resolution
+    Image dust_half_img_;                       // ... into this, laid over the 3D image by the composition
+    bool dust_half_ready_ = false;              // ... this frame
     VkDescriptorSetLayout bloom_set_layout_ = VK_NULL_HANDLE;
     VkDescriptorSet bloom_sets_[4] = {};   // sources: glow_, bloom_a_, bloom_b_, bloom_c_
     VkPipelineLayout bloom_layout_ = VK_NULL_HANDLE;
@@ -403,7 +452,9 @@ private:
     float max_aspect_ = 16.0f / 9.0f;
     float px_aspect_ = 1.0f;
     bool smooth_2d_ = true;
+    int front_edges_plain_ = 0;   // compose: bit 0 / 1: the foreground's left / right column is one colour
     bool hud_edges_ = true, hud_band_ = true;
+    float hud_inset_ = 0;
     float interp_ = 1.0f;
     // Where the world viewport's camera stood (world axes in view space, camera
     // position, direction of the sun) in the latest game frame and the one

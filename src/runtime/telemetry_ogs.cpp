@@ -17,6 +17,11 @@
 // rig (as in the DiRT output, telemetry.cpp).
 #include "telemetry_ogs.h"
 
+#ifndef _WIN32
+// iOS port: no telemetry (no rig to drive; the option is not offered)
+void telemetry_ogs_test_begin(void (*)(const uint8_t*, size_t)) {}
+void telemetry_ogs_frame(bool) {}
+#else
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
@@ -486,3 +491,4 @@ void telemetry_ogs_frame(bool on) {
     BuildMotion(p.wire, t, {o}, p.generation);
     p.send(p.wire.Wrap(FrameType::Motion));
 }
+#endif  // _WIN32

@@ -1,0 +1,58 @@
+#include "platform_files.h"
+
+#include <SDL3/SDL.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
+void platform_prepare_files() {
+    const char* base = SDL_GetBasePath();   // the app bundle (with a trailing /)
+    std::string game = std::string(base ? base : "./") + "game";
+    struct stat st;
+    if (stat(game.c_str(), &st) != 0) {   // no bundle (the Linux check build): the current folder as it is
+        printf("[files] no %s: using the current folder\n", game.c_str());
+        return;
+    }
+    const char* docs = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
+    std::string work = docs ? docs : "";
+    if (work.empty()) {
+        char* pref = SDL_GetPrefPath("snicolast", "SegaRally2");
+        if (pref) work = pref, SDL_free(pref);
+    }
+    if (work.empty() || chdir(work.c_str()) != 0) {
+        fprintf(stderr, "[files] no writable folder; running from the bundle\n");
+        chdir(game.c_str());
+        return;
+    }
+    for (const char* d : {"save", "out", "data", "third_party", "rom"}) mkdir(d, 0755);
+    // The log in out/log.txt (the previous run's in out/log_prev.txt), to read
+    // in the Files app when something goes wrong
+    rename("out/log.txt", "out/log_prev.txt");
+    if (freopen("out/log.txt", "w", stdout)) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        dup2(fileno(stdout), fileno(stderr));
+    }
+    // The bundle's folders, linked again at every launch: the bundle moves when
+    // the app is reinstalled or updated
+    auto link_to = [&](const std::string& from, const std::string& to) {
+        unlink(to.c_str());
+        if (symlink(from.c_str(), to.c_str()) != 0) perror(("[files] link " + to).c_str());
+    };
+    link_to(game + "/res", "res");
+    link_to(game + "/textures", "textures");
+    link_to(game + "/third_party/fonts", "third_party/fonts");
+    // The GPU's time per pass in the log, every 300 images (for tuning)
+    setenv("SR2_GPUTIME", "1", 0);
+    // The ROM: the player's own srally2.zip, copied into the rom folder here
+    // with the Files app (the app carries none)
+    if (stat("rom/srally2.zip", &st) == 0) {
+        std::string zip = work + "/rom/srally2.zip";
+        setenv("SR2_ROM_ZIP", zip.c_str(), 0);
+    } else {
+        printf("[files] no rom/srally2.zip in %s yet\n", work.c_str());
+    }
+    printf("[files] working folder %s, game files %s\n", work.c_str(), game.c_str());
+}

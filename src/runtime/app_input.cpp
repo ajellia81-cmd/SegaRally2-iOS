@@ -14,6 +14,9 @@
 #include "pad_rumble.h"
 #include "runtime.h"
 #include "wheel.h"
+#ifndef _WIN32
+#include "touch_controls.h"
+#endif
 
 bool g_menu_open = false;   // a menu has the controls
 Gamepads g_pads;
@@ -232,5 +235,8 @@ bool poll_gamepads(HWND hwnd) {
         if (pad.back) coin();
         if (pad.start) start();
     }
+#ifndef _WIN32
+    g_touch.apply(in);   // iOS port: the on-screen controls (hidden, and idle, with a pad connected)
+#endif
     return pause;
 }

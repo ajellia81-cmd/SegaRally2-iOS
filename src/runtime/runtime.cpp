@@ -3,6 +3,9 @@
 // window, the renderer and the menus are in app.cpp; runtime.h is the seam.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#ifdef __APPLE__
+#include <time.h>
+#endif
 #include <windows.h>
 
 #include <algorithm>
@@ -114,6 +117,7 @@ std::atomic<uint64_t> g_game_frames{0};
 // The WARNING notice and the copyright line shown at power-on are run through
 // at full speed with nothing on screen: the game appears at the SEGA logo.
 std::atomic<bool> g_boot_skip{false};
+std::atomic<bool> g_app_away{false};   // iOS port: the app in the background (app.cpp): the game waits
 std::atomic<int> g_arcade_entry{0};
 std::atomic<int> g_debug_jump{-1};
 std::atomic<bool> g_debug_freeze_time{false};
@@ -991,6 +995,16 @@ void pace_frame() {
         g_start_time.QuadPart = now.QuadPart - LONGLONG(target * double(g_qpf.QuadPart));
         return;
     }
+#ifdef __APPLE__
+    // iOS port: sleeps there are precise to well under a millisecond, so the
+    // spin at the end (heat on a phone) is a fraction of one (the Lost World port)
+    if (target - elapsed > 0.0006) {
+        timespec ts{0, long((target - elapsed - 0.0004) * 1e9)};
+        nanosleep(&ts, nullptr);
+        QueryPerformanceCounter(&now);
+        elapsed = double(now.QuadPart - g_start_time.QuadPart) / double(g_qpf.QuadPart);
+    }
+#endif
     while (elapsed < target) {
         if (target - elapsed > 0.002) Sleep(1);
         QueryPerformanceCounter(&now);
@@ -1118,6 +1132,12 @@ static void debug_time_frame() {
 // the attract is reached on the way back; the selects draw their own
 static void clear_text_layers() {
     memset(dev_ptr(TILEGEN_BASE + 0xF8000), 0, 2 * 0x2000);   // name tables of layers A and A'
+    // The line mask back to the primary layers everywhere, as the attract and
+    // the selects have it: the race shows layer A' in the left 128 pixels of
+    // rows 72-95 and puts it back only on its own way to the attract. Back
+    // through the menu it stayed, and the next stage's title card had a hole
+    // there (A' empty) through which the previous screen's backdrop showed
+    memset(dev_ptr(TILEGEN_BASE + 0xF7000), 0xFF, 384 * 4);
 }
 
 static bool arcade_entry_frame() {
@@ -1413,6 +1433,14 @@ void rt_event(Ctx& c) {
                 printf("[boot] start screens skipped in %.1f s (frame %llu)\n",
                        double(GetTickCount64() - g_boot_ms) / 1000.0, (unsigned long long)g_frame);
                 LARGE_INTEGER now;   // real-time pacing starts from here
+                QueryPerformanceCounter(&now);
+                g_start_time.QuadPart = now.QuadPart - LONGLONG(double(g_frame) / FRAME_HZ * double(g_qpf.QuadPart));
+            }
+            if (g_app_away) {   // in the background, whatever runs (the menus' run behind them too)
+                double away_from = qpc_seconds();
+                while (g_app_away && !g_quit) Sleep(10);
+                g_wait_seconds += qpc_seconds() - away_from;
+                LARGE_INTEGER now;   // on at real speed, without catching up
                 QueryPerformanceCounter(&now);
                 g_start_time.QuadPart = now.QuadPart - LONGLONG(double(g_frame) / FRAME_HZ * double(g_qpf.QuadPart));
             }

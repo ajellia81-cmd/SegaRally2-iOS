@@ -22,6 +22,7 @@ layout(set = 0, binding = 9) uniform sampler2D sky_coords;   // backdrop replace
 layout(set = 1, binding = 2) uniform sampler2D diffusion;   // the picture behind the HUD, blurred (bloom.frag)
 layout(set = 1, binding = 1) uniform sampler2D exposure_log;   // 1x1: average log brightness of the 3D image, eased
 layout(set = 1, binding = 3) uniform sampler2D bloom_tight;   // the same glow, blurred only a little (halos)
+layout(set = 1, binding = 4) uniform sampler2D dust_half;   // iOS: the dust (DUST: ENHANCED) at half resolution, premultiplied
 
 layout(push_constant) uniform Compose {
     vec2 scale;       // image size relative to the window
@@ -38,7 +39,7 @@ layout(push_constant) uniform Compose {
                       // 3 = scene mode: the picture behind the HUD (backdrop and 3D), for the diffusion;
                       // 4 = a black picture
     vec4 effects;     // x: bloom strength (0 = off); y: colour saturation (1 = original);
-                      // z: gamma (1 = original, higher = brighter mid-tones)
+                      // z: gamma (1 = original, higher = brighter mid-tones); w: 1 = dust_half drawn
     vec4 motion;      // x: interpolation of the back layers: the fraction of each row's scroll
                       // since the previous game frame (in sky_coords) to draw them back by;
                       // w: where the race HUD's bands split (R3DRenderer::compose_push)
@@ -83,6 +84,17 @@ vec4 xbr(sampler2D layer, vec2 q, ivec2 size) {
     vec2 pos = q * vec2(size);
     ivec2 e0 = ivec2(floor(pos));
     vec2 fp = pos - vec2(e0);
+    // The result is always a mix of the centre texel and its four neighbours:
+    // where those five are alike (all transparent, or one flat colour) it is
+    // the centre itself, without the other sixteen reads (iOS port: compose
+    // was most of the GPU's time on the phone, the HUD's layer being mostly
+    // transparent and the backdrops flat)
+    {
+        vec4 E0 = texel(layer, size, e0), B0 = texel(layer, size, e0 + ivec2(0, -1));
+        vec4 D1 = texel(layer, size, e0 + ivec2(-1, 0)), F1 = texel(layer, size, e0 + ivec2(1, 0));
+        vec4 H1 = texel(layer, size, e0 + ivec2(0, 1));
+        if (all(equal(E0, B0)) && all(equal(E0, D1)) && all(equal(E0, F1)) && all(equal(E0, H1))) return E0;
+    }
     //    A1 B1 C1
     // A0 A  B  C  C4
     // D0 D  E  F  F4
@@ -206,6 +218,13 @@ const int OVERLAY_ROW = 48;          // after the cells: the replacement picture
 // below the 3D image over `under` (premultiplied), at `pos` in 2D pixels.
 // Listed in the last row of the text cells (text_hd.h): rectangle in cells,
 // then slot in R and 1 in G for the layers below the 3D image.
+// Screen derivatives of the 2D position (2D pixels per screen pixel), taken
+// in main where every pixel of a 2x2 block comes by: inside the pictures'
+// rectangles (a branch some pixels of a block skip) Apple's GPUs gave
+// undefined ones, a wild mip level along the edges, and the HUD pictures (the
+// rev counter, the gear) had a faint grey frame round them (iOS port)
+vec2 g_pic_dx = vec2(0.0), g_pic_dy = vec2(0.0);
+
 vec4 replacement_pictures(vec4 under, vec2 pos, bool below_3d) {
     int pictures = int(texelFetch(text_cells, ivec2(0, OVERLAY_ROW), 0).r * 255.0 + 0.5);
     for (int i = 0; i < pictures; i++) {
@@ -248,7 +267,8 @@ vec4 replacement_pictures(vec4 under, vec2 pos, bool below_3d) {
             ivec2 block = clamp(ivec2((pos - vec2(cell) * 8.0) / 2.0), ivec2(0), ivec2(3));
             if (!numbered && blocks != 0u && ((blocks >> uint(block.y * 4 + block.x)) & 1u) == 0u) continue;
         }
-        vec4 o = texture(overlays[nonuniformEXT(uint(info.r * 255.0 + 0.5))], r);
+        vec2 span = rect.zw - rect.xy;   // (explicit gradients: in this branch the implicit ones are undefined; iOS port)
+        vec4 o = textureGrad(overlays[nonuniformEXT(uint(info.r * 255.0 + 0.5))], r, g_pic_dx / span, g_pic_dy / span);
         o.a *= cover;
         under = under * (1.0 - o.a) + vec4(clamp(o.rgb + pc.hud.z, 0.0, 1.0) * o.a, o.a);
     }
@@ -258,6 +278,22 @@ const int ATLAS_COLS = 16;           // tools/make_text_atlas.py
 const float ATLAS_SLOT = 80.0;       // (8 + 2 * PAD) * SCALE
 const float ATLAS_PAD = 8.0;         // PAD * SCALE
 const float ATLAS_CELL = 64.0;       // 8 * SCALE
+
+vec4 front_layer(vec2 q);
+
+// Beside the 4:3 picture the foreground's outermost column is repeated; on a
+// screen as wide as a phone's (2.17:1) a picture's edge (a stage's title card)
+// came out as long streaks. It is repeated only where that column is one
+// colour from top to bottom (the fades, plain backdrops), otherwise nothing
+// is drawn there (the backdrop shows). iOS port
+vec4 side_front(vec2 q, bool inside_43) {
+    if (inside_43) return front_layer(q);
+    // (whether each edge column is one colour: worked out on the CPU with the
+    // layer, pc.sky.x bit 0 the left, bit 1 the right)
+    uint plain = uint(pc.sky.x + 0.5);
+    bool left = q.x < 0.5;
+    return ((left ? plain & 1u : plain & 2u) != 0u) ? front_layer(q) : vec4(0.0);
+}
 
 vec4 front_layer(vec2 q) {
     vec4 f = layer(layer2d_front, q, SIZE_2D);
@@ -393,6 +429,13 @@ void main() {
         // With DLAA the alpha comes from its own anti-aliasing pass, steady
         // from frame to frame like the colour
         s.a = texture(scene3d_alpha, pf).r;
+        // The dust, drawn at half resolution after the 3D pass (effects.w, iOS
+        // port, r3d_renderer.cpp record_world): over the 3D image, as it was
+        // blended in it
+        if (pc.effects.w > 0.5) {
+            vec4 d = texture(dust_half, pf);
+            s = vec4(d.rgb + s.rgb * (1.0 - d.a), d.a + s.a * (1.0 - d.a));
+        }
         // Sharpening (SHARPEN), contrast adaptive like AMD's CAS: detail comes
         // back after the anti-aliasing and the diffusion, flat areas and
         // strong edges are left alone (no halos); not on the edges FXAA smoothed
@@ -423,8 +466,11 @@ void main() {
         q.x = clamp(q.x, 0.5 / 496.0, 1.0 - 0.5 / 496.0);
         bool inside_43 = p.x >= pc.layer2d.x && p.x <= pc.layer2d.x + pc.layer2d.y;
         vec2 sky_dx = dFdx(qb * vec2(SIZE_BACK)) / 512.0, sky_dy = dFdy(qb * vec2(SIZE_BACK)) / 512.0;
+        g_pic_dx = dFdx(q * vec2(SIZE_2D));
+        g_pic_dy = dFdy(q * vec2(SIZE_2D));
         vec4 back = vec4(0.0);
-        if (pc.hud.w > 0.5 || inside_43) {
+        // (not where the 3D image covers it: it would be multiplied by 0)
+        if ((pc.hud.w > 0.5 || inside_43) && s.a < 1.0) {
             back = layer(layer2d_back, qb, SIZE_BACK);
             sky_layer(qb, sky_dx, sky_dy, back);
         }
@@ -455,7 +501,7 @@ void main() {
             float to_right = row < 128.0 ? float(split >> 8 & 0xFFu) * 2.0 : bottom ? to_left : 0.0;
             if (to_right <= 0.0) to_right = 496.0;
             if (to_left <= 0.0 && to_right >= 496.0) {
-                front = front_layer(q);
+                front = side_front(q, inside_43);
             } else if (xl >= 0.0 && xl < to_left) {
                 front = front_layer(vec2(max(xl, 0.5) / 496.0, q.y));
                 pic_pos = vec2(xl, row);
@@ -469,7 +515,7 @@ void main() {
                 pic_pos = vec2(-1.0);
             }
         } else {
-            front = front_layer(q);
+            front = side_front(q, inside_43);
         }
         // The original's scroll fog veils the 2D layers behind the 3D image
         vec2 ndc_view = p * 2.0 - 1.0;

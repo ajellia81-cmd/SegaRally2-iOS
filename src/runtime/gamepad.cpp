@@ -9,12 +9,17 @@
 #include <cstdlib>
 
 #include <SDL3/SDL.h>
+#ifndef _WIN32
+#include "sdl_events.h"
+#endif
 
 namespace {
 
 constexpr float STICK_DEAD = 0.15f;   // the menus' (and the old steering's)
 constexpr float STEER_DEAD = 0.04f;   // the steering's: Supermodel's is 3%
 constexpr float TRIGGER_DOWN = 0.35f;
+constexpr float TRIGGER_UP = 0.2f;          // a held trigger is let go below this
+constexpr double BUTTON_SETTLE = 0.04;      // seconds a button stays down after the pad says up
 constexpr float RUMBLE_STRENGTH[4] = {0.0f, 0.45f, 0.75f, 1.0f};
 
 float axis(SDL_Gamepad* p, SDL_GamepadAxis a) { return float(SDL_GetGamepadAxis(p, a)) / 32767.0f; }
@@ -57,6 +62,17 @@ int Gamepads::slot_of(uint32_t id) const {
     return -1;
 }
 
+#ifdef __APPLE__
+// SDL makes a pad's haptics engines at its first rumble, and each motor's
+// player at the first rumble that motor is given more than nothing: in the
+// race, on the thread that draws, a stutter. Both motors made to rumble at the
+// faintest there is (1 of 65535, not to be felt), then none, makes them all now
+static void ready_rumble(SDL_Gamepad* p) {
+    SDL_RumbleGamepad(p, 1, 1, 0);
+    SDL_RumbleGamepad(p, 0, 0, 0);
+}
+#endif
+
 void Gamepads::open(uint32_t id) {
     if (slot_of(id) >= 0) return;
     // A wheel that SDL also maps as a gamepad is wheel.cpp's
@@ -78,6 +94,9 @@ void Gamepads::open(uint32_t id) {
     st.name = name ? name : "Gamepad";
     s.trigger_motors = SDL_GetBooleanProperty(SDL_GetGamepadProperties(p), SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
     changed_ = true;
+#ifdef __APPLE__
+    ready_rumble(p);   // (ready before the first rumble of a race)
+#endif
     printf("[gamepad] %d: %s%s\n", i + 1, st.name.c_str(), s.trigger_motors ? " (trigger rumble)" : "");
 }
 
@@ -96,7 +115,11 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
     rumble_ = rumble;
     double now = double(SDL_GetTicksNS()) * 1e-9;
     SDL_Event e;
+#ifdef _WIN32
     while (SDL_PollEvent(&e)) {
+#else
+    while (sr2_take_device_event(&e)) {   // iOS port: vk_presenter_sdl.cpp reads the events
+#endif
         switch (e.type) {
         case SDL_EVENT_GAMEPAD_ADDED: open(e.gdevice.which); break;
         case SDL_EVENT_GAMEPAD_REMOVED: close(e.gdevice.which); break;
@@ -115,8 +138,16 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
         if (!s.pad) continue;
         SDL_Gamepad* p = s.pad;
         // Buttons and triggers, with what changed since the last poll
+        // A held button only counts as let go once it has been up for a moment:
+        // some pads report a press as down, up, down within a few
+        // milliseconds, which made a double press (as in the Lost World port)
         bool now_down[32] = {};
-        for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT && b < 32; b++) now_down[b] = SDL_GetGamepadButton(p, SDL_GamepadButton(b));
+        for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT && b < 32; b++) {
+            bool raw = SDL_GetGamepadButton(p, SDL_GamepadButton(b));
+            if (raw || !s.buttons[b]) s.up_at[b] = 0;
+            else if (s.up_at[b] == 0) s.up_at[b] = now;
+            now_down[b] = raw || (s.buttons[b] && now - s.up_at[b] < BUTTON_SETTLE);
+        }
         // A button still held from the menu does nothing in the game until it
         // is let go: A, which chose PLAY, is also the accelerator, and the
         // pedal confirmed SELECT GAME's first choice (CHAMPIONSHIP) at once
@@ -125,8 +156,12 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
             else if (!now_down[b]) s.menu_held[b] = false;
             else if (s.menu_held[b]) now_down[b] = false;
         }
-        bool lt = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > int(TRIGGER_DOWN * 32767);
-        bool rt = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > int(TRIGGER_DOWN * 32767);
+        // (the triggers with some hysteresis, for the same reason)
+        auto trigger = [&](SDL_GamepadAxis a, bool was) {
+            return SDL_GetGamepadAxis(p, a) > int((was ? TRIGGER_UP : TRIGGER_DOWN) * 32767);
+        };
+        bool lt = trigger(SDL_GAMEPAD_AXIS_LEFT_TRIGGER, s.left_trigger);
+        bool rt = trigger(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, s.right_trigger);
         auto down = [&](SDL_GamepadButton b) { return now_down[b]; };
         auto pressed = [&](SDL_GamepadButton b) { return now_down[b] && !s.buttons[b]; };
         for (int b = 0; b < 32; b++)
@@ -247,13 +282,46 @@ std::vector<PadKey> Gamepads::take_keys() {
 
 void Gamepads::rumble(int i, float low, float high, int ms) {
     if (!slot_[i].pad || rumble_ <= 0) return;   // (VIBRATION OFF: nothing to send)
+#ifdef __APPLE__
+    // iOS port: SDL hands a rumble on to the controller only when it differs
+    // from the last one (the same again only lengthens it). A crash's rumble
+    // held at full is the same each frame: after a quiet spell, with the
+    // haptics engine still starting, the first was lost and the rest never went
+    // out (slow knocks, no rumble). One step of 65535 up or down each time
+    // sends every one
+    static uint32_t flip[8] = {};
+    if (i < 8) flip[i] ^= 1u;
+#endif
     // The call waits for the pad (on Xbox pads SDL sends it at once, with
     // XInput): timed, so a slow one shows in out/slow.log
     float k = RUMBLE_STRENGTH[std::clamp(rumble_, 0, 3)] * 65535.0f;
+    Uint16 lo = Uint16(std::clamp(low, 0.0f, 1.0f) * k), hi = Uint16(std::clamp(high, 0.0f, 1.0f) * k);
+#ifdef __APPLE__
+    if (lo > 1 && i < 8 && flip[i]) lo ^= 1;   // (the lowest bit: a step of 65535, not to be felt)
+#endif
     Uint64 from = SDL_GetTicksNS();
-    SDL_RumbleGamepad(slot_[i].pad, Uint16(std::clamp(low, 0.0f, 1.0f) * k), Uint16(std::clamp(high, 0.0f, 1.0f) * k),
-                      Uint32(ms));
+    bool ok = SDL_RumbleGamepad(slot_[i].pad, lo, hi, Uint32(ms));
     g_vibration_seconds += double(SDL_GetTicksNS() - from) * 1e-9;
+#ifdef __APPLE__
+    // iOS port: a controller's haptics engine that iOS stopped (the app in the
+    // background, an idle spell, an audio interruption) is never started again
+    // by SDL: the rumble stopped for good. Closing and opening the controller
+    // again makes a new one
+    static Uint64 last_reopen[MAX] = {};   // at most every 2 s (a pad without haptics fails every time)
+    if (!ok && (low > 0 || high > 0) && SDL_GetTicks() - last_reopen[i] > 2000) {
+        last_reopen[i] = SDL_GetTicks();
+        SDL_JoystickID id = slot_[i].id;
+        SDL_CloseGamepad(slot_[i].pad);
+        slot_[i].pad = SDL_OpenGamepad(id);
+        if (slot_[i].pad)
+            SDL_RumbleGamepad(slot_[i].pad, Uint16(std::clamp(low, 0.0f, 1.0f) * k),
+                              Uint16(std::clamp(high, 0.0f, 1.0f) * k), Uint32(ms));
+        else
+            slot_[i] = Slot{};
+    }
+#else
+    (void)ok;
+#endif
 }
 
 void Gamepads::rumble_triggers(int i, float left, float right, int ms) {
@@ -272,3 +340,19 @@ void Gamepads::rumble_triggers(int i, float left, float right, int ms) {
                               Uint32(ms));
     g_vibration_seconds += double(SDL_GetTicksNS() - from) * 1e-9;
 }
+
+#ifdef __APPLE__
+void Gamepads::restart_rumble() {
+    for (int i = 0; i < MAX; i++) {
+        if (!slot_[i].pad) continue;
+        SDL_JoystickID id = slot_[i].id;
+        SDL_CloseGamepad(slot_[i].pad);   // (the stopped engines go with it)
+        slot_[i].pad = SDL_OpenGamepad(id);
+        if (!slot_[i].pad) {
+            slot_[i] = Slot{};
+            continue;
+        }
+        ready_rumble(slot_[i].pad);
+    }
+}
+#endif
