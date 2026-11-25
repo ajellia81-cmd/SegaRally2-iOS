@@ -450,6 +450,24 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
     if (log)
         printf("[car] frame %llu car %06X patch %zu road %zu raw %.3f lowest %.3f lift %.3f\n",
                (unsigned long long)out.frame, car->node, patches.size(), road.size(), raw, low[1], lift.height);
+    {   // (diagnosis, iOS port, temporary: the car going up once just after the
+        // start) The first 25 s of a game world: the height the car is lowered
+        // by, the patch's reading and the bodywork's lowest point, each time
+        // one of them moves 5 mm or more (the same line as SR2_CARLOG's, and
+        // the kerb hold)
+        static uint64_t since = 0, last_frame = 0;
+        static float last_raw = -9, last_lift = -9, last_low = -9;
+        if (out.frame < since || out.frame - last_frame > 120) since = out.frame;   // (a new race: frames went on without one)
+        if (out.frame - since < 1500 &&
+            (std::fabs(raw - last_raw) >= 0.005f || std::fabs(lift.height - last_lift) >= 0.005f ||
+             std::fabs(low[1] - last_low) >= 0.005f)) {
+            printf("[car] frame %llu (+%llu) car %06X patch %zu road %zu raw %.3f lowest %.3f lift %.3f kerb %d skips %d\n",
+                   (unsigned long long)out.frame, (unsigned long long)(out.frame - since), car->node, patches.size(),
+                   road.size(), raw, low[1], lift.height, int(lift.kerb), int(lift.skips));
+            last_raw = raw, last_lift = lift.height, last_low = low[1];
+        }
+        last_frame = out.frame;
+    }
     float down = lift.height;
     if (down <= 0.002f && !forest_) return;   // (FOREST: its patch may still be raised, below)
     auto lower = [&](R3DVertex& x, float by) {
