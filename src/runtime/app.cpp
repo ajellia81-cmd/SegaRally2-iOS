@@ -407,11 +407,26 @@ int main(int argc, char** argv) {
             ini.gamma = 100;
             ini.car_probes = false;
             ini.car_shadows = false;
+            ini.hd_hud = ini.hd_liveries = false;   // the ROM's own HUD and car paint
+            ini.object_distance = 100;               // the spectators 100 m ahead, as on the cabinet
             if (FILE* f = fopen("save/settings.ini", "w")) {
                 fputs(ini.text().c_str(), f);
                 fclose(f);
             }
             if (FILE* f = fopen("save/ios_profile_3", "w")) fclose(f);
+            if (FILE* f = fopen("save/ios_profile_4", "w")) fclose(f);
+        } else if (GetFileAttributesA("save/ios_profile_4") == INVALID_FILE_ATTRIBUTES && ini.experience == 0) {
+            // The options the new upstream brought, set once as the arcade had
+            // them (the ones chosen before are left as they are)
+            ini.car_probes = false;
+            ini.car_shadows = false;
+            ini.hd_hud = ini.hd_liveries = false;
+            ini.object_distance = 100;
+            if (FILE* f = fopen("save/settings.ini", "w")) {
+                fputs(ini.text().c_str(), f);
+                fclose(f);
+            }
+            if (FILE* f = fopen("save/ios_profile_4", "w")) fclose(f);
         }
         // Settings the iOS menu no longer has, kept where they belong
         ini.aa = 2;
