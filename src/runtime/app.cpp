@@ -86,6 +86,9 @@ bool g_background_fps = true;   // BACKGROUND FPS: 30 a second at most without t
 // it does not, a clock that advances one refresh per image and follows the
 // earliest wake-ups (never earlier than a vblank). Either way it moves on by
 // whole refreshes, and starts again after a stall (a window drag, a slow frame).
+#ifdef __APPLE__
+double platform_refresh_period();   // platform/ios_lifecycle.mm: the screen's own (1/120 s)
+#endif
 struct DisplayClock {
     double at = 0, last = 0, period = 1.0 / 60;
     double tick() {
@@ -101,7 +104,15 @@ struct DisplayClock {
             last = now;
             return at;
         }
+#ifdef __APPLE__
+        // iOS port: the screen's refresh as iOS gives it. Learnt from the
+        // presents' spacing, as below, it followed the 30 a second of the
+        // pause menu while the app was away, and the pace it sets kept it
+        // there: 30 a second in the race after coming back
+        period = platform_refresh_period();
+#else
         if (last > 0 && now - last < 0.1) period += 0.002 * (std::clamp(now - last, 1.0 / 500, 0.05) - period);
+#endif
         last = now;
         if (at > 0 && std::abs(now - (at + period)) < 2 * period) {
             at += period;

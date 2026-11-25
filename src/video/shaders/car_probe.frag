@@ -21,7 +21,14 @@ layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 out_probe;
 
 layout(set = 0, binding = 0) uniform usampler2D texture_ram;
+#ifdef SR2_MOBILE   // iOS port: pictures and one sampler apart (Metal holds few samplers)
+layout(set = 0, binding = 1) uniform texture2D replacement_tex[];   // texture pack, RGBA8 with mips
+layout(set = 0, binding = 3) uniform sampler replacement_smp;
+#define REPL(i) sampler2D(replacement_tex[i], replacement_smp)
+#else
 layout(set = 0, binding = 1) uniform sampler2D replacements[];
+#define REPL(i) replacements[i]
+#endif
 layout(set = 1, binding = 0) uniform sampler2D shadow_map;
 
 #define ATMOSPHERE_BINDING 2

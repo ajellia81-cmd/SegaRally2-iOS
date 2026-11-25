@@ -17,6 +17,11 @@
 #ifndef _WIN32
 #include "touch_controls.h"
 #endif
+#ifdef __APPLE__
+void platform_crash_haptic(float strength, int where = 0);   // platform/ios_lifecycle.mm
+extern std::atomic<uint32_t> g_crash_knocks;   // runtime.cpp: each crash sound heard
+extern std::atomic<float> g_crash_knock_strength;   // ... and the strongest since the last one taken
+#endif
 
 bool g_menu_open = false;   // a menu has the controls
 Gamepads g_pads;
@@ -230,6 +235,26 @@ bool poll_gamepads(HWND hwnd) {
                 tl *= g_trigger_share, tr *= g_trigger_share;
                 if (tl > 0.05f || tr > 0.05f) g_pads.rumble_triggers(i, tl, tr, 60);
             }
+#ifdef __APPLE__
+            {   // A crash sound: a knock of its own in the controller (iOS port,
+                // platform/ios_lifecycle.mm), at most one every 0.35 s (a slow
+                // knock is several sounds at once, and a scrape along a wall one
+                // every few frames: a knock started over the last one cut it short)
+                static uint32_t seen = g_crash_knocks.load();
+                static double last = -1;
+                uint32_t knocks = g_crash_knocks.load();
+                if (knocks != seen) {
+                    seen = knocks;
+                    float st = g_crash_knock_strength.exchange(0.0f);
+                    double now = qpc_seconds();
+                    static const float level[4] = {0.0f, 0.45f, 0.75f, 1.0f};
+                    if (now - last > 0.35 && g_pad_rumble > 0) {
+                        last = now;
+                        platform_crash_haptic(st * level[std::clamp(g_pad_rumble, 0, 3)]);
+                    }
+                }
+            }
+#endif
             driver = false;
         }
         if (pad.back) coin();

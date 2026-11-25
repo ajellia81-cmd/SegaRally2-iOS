@@ -19,7 +19,14 @@
 // The 3D pass's descriptor set, as set 1: the texture RAM and the texture pack
 // for the cut-out triangles, the acceleration structure and the cut-outs
 layout(set = 1, binding = 0) uniform usampler2D texture_ram;
+#ifdef SR2_MOBILE   // iOS port: pictures and one sampler apart (Metal holds few samplers)
+layout(set = 1, binding = 1) uniform texture2D replacement_tex[];   // texture pack, RGBA8 with mips
+layout(set = 1, binding = 3) uniform sampler replacement_smp;
+#define REPL(i) sampler2D(replacement_tex[i], replacement_smp)
+#else
 layout(set = 1, binding = 1) uniform sampler2D replacements[];
+#define REPL(i) replacements[i]
+#endif
 #define RT_SET 1
 #include "raytrace.glsl"
 #define ATMOSPHERE_SET 1

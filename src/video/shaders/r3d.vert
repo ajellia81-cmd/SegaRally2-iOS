@@ -51,7 +51,14 @@ layout(location = 14) flat out vec4 vpo_quality;
 
 #ifdef RAY_TRACING
 layout(set = 0, binding = 0) uniform usampler2D texture_ram;
+#ifdef SR2_MOBILE   // iOS port: pictures and one sampler apart (Metal holds few samplers)
+layout(set = 0, binding = 1) uniform texture2D replacement_tex[];   // texture pack, RGBA8 with mips
+layout(set = 0, binding = 3) uniform sampler replacement_smp;
+#define REPL(i) sampler2D(replacement_tex[i], replacement_smp)
+#else
 layout(set = 0, binding = 1) uniform sampler2D replacements[];
+#define REPL(i) replacements[i]
+#endif
 #define ATMOSPHERE_BINDING 2
 #include "atmosphere.glsl"
 #define RT_SET 0

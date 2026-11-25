@@ -310,6 +310,7 @@ void Gamepads::rumble(int i, float low, float high, int ms) {
     static Uint64 last_reopen[MAX] = {};   // at most every 2 s (a pad without haptics fails every time)
     if (!ok && (low > 0 || high > 0) && SDL_GetTicks() - last_reopen[i] > 2000) {
         last_reopen[i] = SDL_GetTicks();
+        printf("[rumble] pad %d refused it (%s): opened again\n", i + 1, SDL_GetError());
         SDL_JoystickID id = slot_[i].id;
         SDL_CloseGamepad(slot_[i].pad);
         slot_[i].pad = SDL_OpenGamepad(id);

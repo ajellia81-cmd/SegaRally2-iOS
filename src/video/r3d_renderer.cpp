@@ -327,6 +327,14 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
                                          l.maxDescriptorSetSamplers, l.maxDescriptorSetSampledImages,
                                          l.maxPerStageResources});
         // (16: room for the stage's other textures, buffers and attachments)
+#ifdef __APPLE__
+        // iOS port: the pictures apart from their one sampler (binding 3,
+        // shaders' SR2_MOBILE): Metal's limit is on samplers (16), not on
+        // pictures, so the whole pack fits
+        limit = uab ? std::min(p12.maxPerStageDescriptorUpdateAfterBindSampledImages,
+                               p12.maxDescriptorSetUpdateAfterBindSampledImages)
+                    : std::min(l.maxPerStageDescriptorSampledImages, l.maxDescriptorSetSampledImages);
+#endif
         texture_slots_ = uint32_t(std::clamp<int64_t>(int64_t(limit) - 16, 2, TexturePack::MAX_SLOTS));
         if (texture_slots_ < TexturePack::MAX_SLOTS)
             printf("[video] texture pack limited to %u images by the GPU (%s limit %llu)\n", texture_slots_,
@@ -340,7 +348,12 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
         {6, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, rt_stages},   // ray tracing: the world
         {7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, rt_stages},   // ray tracing: cut-out triangles
     };
-    const uint32_t r3d_bindings = rt_.ready() ? 5 : 3;
+    uint32_t r3d_bindings = rt_.ready() ? 5 : 3;
+#ifdef __APPLE__
+    b0[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    b0[3] = {3, VK_DESCRIPTOR_TYPE_SAMPLER, 1, rt_stages};   // (no ray tracing on iOS: its place)
+    r3d_bindings = 4;
+#endif
     // Replacement slots are filled while earlier frames may still be in flight
     const VkDescriptorBindingFlags pending =
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
@@ -408,10 +421,18 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
     };
+#ifdef __APPLE__
+    ps[0].descriptorCount = 50 + Pack2D::MAX_SLOTS;
+    ps[2] = {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, texture_slots_};
+    ps[3] = {VK_DESCRIPTOR_TYPE_SAMPLER, 2};
+#endif
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.maxSets = 18;
     if (uab) pi.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pi.poolSizeCount = rt_.ready() ? 4 : 2;
+#ifdef __APPLE__
+    pi.poolSizeCount = 4;
+#endif
     pi.pPoolSizes = ps;
     vkCreateDescriptorPool(dev_, &pi, nullptr, &pool_);
     VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -419,6 +440,18 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &r3d_set_layout_;
     vkAllocateDescriptorSets(dev_, &ai, &r3d_set_);
+#ifdef __APPLE__
+    {   // the texture pack's one sampler (binding 3)
+        VkDescriptorImageInfo smp{replace_sampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+        VkWriteDescriptorSet sw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        sw.dstSet = r3d_set_;
+        sw.dstBinding = 3;
+        sw.descriptorCount = 1;
+        sw.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+        sw.pImageInfo = &smp;
+        vkUpdateDescriptorSets(dev_, 1, &sw, 0, nullptr);
+    }
+#endif
     ai.pSetLayouts = &compose_set_layout_;
     vkAllocateDescriptorSets(dev_, &ai, &compose_set_);
     ai.pSetLayouts = &bloom_set_layout_;
@@ -1415,6 +1448,12 @@ void R3DRenderer::upload_slot(VkDescriptorSet set, uint32_t binding, VkSampler s
         wr.dstArrayElement = slot;
         wr.descriptorCount = 1;
         wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+#ifdef __APPLE__
+        if (set == r3d_set_ && binding == 1) {   // the texture pack: pictures only (their sampler is binding 3)
+            wr.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            info.sampler = VK_NULL_HANDLE;
+        }
+#endif
         wr.pImageInfo = &info;
         if (replace) {   // the slot's previous picture is no longer needed
             auto old = overlay_images_.find(slot);
