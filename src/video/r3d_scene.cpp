@@ -196,7 +196,6 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
             }
         }
     }
-    settle_player_car(out);
     // The cars' dark patches (their shadows) marked: r3d.vert draws them a
     // little nearer (iOS port)
     for (R3DVertex& x : out.vertices)
@@ -214,6 +213,14 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
     if (pack_ && texture_ram_ && pack_->active()) apply_texture_pack(out);
     auto t4 = clock::now();
     link_previous(out);
+    // The cars set down on the road after they are paired with the previous
+    // frame, which keeps their positions as the game had them: both frames
+    // then lowered by this one's height (lower). Set down before, the car
+    // went up and down in waves at the start in the championship, with the
+    // in-between frames only (not as the game places it, not without them):
+    // its previous positions were not all taken from the car set down
+    // (iOS port)
+    settle_player_car(out);
     static const bool no_smooth = getenv("SR2_NO_SMOOTH") != nullptr, no_sync = getenv("SR2_NO_SYNC") != nullptr;
     auto t4b = clock::now();
     if (!no_smooth) smooth_car_normals(out);
