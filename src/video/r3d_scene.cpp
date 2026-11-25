@@ -213,6 +213,39 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
     if (pack_ && texture_ram_ && pack_->active()) apply_texture_pack(out);
     auto t4 = clock::now();
     link_previous(out);
+    {   // (diagnosis, temporary: the car going up and down in waves at the
+        // championship's start, with the in-between frames only) The cars'
+        // move from the previous frame they are drawn from, up the road's up:
+        // on average, the most, and how many corners have no previous
+        // position (drawn where they are) - when the average is 1 cm or more,
+        // or the unpaired count changes, in the first 15 s of a game world
+        static uint64_t since = 0;
+        static size_t last_alone = size_t(-1);
+        const R3DViewport* wv = nullptr;
+        for (const R3DViewport& v : out.viewports)
+            if (v.world) wv = &v;
+        if (!wv) since = 0;
+        else if (!since) since = out.frame;
+        if (wv && out.frame - since < 900) {
+            const float* up = wv->world_axes + 3;
+            double sum = 0;
+            float most = 0;
+            size_t n = 0, alone = 0;
+            for (const R3DVertex& x : out.vertices) {
+                if (!(x.flags & R3D_CAR)) continue;
+                float d[3] = {x.pos[0] - x.prev[0], x.pos[1] - x.prev[1], x.pos[2] - x.prev[2]};
+                float h = d[0] * up[0] + d[1] * up[1] + d[2] * up[2];
+                n++, sum += h;
+                if (std::fabs(h) > std::fabs(most)) most = h;
+                alone += d[0] == 0 && d[1] == 0 && d[2] == 0;
+            }
+            float mean = n ? float(sum / double(n)) : 0.0f;
+            if (n && (std::fabs(mean) >= 0.01f || alone != last_alone))
+                printf("[carmove] frame %llu corners %zu up %.3f (most %.3f), %zu with no previous\n",
+                       (unsigned long long)out.frame, n, mean, most, alone);
+            last_alone = alone;
+        }
+    }
     // The cars set down on the road after they are paired with the previous
     // frame, which keeps their positions as the game had them: both frames
     // then lowered by this one's height (lower). Set down before, the car
