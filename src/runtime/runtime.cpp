@@ -24,15 +24,25 @@
 #include "inputs.h"
 #include "wheel.h"
 #include "fns.h"
+#include "game_hooks.h"
+#include "game_ram.h"
 #include "runtime.h"
 #include "drive_board.h"
 #include "jtag.h"
+#include "pad_rumble.h"
 #include "scsi53c810.h"
 #include "../video/tilegen.h"
 #include "../audio/audio_out.h"
 #include "../audio/sound_board.h"
+#include "../video/r3d_dust.h"
 #include "../video/r3d_state.h"
 #include "stats.h"
+#include "telemetry.h"
+#include "options.h"
+
+using namespace game_ram;   // the game's RAM addresses
+
+extern Options g_opt;   // app.cpp: command line and menu settings (DIFFICULTY)
 
 Ctx g_ctx;
 uint8_t* g_ram;
@@ -108,6 +118,11 @@ std::atomic<int> g_arcade_entry{0};
 std::atomic<int> g_debug_jump{-1};
 std::atomic<bool> g_debug_freeze_time{false};
 std::atomic<bool> g_skip_attract{false}, g_game_over_menu{false}, g_in_attract{false};
+std::atomic<bool> g_wants_start{false};
+std::atomic<int> g_car_select{-1};
+std::atomic<bool> g_name_entry{false};
+std::atomic<bool> g_restart_program{false};
+static uint64_t g_boot_from = 0;   // the frame the program (re)started on: the power-on screens' skip gives up 3000 after
 // Menus: the game stands still (and so does its sound) while set. The boot
 // screens still run through first, so Play starts at the SEGA logo.
 std::atomic<bool> g_hold{false};
@@ -115,17 +130,6 @@ std::atomic<bool> g_hold{false};
 // its next frame event (its native stack cannot be unwound) and reports it
 // in g_parked, so the audio can be stopped with nobody pushing samples.
 std::atomic<bool> g_quit{false}, g_parked{false};
-
-double qpc_seconds() {
-    static LARGE_INTEGER freq = [] {
-        LARGE_INTEGER f;
-        QueryPerformanceFrequency(&f);
-        return f;
-    }();
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    return double(now.QuadPart) / double(freq.QuadPart);
-}
 
 namespace {
 
@@ -159,7 +163,7 @@ uint64_t g_dec_irqs = 0;
 [[noreturn]] void exit_from_game_thread(int code);
 uint8_t g_adc_channel = 0;
 Ncr53c810 g_scsi;
-DriveBoard g_drive;   // force feedback board of the joystick (its own Z80)
+DriveBoard g_drive;   // force feedback board of the steering wheel (its own Z80)
 Jtag g_jtag;   // Real3D ASIC IDs, checked at boot on Step 2.1
 
 // Time base (TB): the game resets it to 0 and measures delays with it
@@ -310,9 +314,8 @@ static uint8_t rtc_read(uint32_t a) {
 
 // Security board (315-5881 crypto chip) at 0xF01A0000. The game reads 112
 // bytes through the data register (0x1C, two bytes per word in its high half,
-// low byte first) and compares them with its copyright text at RAM 0x1B1E80
-// ("===== STAR WARS =====..."); a mismatch prints "not correct" and a screen
-// of numbers (fn_000A3600). The chip decrypts data stored on the board; here
+// low byte first) and compares them with its copyright text at RAM 0x1B1E80;
+// a mismatch prints "not correct" and a screen of numbers (fn_000A3600). The chip decrypts data stored on the board; here
 // it hands back the text the game expects. The first read after the address
 // registers (0x10/0x14) are written returns 0xFFFF.
 static bool g_security_first = true;
@@ -398,6 +401,19 @@ void dev_write8(uint32_t a, uint8_t v) {
     if (a == 0xF0080000) {   // MIDI byte to the sound board
         g_irq_state &= ~0x40;
         g_sound.midi_write(v);
+        // Debugging aid: SR2_MIDI_LOG=file writes the bytes, a line per frame
+        // with the select step (0x22435C) and the round (0x22CF48)
+        static FILE* midi_log = getenv("SR2_MIDI_LOG") ? fopen(getenv("SR2_MIDI_LOG"), "w") : nullptr;
+        static uint64_t midi_frame = ~0ull;
+        if (midi_log) {
+            if (g_frame != midi_frame) {
+                midi_frame = g_frame;
+                fprintf(midi_log, "\n%llu step %d round %d:", (unsigned long long)g_frame, int32_t(rd32(SELECT_STEP)),
+                        int32_t(rd32(G_ROUND)));
+                fflush(midi_log);
+            }
+            fprintf(midi_log, " %02x", v);
+        }
     }
     if (a == 0xF0080004) {
         g_midi_ctrl = v;
@@ -706,7 +722,7 @@ DWORD WINAPI game_thread(LPVOID) {
     // above 0x00070000 (error 0x10 on the LEDs otherwise)
     c.spr[287] = 0x00071202;
     g_drive.init(g_drive_rom);
-    if (g_drive_rom.empty()) printf("No force feedback board program (epr-21119): the game will stop at FAILED FEEDBACK LEVER\n");
+    if (g_drive_rom.empty()) printf("No force feedback board program (epr-20512): the game may stop at its board check\n");
     // Test switches left set in the console (set SR2_...=1) change the game
     // in ways that look like bugs later on: listed, so a log shows them
     if (char** env = _environ)
@@ -990,6 +1006,7 @@ ULONGLONG g_boot_ms = GetTickCount64();
     stats_save();   // runs that end here (--frames, --headless) keep what they counted
     fflush(stdout);
     g_audio.stop();
+    console_prompt();
     ExitProcess(code);
 }
 
@@ -1017,10 +1034,9 @@ bool g_fast_idle = false;
 // current and runs its init (table 0xEDAF0, 12 bytes an entry), then its
 // frame function every frame. The credit / START screen counts its steps at
 // 0x22436C: 1 a credit taken, 4 once START is taken and SELECT GAME comes up
-constexpr uint32_t SR2_SEQUENCE = 0x22D618, SR2_SEQUENCE_NEXT = 0x22D61C, SR2_START_STEP = 0x22436C;
 
 static bool in_attract() {
-    return int32_t(rd32(SR2_SEQUENCE)) != 1;
+    return int32_t(rd32(SEQUENCE)) != 1;
 }
 
 // The game's selects keep their state at 0x224320 (set up by 0x00046160):
@@ -1031,8 +1047,10 @@ static bool in_attract() {
 // its carousel has a cursor of its own), the car (+0x04: the SELECT CAR cursor,
 // an index into the model table at 0xF1F00) and the transmission (+0x14: 0
 // automatic, 1 manual). The race is set up from them (0x00046AAC)
-constexpr uint32_t SR2_SELECT_STEP = 0x22435C, SR2_SELECT_MODE = 0x22432C, SR2_SELECT_COURSE = 0x224328,
-                   SR2_SELECT_CAR = 0x224324, SR2_SELECT_GEARS = 0x224334;
+
+// DEBUG's FOREST (course 4): SELECT COURSE's fifth card (game_hooks.cpp),
+// there when FOREST is on
+constexpr int DEBUG_FOREST = 4;
 
 // DEBUG (menu): from SELECT GAME on to a practice race of the course, car and
 // transmission asked for, unseen. Each select gets its choice written and the
@@ -1041,12 +1059,14 @@ constexpr uint32_t SR2_SELECT_STEP = 0x22435C, SR2_SELECT_MODE = 0x22432C, SR2_S
 static bool debug_jump_frame(uint64_t from) {
     stats_game_cheated();   // a race jumped to: no records
     int choice = g_debug_jump;
-    uint32_t course = uint32_t(choice & 0xF) & 3, car = uint32_t(choice >> 4 & 0xF) & 7, gears = uint32_t(choice >> 8 & 1);
+    const bool forest = (choice & 0xF) == DEBUG_FOREST && sr2_cards() > DEBUG_FOREST;
+    uint32_t course = forest ? DEBUG_FOREST : uint32_t(choice & 0xF) & 3, car = uint32_t(choice >> 4 & 0xF) & 7,
+             gears = uint32_t(choice >> 8 & 1);
     Inputs& p = g_inputs;
-    int32_t step = int32_t(rd32(SR2_SELECT_STEP));
+    int32_t step = int32_t(rd32(SELECT_STEP));
     auto finish = [&](const char* why) {
-        printf("[debug] %s: step %d after %llu frames (course %u car %u gears %u)\n", why, step,
-               (unsigned long long)(g_frame - from), course, car, gears);
+        printf("[debug] %s: step %d after %llu frames (course %u%s car %u gears %u)\n", why, step,
+               (unsigned long long)(g_frame - from), course, forest ? " = FOREST" : "", car, gears);
         p.accel = 0;
         g_debug_jump = -1;
         return true;
@@ -1054,10 +1074,10 @@ static bool debug_jump_frame(uint64_t from) {
     if (g_frame - from > 12000) return finish("gave up");
     if (step >= 17) return finish("racing");
     static const bool champ = getenv("SR2_DEBUG_CHAMP") != nullptr;   // testing aid: the championship (16 cars) instead
-    if (step <= 3) wr32(SR2_SELECT_MODE, champ ? 0 : 1);   // practice
-    if (step > 6) wr32(SR2_SELECT_COURSE, course);
-    if (step > 6) wr32(SR2_SELECT_CAR, car);
-    if (step > 9) wr32(SR2_SELECT_GEARS, gears);
+    if (step <= 3) wr32(SELECT_MODE, champ ? 0 : 1);   // practice
+    if (step > 6) wr32(SELECT_COURSE, course);
+    if (step > 6) wr32(SELECT_CAR, car);
+    if (step > 9) wr32(SELECT_GEARS, gears);
     p.accel = (g_frame - from) % 40 < 6 ? 0xFF : 0;   // the pedal confirms
     return false;
 }
@@ -1068,21 +1088,20 @@ static bool debug_jump_frame(uint64_t from) {
 // +0x0C the time the next start sets it to.
 // DEBUG (menu): TIME INFINITE holds the time left at the most it has been
 // while the clock runs (a checkpoint's extension still adds to it)
-constexpr uint32_t SR2_CLOCK_STATE = 0x22CF84, SR2_CLOCK_LEFT = 0x22CF88;
 
 static void debug_time_frame() {
     static uint32_t held = 0;
-    if (!g_debug_freeze_time || in_attract() || rd32(SR2_CLOCK_STATE) != 2) {
+    if (!g_debug_freeze_time || in_attract() || rd32(G_CLOCK) != 2) {
         held = 0;
         return;
     }
-    uint32_t left = rd32(SR2_CLOCK_LEFT);
+    uint32_t left = rd32(G_LEFT);
     if (left > 0x7FFFFFFF) return;
     if (left >= held) {
         if (!held) stats_game_cheated();   // a race with no end: no records
         held = left;
     } else {
-        wr32(SR2_CLOCK_LEFT, held);
+        wr32(G_LEFT, held);
     }
 }
 
@@ -1110,7 +1129,7 @@ static bool arcade_entry_frame() {
     bool attract = in_attract();
     if (g_arcade_entry == 3) {
         from = g_frame, select_at = 0;
-        if (g_debug_jump >= 0 && !attract && int32_t(rd32(SR2_SELECT_STEP)) == 3 && rd32(SR2_START_STEP) == 4) {
+        if (g_debug_jump >= 0 && !attract && int32_t(rd32(SELECT_STEP)) == 3 && rd32(START_STEP) == 4) {
             // DEBUG with the game waiting at SELECT GAME (behind the menu): on from there
             g_arcade_entry = 2;
             select_at = g_frame;
@@ -1119,14 +1138,14 @@ static bool arcade_entry_frame() {
             clear_text_layers();
             g_arcade_entry = 2;
         } else {
-            wr32(SR2_SEQUENCE_NEXT, 0);   // the attract, entered as the game does after a game over
+            wr32(SEQUENCE_NEXT, 0);   // the attract, entered as the game does after a game over
             g_arcade_entry = 4;
         }
     }
     if (g_arcade_entry == 4) {
         coin = start = false;
         // the attract itself (0), not the restart on the way to it (-1)
-        if (int32_t(rd32(SR2_SEQUENCE)) != 0 && g_frame - from < 12000) return false;
+        if (int32_t(rd32(SEQUENCE)) != 0 && g_frame - from < 12000) return false;
         printf("[play] back in the attract after %llu frames\n", (unsigned long long)(g_frame - from));
         clear_text_layers();
         g_arcade_entry = 1;
@@ -1143,7 +1162,7 @@ static bool arcade_entry_frame() {
         return false;
     }
     uint64_t k = (t - settle) % 60;
-    bool taken = !attract && start_pressed && rd32(SR2_START_STEP) == 4;
+    bool taken = !attract && start_pressed && rd32(START_STEP) == 4;
     if (!select_at && !taken && t < 9000) {   // (once at SELECT GAME, the start step is the past)
         coin = attract && k < 6;      // a credit (the attract takes it at any point)
         start = !attract && k >= 30 && k < 36;
@@ -1172,7 +1191,7 @@ static bool arcade_entry_frame() {
 static void attract_guard_frame() {
     static bool was = true;
     static int32_t seq_was = 0;
-    int32_t seq = int32_t(rd32(SR2_SEQUENCE));
+    int32_t seq = int32_t(rd32(SEQUENCE));
     // Back to power on (-1): the program restarted, as on leaving the TEST
     // menu: the SEGA logo and the attract would follow, so the same as a game over
     bool restarted = seq == -1 && seq_was != -1;
@@ -1191,33 +1210,30 @@ static void attract_guard_frame() {
     g_game_over_menu = true;
 }
 
-// The wheel's force feedback as gamepad rumble: the drive board drives two
-// motors (0x7F = no force). Their slow part is the spring that holds the
-// wheel to the middle (it follows the wheel); the quick changes on top are
-// the game's jolts and shakes (bumps, crashes), kept for the pads
-// (app_input.cpp). SR2_FFB_LOG prints the motors as they change
+// The wheel's force feedback, from what the game asks of the drive board's
+// servo (drive_board.cpp): a force that turns the wheel, and a vibration.
+// For the pads its vibration and the quick changes of the force (bumps)
+// above its slow part are a small part of their rumble (pad_rumble.cpp). Outside
+// the races the game stops the motor, so nothing pulls the wheel then.
+// SR2_FFB_LOG prints them as they change
 static void ffb_frame() {
     static const bool log = getenv("SR2_FFB_LOG") != nullptr;
-    static float slow[2] = {0, 0};
-    static int last[2] = {-1, -1};
-    int m[2] = {g_drive.motor_x(), g_drive.motor_y()};
-    float shake = 0;
-    for (int a = 0; a < 2; a++) {
-        float f = float(m[a] - 0x7F);
-        slow[a] += 0.2f * (f - slow[a]);
-        shake = std::max(shake, std::fabs(f - slow[a]) / 128.0f);
-    }
-    if (log && (m[0] != last[0] || m[1] != last[1]))
-        printf("[ffb] frame %llu  x %02X y %02X  shake %.2f  wheel %d\n", (unsigned long long)g_frame, m[0], m[1], shake,
-               int(g_inputs.steer));
-    last[0] = m[0], last[1] = m[1];
-    float was = g_ffb_shake.load();
-    if (shake > was) g_ffb_shake = shake;
-    // A steering wheel's force feedback (wheel.cpp): the motor as a force,
-    // 0x80 = none, smoothed over a few frames
+    static float slow = 0;
+    float f = g_drive.force(), vib = g_drive.vibration();
+    slow += 0.2f * (f - slow);
+    float shake = std::max(vib, std::fabs(f - slow));
+    static float last_f = 2, last_vib = -1;
+    if (log && (f != last_f || vib != last_vib))
+        printf("[ffb] frame %llu  reg %02X = %02X  force %+.2f  vibration %.2f  shake %.2f  wheel %d\n",
+               (unsigned long long)g_frame, g_drive.reg(), g_drive.value(), f, vib, shake, int(g_inputs.steer));
+    last_f = f, last_vib = vib;
+    // A steering wheel (wheel.cpp), smoothed over a few frames, with the sign
+    // it had when this was the motor byte read as a level (0x40, a force to
+    // the right, gave -0.5); ffb_invert in wheel.ini turns it round
     static float force = 0;
-    force += 0.5f * ((float(m[0]) - 128.0f) / 128.0f - force);
+    force += 0.5f * (-f - force);
     wheel_set_force(std::clamp(force, -1.0f, 1.0f), shake);
+    pad_rumble_frame(std::min(1.0f, shake * 2.5f), g_in_attract);
 }
 
 void rt_event(Ctx& c) {
@@ -1283,6 +1299,42 @@ void rt_event(Ctx& c) {
                     }
                 }
             }
+            {   // DIFFICULTY (menu, --difficulty): bits 19-21 of the operator settings word, the
+                // EEPROM's copy in RAM (docs/game_ram.md). The game reads it at each new game
+                // (into 0x22CF18) and picks the time table's row with it. Only the RAM copy:
+                // the EEPROM keeps the operator's own setting
+                const int d = g_opt.difficulty;
+                constexpr uint32_t kSettings = 0x4A9D18;
+                uint32_t w = rd32(kSettings), want = w;
+                if (d >= 0 && d <= 4) want = (want & ~0x00380000u) | (uint32_t(d) << 19);
+                // PLAY's race set-up, the same way: GAME MODE (0 NORMAL, 1 SPECIAL), DEFAULT VIEW
+                // (0 DRIVER, 1 BEHIND), SPEED (0 MPH, 1 KM/H), each one bit of that word
+                auto bit = [&](int v, uint32_t mask) {
+                    if (v >= 0) want = v ? want | mask : want & ~mask;
+                };
+                bit(g_opt.game_mode, 0x00000020);
+                bit(g_opt.default_view, 0x00040000);
+                bit(g_opt.speed_kmh, 0x00002000);
+                if (w != want) wr32(kSettings, want);
+                // DEFAULT VIEW is copied into the game's structure when a credit starts the
+                // game (0x2C7D4: +0x20, 0xC9 DRIVER, 0xCA BEHIND), before SELECT GAME, where
+                // PLAY finds it already: written there too while the selects are on
+                // (GAME MODE is read at the race set-up, 0x46AAC: the bit is enough)
+                const int32_t step = int32_t(rd32(SELECT_STEP));
+                if (g_opt.default_view >= 0 && !in_attract() && step >= 3 && step < 15) {
+                    const uint32_t view = g_opt.default_view ? 0xCA : 0xC9;
+                    if (rd32(0x22CF34) != view) wr32(0x22CF34, view);
+                }
+            }
+            {   // FREE PLAY (EXPERIENCE ARCADE ORIGINAL, its pause menu): bit 0x00200000 of the COIN
+                // ASSIGNMENTS word, the EEPROM's copy in RAM the game reads (0x4A9D10: the credit
+                // checks at 0x1958, 0x2CAF8...; the test menu edits a copy of it at 0x222CC4).
+                // Only the RAM copy, as DIFFICULTY: the EEPROM keeps the operator's own setting
+                constexpr uint32_t kCoins = 0x4A9D10, kFreePlay = 0x00200000;
+                const int f = g_opt.free_play;
+                uint32_t w = rd32(kCoins);
+                if (f >= 0 && bool(w & kFreePlay) != bool(f)) wr32(kCoins, f ? w | kFreePlay : w & ~kFreePlay);
+            }
             {   // SR2_POKE=ADDR=VALUE[@FROM[-TO]],...: a RAM word written every frame (from that frame on, or
                 // up to TO; finding the game's state, testing the achievements)
                 struct Poke { uint32_t addr, value; uint64_t from, to; };
@@ -1334,9 +1386,26 @@ void rt_event(Ctx& c) {
             debug_time_frame();
             attract_guard_frame();   // before the frame's picture is taken
             g_in_attract = in_attract();
+            {
+                bool wants = in_attract() || rd32(START_STEP) != 4;
+                if (wants != g_wants_start.exchange(wants))
+                    printf("[play] %s START (frame %llu)\n", wants ?"waits for" : "past", (unsigned long long)g_frame);
+            }
+            {
+                int car = !in_attract() && int32_t(rd32(SELECT_STEP)) == 9 ? int(rd32(SELECT_CAR) & 7) : -1;
+                if (car != g_car_select.exchange(car) && car >= 0)
+                    printf("[select] car %d (frame %llu)\n", car, (unsigned long long)g_frame);
+                bool name = !in_attract() && int32_t(rd32(SELECT_STEP)) == 15 && rd32(NAME_DONE) != 3;
+                if (name != g_name_entry.exchange(name))
+                    printf("[select] name entry %s (frame %llu)\n", name ? "on" : "off", (unsigned long long)g_frame);
+            }
             stats_frame();
+            telemetry_frame(g_opt.telemetry, g_opt.telemetry_format, g_opt.telemetry_port);
+            // The course of the race being run (round = course id + 6 x kind: championship,
+            // practice, attract; docs/game_ram.md): 5 is SWEDISH, the Snowy course
+            r3d_set_sr2_snowy(int32_t(rd32(G_ROUND)) % 6 == 5);
             video_snapshot();
-            bool boot_done = g_arcade_entry ? arcade_entry_frame() : (g_frame % 4 == 0 && boot_logo_up()) || g_frame > 3000;
+            bool boot_done = g_arcade_entry ? arcade_entry_frame() : (g_frame % 4 == 0 && boot_logo_up()) || g_frame > g_boot_from + 3000;
             if (g_boot_skip && boot_done) {
                 g_boot_skip = g_fast_idle = false;
                 g_sound.set_dsp_enabled(true);
@@ -1416,6 +1485,21 @@ void rt_event(Ctx& c) {
         }
     }
     schedule(c);
+    // ARCADE ORIGINAL's CREDIT changed (FREE PLAY / COIN): once the game is in its
+    // attract, the program restarts as on a cabinet whose operator changed the coin
+    // settings (as leaving the TEST menu does: exception() above), from its SEGA logo.
+    // Applied live, the attract wrote CREDIT 0 over FREE PLAY without clearing it
+    if (g_restart_program && !g_in_irq && !g_boot_skip && in_attract()) {
+        g_restart_program = false;
+        g_boot_skip = g_fast_idle = true;   // the power-on screens unseen, as at launch
+        g_boot_from = g_frame;
+        g_sound.set_dsp_enabled(false);
+        g_sound.set_muted(true);
+        printf("[play] CREDIT changed: the program restarts (frame %llu)\n", (unsigned long long)g_frame);
+        // 0x0: the program's own start, where leaving the TEST menu goes (0x4C enters the
+        // TEST menu first; writing the power-on sequence, -1, leaves the game stuck)
+        throw WarmRestart{0x0};
+    }
 }
 
 uint32_t rt_mfspr(Ctx& c, uint32_t spr) {

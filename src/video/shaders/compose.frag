@@ -4,32 +4,33 @@
 // Final composition: background 2D layers, 3D image and foreground 2D layers,
 // with black bars to preserve the Model 3 aspect ratio.
 // The 2D layers are upscaled with xBR (Hyllian's xBR-lv2), which rebuilds
-// smooth edges from the pixel art instead of blurring or blocking it.
+// smooth edges from the pixel art instead of blurring or blocking it; with the
+// HD HUD off (or --pixel2d) as plain, even pixels (sharp_pixels).
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
 layout(set = 0, binding = 0) uniform sampler2D scene3d;
 layout(set = 0, binding = 1) uniform sampler2D layer2d_front;
 layout(set = 0, binding = 2) uniform sampler2D layer2d_back;
-layout(set = 0, binding = 3) uniform sampler2D overlays[64];   // 2D replacement pictures (pack2d.h)
+layout(set = 0, binding = 3) uniform sampler2D overlays[256];   // 2D replacement pictures (pack2d.h)
 #define ATMOSPHERE_BINDING 4
 #include "atmosphere.glsl"
 layout(set = 0, binding = 5) uniform sampler2D text_atlas;   // high-resolution text (text_hd.h)
 layout(set = 0, binding = 6) uniform sampler2D text_cells;
-layout(set = 0, binding = 8) uniform sampler2D bloom;   // blurred glow of luminous surfaces (bloom.frag)
+layout(set = 1, binding = 0) uniform sampler2D bloom;   // blurred glow of luminous surfaces (bloom.frag)
 layout(set = 0, binding = 7) uniform sampler2D scene3d_alpha;   // alpha of the 3D image, in red
 layout(set = 0, binding = 9) uniform sampler2D sky_coords;   // backdrop replacements (sky_pack.h, tilegen.h)
-layout(set = 0, binding = 12) uniform sampler2D diffusion;   // the picture behind the HUD, blurred (bloom.frag)
-layout(set = 0, binding = 11) uniform sampler2D exposure_log;   // 1x1: average log brightness of the 3D image, eased
-layout(set = 0, binding = 13) uniform sampler2D bloom_tight;   // the same glow, blurred only a little (halos)
+layout(set = 1, binding = 2) uniform sampler2D diffusion;   // the picture behind the HUD, blurred (bloom.frag)
+layout(set = 1, binding = 1) uniform sampler2D exposure_log;   // 1x1: average log brightness of the 3D image, eased
+layout(set = 1, binding = 3) uniform sampler2D bloom_tight;   // the same glow, blurred only a little (halos)
 
 layout(push_constant) uniform Compose {
     vec2 scale;       // image size relative to the window
     vec2 offset;      // top-left corner
-    vec2 sharpen;     // x: sharpening of the 3D image (0 = off)
+    vec2 sharpen;     // x: sharpening of the 3D image (0 = off); y: 1 = FXAA on the 3D image
     vec2 window;      // window size in pixels
     vec2 layer2d;     // x offset and width of the 4:3 2D area inside the 3D view
-    vec2 filter2d;    // x: 1 = xBR, 0 = plain pixels; y: window pixels per 2D pixel
-    vec4 hud;         // x: shift of the race HUD's corners to the screen edges (2D pixels, 0 = none); y: 1 = HDR lighting;
+    vec2 filter2d;    // x: 1 = xBR, 0 = plain pixels (sharp_pixels); y: window pixels per 2D pixel
+    vec4 hud;         // x: shift of the race HUD's corners towards the screen edges (2D pixels, 0 = none; at most a 16:9 view's); y: 1 = HDR lighting;
                       // z: brightness offset of the foreground layers (fades), applied to the overlays;
                       // w: 1 = background layers continue beside the 4:3 area
     vec4 sky;         // y > 0: glow mode, for the bloom: only the bright part of the sky, times y;
@@ -44,7 +45,7 @@ layout(push_constant) uniform Compose {
 } pc;
 
 const ivec2 SIZE_2D = ivec2(496, 384);
-const int BACK_MARGIN = 200;   // tilegen.h: the back layers extend beyond both sides
+const int BACK_MARGIN = 440;   // tilegen.h: the back layers extend beyond both sides
 const ivec2 SIZE_BACK = ivec2(496 + 2 * BACK_MARGIN, 384);
 
 // ---- xBR-lv2 ---------------------------------------------------------------
@@ -152,8 +153,22 @@ vec4 xbr(sampler2D layer, vec2 q, ivec2 size) {
     return cdist(E, res2) >= cdist(E, res1) ? res2 : res1;
 }
 
+// Plain pixels, all the same size: each 2D pixel a solid block, blended with
+// its neighbour over one window pixel at its edges. Plain nearest sampling at a
+// scale that is not whole (3.75 at 1440p) gives rows and columns of uneven
+// width, which makes the letters wobble
+vec4 sharp_pixels(sampler2D layer, vec2 q, ivec2 size) {
+    vec2 pos = q * vec2(size) - 0.5;
+    vec2 i = floor(pos);
+    vec2 f = clamp((pos - i - 0.5) * max(pc.filter2d.y, 1.0) + 0.5, 0.0, 1.0);
+    ivec2 p = ivec2(i);
+    vec4 top = mix(texel(layer, size, p), texel(layer, size, p + ivec2(1, 0)), f.x);
+    vec4 bottom = mix(texel(layer, size, p + ivec2(0, 1)), texel(layer, size, p + ivec2(1, 1)), f.x);
+    return mix(top, bottom, f.y);   // premultiplied: blends cleanly into transparency
+}
+
 vec4 layer(sampler2D tex, vec2 q, ivec2 size) {
-    return pc.filter2d.x > 0.5 ? xbr(tex, q, size) : texture(tex, q);
+    return pc.filter2d.x > 0.5 ? xbr(tex, q, size) : sharp_pixels(tex, q, size);
 }
 
 // ---- Backdrop replacements ---------------------------------------------------
@@ -161,7 +176,7 @@ vec4 layer(sampler2D tex, vec2 q, ivec2 size) {
 // which point of its 512x512 layer they show; the picture is sampled in
 // between at full resolution, following the game's scroll.
 
-const uint SKY_FIRST_SLOT = 56u;        // SkyPack::FIRST_SLOT
+const uint SKY_FIRST_SLOT = 248u;       // SkyPack::FIRST_SLOT
 
 // Which replacement picture and point each back layer pixel shows: sampled
 // in between. dx, dy: screen derivatives of qb * SIZE_BACK / 512 (explicit,
@@ -194,20 +209,48 @@ const int OVERLAY_ROW = 48;          // after the cells: the replacement picture
 vec4 replacement_pictures(vec4 under, vec2 pos, bool below_3d) {
     int pictures = int(texelFetch(text_cells, ivec2(0, OVERLAY_ROW), 0).r * 255.0 + 0.5);
     for (int i = 0; i < pictures; i++) {
+        // its box first: most pixels are outside every picture
+        vec4 rect = round(texelFetch(text_cells, ivec2(1 + 2 * i, OVERLAY_ROW), 0) * 255.0) * 8.0;
+        vec2 r = (pos - rect.xy) / (rect.zw - rect.xy);
+        if (any(lessThan(r, vec2(0.0))) || any(greaterThanEqual(r, vec2(1.0)))) continue;
         vec4 info = texelFetch(text_cells, ivec2(2 + 2 * i, OVERLAY_ROW), 0);
         if ((info.g > 0.5) != below_3d) continue;
+        float cover = 1.0;
         if (info.b * 255.0 > 0.5) {
             // a lit state (pack2d.h): only in the cells marked with its slot
             ivec2 cell = clamp(ivec2(pos / 8.0), ivec2(0), SIZE_2D / 8 - 1);
             vec4 mark = texelFetch(text_cells, ivec2(cell.x * TEXT_CELL_TEXELS + 1, cell.y), 0);
             if (mark.a < 0.5 || abs(mark.r - info.r) > 0.5 / 255.0) continue;
+            // with a segment map (R: its slot, B: the last lit segment): lit where
+            // the map's number is up to that one, smoothed over the window pixel
+            // (four samples of the map, whose numbers cannot be filtered)
+            vec4 seg = texelFetch(text_cells, ivec2(cell.x * TEXT_CELL_TEXELS + 2, cell.y), 0);
+            bool numbered = false;
+            if (seg.a > 0.5) {
+                uint map = uint(seg.r * 255.0 + 0.5), last = uint(seg.b * 255.0 + 0.5);
+                ivec2 size = textureSize(overlays[nonuniformEXT(map)], 0);
+                vec2 quarter = 0.25 / (max(pc.filter2d.y, 1e-3) * (rect.zw - rect.xy));
+                int lit = 0, counted = 0;
+                for (int k = 0; k < 4; k++) {
+                    vec2 at = r + quarter * vec2((k & 1) * 2 - 1, (k & 2) - 1);
+                    ivec2 t = clamp(ivec2(at * vec2(size)), ivec2(0), size - 1);
+                    uint n = uint(texelFetch(overlays[nonuniformEXT(map)], t, 0).r * 255.0 + 0.5);
+                    if (n == 0u) continue;
+                    counted++;
+                    lit += int(n <= last);
+                }
+                numbered = counted > 0;
+                if (numbered) cover = float(lit) / float(counted);
+                if (cover <= 0.0) continue;
+            }
+            // else only some of its 2x2-pixel blocks (G, B: bit y * 4 + x; none = the whole cell)
+            uint blocks = uint(mark.g * 255.0 + 0.5) << 8 | uint(mark.b * 255.0 + 0.5);
+            ivec2 block = clamp(ivec2((pos - vec2(cell) * 8.0) / 2.0), ivec2(0), ivec2(3));
+            if (!numbered && blocks != 0u && ((blocks >> uint(block.y * 4 + block.x)) & 1u) == 0u) continue;
         }
-        vec4 rect = round(texelFetch(text_cells, ivec2(1 + 2 * i, OVERLAY_ROW), 0) * 255.0) * 8.0;
-        vec2 r = (pos - rect.xy) / (rect.zw - rect.xy);
-        if (all(greaterThanEqual(r, vec2(0.0))) && all(lessThan(r, vec2(1.0)))) {
-            vec4 o = texture(overlays[nonuniformEXT(uint(info.r * 255.0 + 0.5))], r);
-            under = under * (1.0 - o.a) + vec4(clamp(o.rgb + pc.hud.z, 0.0, 1.0) * o.a, o.a);
-        }
+        vec4 o = texture(overlays[nonuniformEXT(uint(info.r * 255.0 + 0.5))], r);
+        o.a *= cover;
+        under = under * (1.0 - o.a) + vec4(clamp(o.rgb + pc.hud.z, 0.0, 1.0) * o.a, o.a);
     }
     return under;
 }
@@ -261,6 +304,68 @@ float exposure() {
     return clamp(pow(0.17 / max(average, 1e-3), 0.35), least, max(least, 1.15));
 }
 
+// ---- FXAA (after Timothy Lottes' FXAA 3.11, quality preset 12) ----------------
+// Anti-aliasing for cards without DLAA: finds the edges in the finished 3D
+// image by their brightness and samples across them. Far cheaper than MSAA on
+// an old card, a little softer.
+
+float fxaa_luma(vec2 q) {
+    float l = dot(texture(scene3d, q).rgb, vec3(0.299, 0.587, 0.114));
+    return sqrt(l / (1.0 + l));   // HDR values to a perceptual 0..1
+}
+
+// Where to sample the 3D image at p (p itself away from edges)
+vec2 fxaa(vec2 p) {
+    vec2 t = 1.0 / vec2(textureSize(scene3d, 0));
+    float lM = fxaa_luma(p);
+    float lN = fxaa_luma(p - vec2(0.0, t.y)), lS = fxaa_luma(p + vec2(0.0, t.y));
+    float lW = fxaa_luma(p - vec2(t.x, 0.0)), lE = fxaa_luma(p + vec2(t.x, 0.0));
+    float lo = min(lM, min(min(lN, lS), min(lW, lE))), hi = max(lM, max(max(lN, lS), max(lW, lE)));
+    float range = hi - lo;
+    if (range < max(0.0833, hi * 0.166)) return p;
+    float lNW = fxaa_luma(p - t), lSE = fxaa_luma(p + t);
+    float lNE = fxaa_luma(p + vec2(t.x, -t.y)), lSW = fxaa_luma(p + vec2(-t.x, t.y));
+    // Sub-pixel aliasing (thin lines, single pixels): how far the centre is from its neighbours
+    float sub = clamp(abs((2.0 * (lN + lS + lW + lE) + lNW + lNE + lSW + lSE) / 12.0 - lM) / range, 0.0, 1.0);
+    sub = smoothstep(0.0, 1.0, sub);
+    sub = sub * sub * 0.75;
+    // The edge's direction, and its side the steeper one
+    float edge_h = abs(lNW + lSW - 2.0 * lW) + 2.0 * abs(lN + lS - 2.0 * lM) + abs(lNE + lSE - 2.0 * lE);
+    float edge_v = abs(lNW + lNE - 2.0 * lN) + 2.0 * abs(lW + lE - 2.0 * lM) + abs(lSW + lSE - 2.0 * lS);
+    bool horz = edge_h >= edge_v;
+    float across = horz ? t.y : t.x;
+    float l1 = horz ? lN : lW, l2 = horz ? lS : lE;
+    bool first = abs(l1 - lM) >= abs(l2 - lM);
+    float grad = 0.25 * max(abs(l1 - lM), abs(l2 - lM));
+    if (first) across = -across;
+    float l_edge = 0.5 * ((first ? l1 : l2) + lM);
+    // Along the edge both ways, in growing steps, to where it ends
+    vec2 e = p + (horz ? vec2(0.0, 0.5 * across) : vec2(0.5 * across, 0.0));
+    vec2 along = horz ? vec2(t.x, 0.0) : vec2(0.0, t.y);
+    vec2 p1 = e - along, p2 = e + along;
+    float d1 = fxaa_luma(p1) - l_edge, d2 = fxaa_luma(p2) - l_edge;
+    bool done1 = abs(d1) >= grad, done2 = abs(d2) >= grad;
+    for (int i = 1; i < 8 && !(done1 && done2); i++) {
+        float k = i == 1 ? 1.5 : i < 6 ? 2.0 : i == 6 ? 4.0 : 8.0;
+        if (!done1) {
+            p1 -= along * k;
+            d1 = fxaa_luma(p1) - l_edge;
+            done1 = abs(d1) >= grad;
+        }
+        if (!done2) {
+            p2 += along * k;
+            d2 = fxaa_luma(p2) - l_edge;
+            done2 = abs(d2) >= grad;
+        }
+    }
+    float dist1 = horz ? p.x - p1.x : p.y - p1.y, dist2 = horz ? p2.x - p.x : p2.y - p.y;
+    bool near1 = dist1 < dist2;
+    // Only the end where the edge turns away from the centre's side
+    bool good = ((near1 ? d1 : d2) < 0.0) != (lM < l_edge);
+    float shift = max(good ? 0.5 - min(dist1, dist2) / (dist1 + dist2) : 0.0, sub);
+    return p + (horz ? vec2(0.0, shift * across) : vec2(shift * across, 0.0));
+}
+
 void main() {
     if (pc.sky.w > 3.5) {   // nothing to show (R3DRenderer::sr2_between_screens)
         color = vec4(0.0, 0.0, 0.0, 1.0);
@@ -282,14 +387,16 @@ void main() {
     vec2 p = (uv - pc.offset) / pc.scale;
     vec3 c = vec3(0.0);
     if (p.x >= 0.0 && p.y >= 0.0 && p.x <= 1.0 && p.y <= 1.0) {
-        vec4 s = texture(scene3d, p);
+        // FXAA: the 3D image (and its alpha, premultiplied alike) sampled across the edges
+        vec2 pf = pc.sharpen.y > 0.5 ? fxaa(p) : p;
+        vec4 s = texture(scene3d, pf);
         // With DLAA the alpha comes from its own anti-aliasing pass, steady
         // from frame to frame like the colour
-        s.a = texture(scene3d_alpha, p).r;
+        s.a = texture(scene3d_alpha, pf).r;
         // Sharpening (SHARPEN), contrast adaptive like AMD's CAS: detail comes
         // back after the anti-aliasing and the diffusion, flat areas and
-        // strong edges are left alone (no halos)
-        if (pc.sharpen.x > 0.0 && s.a > 0.0) {
+        // strong edges are left alone (no halos); not on the edges FXAA smoothed
+        if (pc.sharpen.x > 0.0 && s.a > 0.0 && pf == p) {
             vec2 t = 1.0 / vec2(textureSize(scene3d, 0));
             vec3 a = texture(scene3d, p - vec2(0.0, t.y)).rgb, b = texture(scene3d, p - vec2(t.x, 0.0)).rgb;
             vec3 d = texture(scene3d, p + vec2(t.x, 0.0)).rgb, e = texture(scene3d, p + vec2(0.0, t.y)).rgb;
@@ -328,8 +435,11 @@ void main() {
         float shift = pc.hud.x;
         float row = q.y * 384.0;
         // Where the foreground's replacement pictures are looked up (2D pixels):
-        // moved with the HUD like the foreground itself (-1: none there)
-        vec2 pic_pos = vec2((p.x - pc.layer2d.x) / pc.layer2d.y * 496.0, p.y * 384.0);
+        // moved with the HUD like the foreground itself (-1: none there).
+        // Beside the 4:3 area the outermost column is repeated, as for the
+        // foreground: a picture over the whole screen (FOREST's START!!) fills
+        // the sides like the game's own screens instead of leaving them black
+        vec2 pic_pos = vec2(q.x * 496.0, p.y * 384.0);
         if (shift > 0.0) {
             // The race HUD to the corners: on top the times (left)
             // and the position / stage top 3 (right), the time left and the

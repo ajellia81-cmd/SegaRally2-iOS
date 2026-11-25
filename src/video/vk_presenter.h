@@ -35,9 +35,28 @@ public:
     std::string device_name() const { return device_name_; }
     // The device has ray queries and acceleration structures (ray traced effects)
     bool ray_query() const { return ray_query_; }
+    // Sampled images can be bound with update-after-bind (higher descriptor limits)
+    bool update_after_bind() const { return update_after_bind_; }
+    bool independent_blend() const { return independent_blend_; }   // the device feature, on when the GPU has it
     HWND hwnd() const { return hwnd_; }
-    void toggle_fullscreen();
+    void toggle_fullscreen();   // F11 / Alt+Enter: the window, or the last full-screen mode
     bool fullscreen() const { return fullscreen_; }
+    // MODE: 0 a window (w x h inside, 0: as it is), 1 borderless at the
+    // desktop's resolution, 2 exclusive full screen: the monitor set to w x h
+    // (0: the desktop's) while the game runs. SR2_DISPLAY_DRYRUN=1 (tests):
+    // the window stays as it is, a mode is only checked with Windows (CDS_TEST)
+    void set_mode(int mode, int w, int h);
+    int mode() const { return mode_; }
+    // VSYNC: on, FIFO (no tearing); off, MAILBOX if the driver has it, else
+    // IMMEDIATE (less latency, may tear without G-SYNC / FreeSync)
+    // ADAPTIVE: FIFO_RELAXED (a late picture goes out at once), FIFO without it
+    void set_vsync(int mode) {   // 1 on, 2 adaptive, 0 off
+        if (mode != vsync_) vsync_ = mode, resized_ = true;   // the swapchain made again
+    }
+    // The monitor's whole area (the desktop's resolution) and the window's inside
+    RECT monitor_rect() const;
+    // The monitor's resolutions (its modes, each size once, smallest first)
+    std::vector<std::pair<int, int>> display_modes() const;
     void close() { quit_ = true; }
 
     // Sees key presses and mouse messages first; returning true swallows
@@ -50,10 +69,11 @@ public:
     VkInstance instance() const { return instance_; }
     VkDevice device() const { return device_; }
     VkPhysicalDevice gpu() const { return gpu_; }
-    VkQueue queue() const { return queue_; }
-    VkCommandPool pool() const { return pool_; }
     VkFormat swap_format() const { return format_; }
     uint32_t find_memory(uint32_t type_bits, VkMemoryPropertyFlags flags) const;
+    // A shader module from SPIR-V (the spv_* arrays glslang writes); VK_NULL_HANDLE if it fails
+    VkShaderModule shader_module(const uint32_t* code, size_t bytes) const;
+    VkImage current_image() const { return current_image_; }   // the swapchain image frame() is recording
     // Runs one-off commands (initial uploads) and waits
     void run_once(const std::function<void(VkCommandBuffer)>& fn);
     // Saves the next presented frame as a BMP file
@@ -92,12 +112,19 @@ public:
     double limit_queue(int depth, uint64_t timeout_ns);
 
 private:
+    VkImage current_image_ = VK_NULL_HANDLE;
     bool create_swapchain();
     void destroy_swapchain();
     static LRESULT CALLBACK wndproc(HWND, UINT, WPARAM, LPARAM);
 
     HWND hwnd_ = nullptr;
     bool quit_ = false, resized_ = false, fullscreen_ = false, show_cursor_ = false;
+    int mode_ = 0, full_mode_ = 1, full_w_ = 0, full_h_ = 0;   // the mode on; the last full-screen one (F11)
+    bool changed_display_ = false;   // the monitor is in another mode (exclusive full screen)
+    bool lost_display_ = false;      // ...given back while the game lost the focus
+    int vsync_ = 1;
+    void restore_display();
+    void on_activate(bool active);   // exclusive full screen: the desktop's mode while another window has the focus
     WINDOWPLACEMENT placement_{sizeof(WINDOWPLACEMENT)};
 
     VkInstance instance_ = VK_NULL_HANDLE;
@@ -126,6 +153,8 @@ private:
     LastFrame last_;
     bool present_wait_ = false;
     bool ray_query_ = false;
+    bool update_after_bind_ = false;
+    bool independent_blend_ = false;
     uint64_t present_id_ = 0, swapchain_first_id_ = 1;   // the first id presented to the current swapchain
     std::shared_mutex swapchain_mutex_;   // wait_present() against the swapchain being replaced
     VkBuffer capture_buffer_ = VK_NULL_HANDLE;

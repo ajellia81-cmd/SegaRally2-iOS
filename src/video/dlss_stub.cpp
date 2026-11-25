@@ -20,8 +20,13 @@ bool Dlaa::init(VkInstance, VkPhysicalDevice, VkDevice) {
 bool Dlaa::ensure_feature(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t, int) { return false; }
 
 bool Dlaa::evaluate(VkCommandBuffer, const Image&, const Image&, const Image&, const Image&, uint32_t, uint32_t,
-                    uint32_t, uint32_t, float, float, bool, int) {
+                    uint32_t, uint32_t, float, float, bool, int, uint32_t, uint32_t) {
     return false;
+}
+
+void Dlaa::configure(int mode, int preset) {
+    mode_ = mode;
+    preset_ = preset;
 }
 
 void Dlaa::shutdown() {}

@@ -38,7 +38,7 @@ struct Stats {
     int cars_finished = 0;                           // bit per model: a race finished with it
     int practice_courses = 0;                        // bit per course: a practice race finished on it
     int championships_won = 0;                       // finished 1st
-    int from_the_back = 0;                           // stages won from the last place on the grid
+    int from_the_back = 0;                           // championships won after starting a race last on the grid
     int manual_championships = 0;                    // finished with the manual gearbox
     int last_gasps = 0;                              // checkpoints reached with under 1 s left
     int records = 0;                                 // games that got into the records table
@@ -63,7 +63,7 @@ struct StatsView {
 };
 StatsView stats_view();
 std::vector<int> stats_take_new_achievements();   // unlocked since the last call, for the toast
-void stats_save();                  // at exit (it also saves by itself every 30 s of play and after each game)
+void stats_save();                  // at exit, waiting for the files (it also saves by itself as things change, the play time every 5 min)
 
 // Game thread
 void stats_frame();                 // every vblank

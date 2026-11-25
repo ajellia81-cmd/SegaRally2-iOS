@@ -1,10 +1,10 @@
 # Game RAM (Sega Rally 2)
 
 PowerPC RAM addresses (big-endian, 32-bit words unless said otherwise) for the
-game's race state, found for statistics and achievements (src/runtime/stats.cpp
-still holds Star Wars Trilogy's table). "Confirmed" means seen changing in real
-runs, not just read in the disassembly. Addresses of code are the original
-PowerPC ones (fn_XXXXXXXX in build/gen).
+game's race state, found for statistics and achievements (src/runtime/stats.cpp).
+"Confirmed" means seen changing in real runs, not just read in the disassembly.
+Addresses of code are the original PowerPC ones (fn_XXXXXXXX in build/gen).
+The addresses the port uses are named in src/runtime/game_ram.h.
 
 How it was found:
 
@@ -53,7 +53,7 @@ Base 0x22CF14 (`lis 0x23; addi -0x30EC`). Offsets are from the base.
 | 0x22CF1C | +0x08 | 3 bytes | Player's name (3 letters, '.' padded), copied at race set-up from 0x4C271C (fn_00046AAC). "..." when no name was given |
 | 0x22CF28 | +0x14 | int | The car in another numbering (NOT the model index: SELECT CAR 0, 1, 2, 3 gave 7, 4, 5, 2 here). Use 0x224324, the SELECT CAR choice, which stays set through the races: the model index (0 Peugeot 306, 1 Toyota Corolla, 2 Ford Escort, 3 Subaru Impreza, 4 Mitsubishi Lancer, 5 Lancia Stratos, 6 Toyota Celica and 7 Lancia Delta hidden) |
 | 0x22CF2C | +0x18 | int | Transmission (0 AT, 1 MT); 0x224334, the select's choice, is the same and is what stats.cpp reads |
-| 0x22CF48 | +0x34 | int | **Round** = course of the race being run, table 0xF244C: course id + 6 × kind. Kinds: championship (C_) 0-5, practice (P_) 6-11, attract (A_) 12-17, 18 = the championship ending scene. Course ids: 0 DESERT_OLD, 1 FOREST, **2 MOUNTAIN, 3 DESERT, 4 MONACO (Riviera), 5 SWEDISH (Snowy)**. Confirmed championship order: 3 Desert, 2 Mountain, 5 Snowy, 4 Riviera; practice Desert 9, Mountain 8, Riviera 10 |
+| 0x22CF48 | +0x34 | int | **Round** = course of the race being run, table 0xF244C: course id + 6 × kind. Kinds: championship (C_) 0-5, practice (P_) 6-11, attract (A_) 12-17, 18 = the championship ending scene. Course ids: 0 DESERT_OLD, 1 FOREST, **2 MOUNTAIN, 3 DESERT, 4 MONACO (Riviera), 5 SWEDISH (Snowy)**. Confirmed championship order: 3 Desert, 2 Mountain, 5 Snowy, 4 Riviera; practice Desert 9, Mountain 8, Riviera 10. SELECT COURSE's choice (0x224328) becomes the course id through the table at **0xF1F20** (3, 2, 4, 5; read by the race set-up 0x46AAC into +0x1C): no choice reaches 0 or 1. FOREST is the unused fifth stage found in 2026 (its own laps and championship times in the ROM; practice times only a 999 s placeholder, replaced in RAM by game_hooks.cpp). With FOREST on (`--no-forest` turns it off; never in ARCADE ORIGINAL) SELECT COURSE has a fifth card for it, after SNOWY: the carousel's hooks are in tools/game_hooks.py |
 | 0x22CF4C | +0x38 | int | Stages in this game: 4 championship, 1 practice |
 | 0x22CF50 | +0x3C | int | Laps of this race: 1 in championship stages except Riviera (2); practice 3 (Desert, Mountain), 5 (Riviera) |
 | 0x22CF54 | +0x40 | int | Sections per lap (8) |
@@ -120,6 +120,25 @@ detection is the time left (0x22CF88) going **up** while the clock counts
 (lap-line extensions don't move it). DEBUG TIME INFINITE holds the time left
 at its maximum, so it hides the jumps; the game is marked cheated then anyway.
 
+### Co-driver (pace notes)
+
+Each course's structure (table 0xE8408, 0x60 bytes per course id; the race
+set-up fn_0002BA30 keeps a pointer to it at +0x50) points at +0x5C to its
+pace notes, 24 bytes each, a negative track point ending the list:
+
+| Offset | Meaning |
+|---|---|
+| +0x00 | track point (0..255) where it is called: when +0xA4 equals it |
+| +0x04 | condition: -1 always, 1 first lap only, 2 not on the final lap, 3 jump crowd sounds by speed, 4 sound 0x2B, 5 the final lap's goal sound (0xF16D4) |
+| +0x08 | first word, 0..8: sound 168 + n, then the call after the frames in table 0xF160C |
+| +0x0C | HUD sign (-1 none): the 36 signs in alphabetical order of their records in the banked CROM (0 bridge ... 5 easy_left, 7 easy_right, 9 h_right, 14 k_right, 19/20 long_easy_left/right, 23 long_mid_left, 26 mid_left, 28 mid_right ...; tools/make_signs.py) |
+| +0x10 | second sign after it (-1 none; 0 bridge, 10 hazard) |
+| +0x14 | the call, a sound command (right-hand ones a0 18 xx, left-hand a0 19 xx at the same xx) |
+
+fn_0003E5C8 finds the next note at the start (index +0xC4, its point +0xC8),
+fn_0003E68C calls it. FOREST's list (0xE5090) has only the end: game_hooks.cpp
+writes FOREST its own and points its structure there.
+
 ## Finish, stage cleared, time up, championship result
 
 Confirmed sequence for each championship stage (forced runs, every 30 frames):
@@ -184,6 +203,125 @@ game's settings, need an input this script never gave, or belong to the link
 record" without it: rankingRank 0x22D608 >= 0 read once the phase leaves 1
 after a finished game (it is -1 after a time up), or a change in the
 0x4B2210 table.
+
+## Operator settings (EEPROM copy) and difficulty
+
+The game keeps the whole 93C46 EEPROM (64 words) in RAM at 0x4A9D00. The
+operator's GAME ASSIGNMENTS are one word at **0x4A9D18**:
+
+| Bits (mask) | Field |
+|---|---|
+| 0x80000000 | ADVERTISE |
+| (w >> 26) & 3 | CABINET |
+| (w >> 22) & 0xF | LINK TYPE |
+| **0x00380000** ((w >> 19) & 7) | **DIFFICULTY**: 0 NORMAL, 1 HARD, 2 VERY HARD, 3 VERY EASY, 4 EASY |
+| 0x00040000 | DEFAULT VIEW |
+| 0x00002000 | SPEED MPH / KMH |
+| 0x00000100 | DISPLAY URL |
+| 0x00000020 | GAME MODE |
+| 0x00000010 | COCKPIT REACTION |
+
+At each new game (code at 0x2CC2C) the difficulty is copied into 0x22CF18
+(game structure +0x04). Race set-up, fn_0004041C, picks with it a row of
+the time table (pointer per mode at 0xE8348: championship 0xE58C8, practice
+0xE62C8): the start time and then each checkpoint's extension, in frames,
+-1 ending the list. Championship rows are 0x80 bytes, one per difficulty in
+the game's numbering, with 16 bytes per course id. Only the time limits
+change, not the rivals. Seconds (read from the ROM; start, checkpoints):
+
+| Difficulty | Desert | Mountain | Snowy | Riviera |
+|---|---|---|---|---|
+| NORMAL | 50, 30 | 30, 27 | 30, 26 | 38, 34 |
+| HARD | 50, **28** | 30, 27 | 30, 26 | 38, 34 |
+| VERY HARD | 50, **26** | 30, 27 | 30, 26 | 38, 34 |
+| VERY EASY | 50, 30 | **32, 29** | **32, 28** | 38, 34 |
+| EASY | 50, 30 | **32**, 27 | **32**, 26 | 38, 34 |
+
+Confirmed in headless runs (`--difficulty X`, checkpoint forced with
+`SR2_POKE=22CFBC=110@5000-5001`): 0x22CF18 follows the option (3, 4, 0, 1,
+2), the Desert championship starts with 3000 frames (50 s) at every
+difficulty, and its first checkpoint adds 1800 frames (30 s) on NORMAL,
+EASY and VERY EASY, 1680 (28 s) on HARD and 1560 (26 s) on VERY HARD.
+
+Practice rows (0xE62C8) are 0x30 bytes per course id, 0x180 per difficulty.
+Every practice race starts with 60 s; only the **first** extension depends on
+the difficulty, and by much more than in the championship. Seconds (start,
+then each extension in order):
+
+| Difficulty | Desert | Mountain | Snowy | Riviera |
+|---|---|---|---|---|
+| NORMAL | 60, 20, 20, 30, 20, 30 | 60, 32, 25, 30, 25, 30 | 60, 30, 23, 26, 23, 26 | 60, 30, 30, 30, 30 |
+| HARD | 60, **18**, ... | 60, **30**, ... | 60, **28**, ... | 60, **28**, ... |
+| VERY HARD | 60, **13**, ... | 60, **25**, ... | 60, **23**, ... | 60, **23**, ... |
+| VERY EASY | 60, **35**, ... | 60, **47**, ... | 60, **45**, ... | 60, **45**, ... |
+| EASY | 60, **25**, ... | 60, **37**, ... | 60, **35**, ... | 60, **35**, ... |
+
+Confirmed in headless practice runs (`SR2_POKE=22432C=1@960-1100`, checkpoint
+forced with `22CFBC=110@5100-5101`): Desert starts with 3600 frames at every
+difficulty and its first checkpoint adds 2100 / 1500 / 1200 / 1080 / 780
+frames (35 / 25 / 20 / 18 / 13 s) on VERY EASY / EASY / NORMAL / HARD /
+VERY HARD.
+
+DIFFICULTY (PLAY > ARCADE CLASSIC's race set-up, `--difficulty`) rewrites these three
+bits of the RAM copy every frame when they differ (runtime.cpp); the EEPROM
+itself (save/eeprom.bin) keeps the operator's setting.
+
+The test menu's GAME ASSIGNMENTS rows (table at 0xF94xx: name, values,
+count, field) list each field's values in bit order, 0 first: SPEED
+0 MPH / 1 KM/H, DEFAULT VIEW 0 DRIVER / 1 BEHIND, GAME MODE 0 NORMAL /
+1 SPECIAL. Read back from RAM, the default word 0xC402B61F is KM/H, DRIVER,
+NORMAL, difficulty NORMAL. When each one is read:
+
+- SPEED: by the HUD as it draws, so the bit works at any time.
+- GAME MODE: at the race set-up (0x46AAC calls 0x2C854 / 0x2C978, which put
+  0/1 or 2/3 in the game structure's +0x00 and +0x10: 0 championship, 1
+  championship SPECIAL, 2 practice, 3 practice SPECIAL). The owner's manual:
+  "Setting of Laps... SPECIAL (more laps, a long-time game mode for events)".
+  The laps (+0x3C) come from the table at 0xE8388, 8 words per mode, one per
+  course (0x404BC): 1 lap (Riviera 2), SPECIAL 3 (Riviera 5); practice 3
+  (Riviera 5), SPECIAL 10. SPECIAL also started a Desert championship with
+  80 s instead of 50.
+- DEFAULT VIEW: copied at the credit (0x2C7D4, from the main loop at 0x2DD04)
+  into the game structure's +0x20 (0x22CF34): 0xC9 DRIVER, 0xCA BEHIND. PLAY
+  finds the game past that point, so the race set-up also writes 0x22CF34
+  while the selects are on (select step 3 to 14).
+
+### Coin assignments, FREE PLAY
+
+The COIN ASSIGNMENTS word is at **0x4A9D10** (EEPROM copy): bit
+**0x00200000 = FREE PLAY**, (w >> 22) & 0xFF the COIN/CREDIT SETTING number.
+The game tests the bit before it counts credits (0x1958, 0x1FE4, 0x27C4C,
+0x29E2C, 0x2CAF8, 0x663B4; credits at 0x4B21A0). The test menu edits a copy
+of it at 0x222CC4 (writing there changes nothing in the game). With the bit
+set the attract shows PRESS START BUTTON and FREE PLAY, and START alone
+begins a game.
+
+Changed while the attract is on screen, the game prints CREDIT 0 over FREE
+PLAY without clearing the line (CREDITL0.Y). ARCADE ORIGINAL therefore
+restarts the program once the attract is reached, as a cabinet does when the
+operator leaves the TEST menu: at **0x0** (the program's start: power-on,
+SEGA logo, attract, about 400 frames). 0x4C is not that: it enters the TEST
+menu first (0x137124 = 1, then 0x7107C), which ran unseen for some 1900
+frames. Writing -1 (power on) to the main sequence's next entry leaves the
+game stuck.
+
+## Course objects (spectators, cameramen, signs...)
+
+Everything placed along a course that is not part of its scenery models:
+the sprite crowd (SF_NA_*, S_OG_HITO*, SA_W_GUY*), the moving crowd (MM_*),
+cameramen, camera flashes, cones, boards, signs (KANBAN_*), tyre barriers,
+snowmen, animals, birds, the truck... Names in the type table **0xA0824**
+(16 bytes a type: kind 0-4, argument, handler, name pointer).
+
+| Address | What it is |
+|---|---|
+| 0x497CCC | The course's object table, copied from the fixed CROM at the race set-up (Mountain from 0x1002D0, Desert near 0x111E80). 24 bytes an object: u16 type, s16 track point (negative: always on), float x, y, z, u32 attribute, u32 flags (bit 0x8000 = in the scene this frame, 0x2000 = not drawn). Ends with type 0xBB |
+| 0xF54CC / 0xF54D0 | -20.0 / **100.0**: fn_0005D784 puts an object in the scene only between 20 m behind and 100 m ahead of the camera (camera depth), inside the view with 5 m to spare (0xF54D4). OBJECT DISTANCE replaces the 100 (tools/game_hooks.py) |
+| 0xF54DC | 100.0: out of the race (fn_0005D888: attract, replay, podium) the kind-4 objects' distance. OBJECT DISTANCE too |
+
+fn_0005D9F4 runs every frame: the test above for each object, then
+fn_0005D534 draws those with flags & 0xA000 == 0x8000 (per kind; Real3D
+instance nodes from 0x805000 in culling RAM, list 0x804031).
 
 ## Other fields seen (not needed so far)
 

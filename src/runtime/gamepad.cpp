@@ -1,16 +1,19 @@
 #include "gamepad.h"
 
+#include "bindings.h"
 #include "wheel.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 #include <SDL3/SDL.h>
 
 namespace {
 
-constexpr float STICK_DEAD = 0.15f;
+constexpr float STICK_DEAD = 0.15f;   // the menus' (and the old steering's)
+constexpr float STEER_DEAD = 0.04f;   // the steering's: Supermodel's is 3%
 constexpr float TRIGGER_DOWN = 0.35f;
 constexpr float RUMBLE_STRENGTH[4] = {0.0f, 0.45f, 0.75f, 1.0f};
 
@@ -18,11 +21,18 @@ float axis(SDL_Gamepad* p, SDL_GamepadAxis a) { return float(SDL_GetGamepadAxis(
 
 }  // namespace
 
+double g_vibration_seconds = 0;
+
 bool Gamepads::init() {
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
     // The focus is the window's business (poll's `focused`); SDL has no window
     // of its own to judge it by
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    // XInput has no way to the motors in an Xbox One / Series pad's triggers;
+    // SDL's raw input driver reaches them through Windows.Gaming.Input (its
+    // default correlation). Bluetooth pads go through SDL's HIDAPI driver,
+    // which drives them on its own when their firmware allows
+    if (trigger_rumble) SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "1");
     if (!SDL_Init(SDL_INIT_GAMEPAD)) {
         printf("[gamepad] SDL could not initialize gamepads: %s\n", SDL_GetError());
         return false;
@@ -66,8 +76,9 @@ void Gamepads::open(uint32_t id) {
     st.connected = true;
     const char* name = SDL_GetGamepadName(p);
     st.name = name ? name : "Gamepad";
+    s.trigger_motors = SDL_GetBooleanProperty(SDL_GetGamepadProperties(p), SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
     changed_ = true;
-    printf("[gamepad] %d: %s\n", i + 1, st.name.c_str());
+    printf("[gamepad] %d: %s%s\n", i + 1, st.name.c_str(), s.trigger_motors ? " (trigger rumble)" : "");
 }
 
 void Gamepads::close(uint32_t id) {
@@ -94,7 +105,9 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
         default: break;
         }
     }
-    wheels_poll(focused && !menu);
+    wheels_poll(focused, menu, keys_);
+    uint64_t held_mask = 0;   // what is held on any pad, for OPTIONS > CONTROLS' rows
+    const bool listening = focused && menu && bind_listening_pad();
     for (int i = 0; i < MAX; i++) {
         Slot& s = slot_[i];
         PadState& st = state_[i];
@@ -116,12 +129,48 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
         bool rt = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > int(TRIGGER_DOWN * 32767);
         auto down = [&](SDL_GamepadButton b) { return now_down[b]; };
         auto pressed = [&](SDL_GamepadButton b) { return now_down[b] && !s.buttons[b]; };
+        for (int b = 0; b < 32; b++)
+            if (now_down[b]) held_mask |= pad_bit(b);
+        if (lt) held_mask |= pad_bit(PAD_LT);
+        if (rt) held_mask |= pad_bit(PAD_RT);
+        // The car's actions as OPTIONS > CONTROLS sets them (bindings.h): held
+        // (a trigger past a third), and the pedals' travel (a trigger's own, a button all of it)
+        auto input_down = [&](int in) { return in == PAD_LT ? lt : in == PAD_RT ? rt : in >= 0 && in < 32 && now_down[in]; };
+        auto act_down = [&](int a) {
+            const int* in = bind_pad(a);
+            for (int k = 0; k < BIND_SLOTS; k++)
+                if (input_down(in[k])) return true;
+            return false;
+        };
+        auto act_pedal = [&](int a) {
+            const int* in = bind_pad(a);
+            float v = 0;
+            for (int k = 0; k < BIND_SLOTS; k++) {
+                if (in[k] == PAD_LT || in[k] == PAD_RT) {
+                    float t = std::clamp(axis(p, in[k] == PAD_LT ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER), 0.0f, 1.0f);
+                    v = std::max(v, t < 0.04f ? 0.0f : t);
+                } else if (input_down(in[k])) {
+                    v = 1;
+                }
+            }
+            return v;
+        };
 
         if (!focused || menu) {
             st.view = st.handbrake = false;
             st.steer = st.gas = st.brake = 0;
+            st.select_dir = 0;
         }
-        if (focused && menu) {
+        if (listening) {   // OPTIONS > CONTROLS waits for a button: the next one pressed (START / BACK: cancel)
+            s.dir = -1;
+            if (pressed(SDL_GAMEPAD_BUTTON_START) || pressed(SDL_GAMEPAD_BUTTON_BACK)) bind_listen_cancel();
+            else {
+                for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT && b < 32; b++)
+                    if (pressed(SDL_GamepadButton(b))) bind_take_pad(b);
+                if (lt && !s.left_trigger) bind_take_pad(PAD_LT);
+                if (rt && !s.right_trigger) bind_take_pad(PAD_RT);
+            }
+        } else if (focused && menu) {
             SDL_GamepadButton accept = s.nintendo ? SDL_GAMEPAD_BUTTON_EAST : SDL_GAMEPAD_BUTTON_SOUTH;
             SDL_GamepadButton back = s.nintendo ? SDL_GAMEPAD_BUTTON_SOUTH : SDL_GAMEPAD_BUTTON_EAST;
             if (pressed(accept)) keys_.push_back(PadKey::Accept);
@@ -155,27 +204,39 @@ void Gamepads::poll(int rumble, bool focused, bool menu) {
             s.dir = -1;
             st.start = pressed(SDL_GAMEPAD_BUTTON_START);
             st.back = pressed(SDL_GAMEPAD_BUTTON_BACK);
-            // Steering: the left stick's x past a small dead zone, a
-            // gentler response near the centre, the whole lock at the edge
+            // Steering: the left stick's x, straight (as Supermodel: a dead
+            // zone of a few percent, the wheel's angle following the stick's,
+            // the whole lock at the edge). SR2_STICK_CURVE=1: the response
+            // before (a 15% dead zone, gentle near the centre, steep at the edge)
+            static const bool curve = getenv("SR2_STICK_CURVE") && atoi(getenv("SR2_STICK_CURVE")) == 1;
             float sx = axis(p, SDL_GAMEPAD_AXIS_LEFTX);
             float m = std::fabs(sx);
-            float t = m < STICK_DEAD ? 0.0f : std::min((m - STICK_DEAD) / (0.95f - STICK_DEAD), 1.0f);
-            t *= 0.35f + 0.65f * t;
+            float t;
+            if (curve) {
+                t = m < STICK_DEAD ? 0.0f : std::min((m - STICK_DEAD) / (0.95f - STICK_DEAD), 1.0f);
+                t *= 0.35f + 0.65f * t;
+            } else {
+                t = m < STEER_DEAD ? 0.0f : std::min((m - STEER_DEAD) / (0.98f - STEER_DEAD), 1.0f);
+            }
             st.steer = sx < 0 ? -t : t;
-            auto pedal = [&](SDL_GamepadAxis a, SDL_GamepadButton b) {
-                float v = std::clamp(axis(p, a), 0.0f, 1.0f);
-                return down(b) ? 1.0f : v < 0.04f ? 0.0f : v;
-            };
-            st.gas = pedal(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, SDL_GAMEPAD_BUTTON_SOUTH);
-            st.brake = pedal(SDL_GAMEPAD_AXIS_LEFT_TRIGGER, SDL_GAMEPAD_BUTTON_EAST);
-            st.shift_up = pressed(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
-            st.shift_down = pressed(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
-            st.view = down(SDL_GAMEPAD_BUTTON_NORTH);
-            st.handbrake = down(SDL_GAMEPAD_BUTTON_WEST);
+            // Left / right for SELECT CAR: the d-pad, or the stick past half
+            // way (let go once back under a third, so it does not flicker)
+            if (m >= 0.5f) s.stick_dir = sx < 0 ? -1 : 1;
+            else if (m < 0.33f) s.stick_dir = 0;
+            int dpad = int(down(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) - int(down(SDL_GAMEPAD_BUTTON_DPAD_LEFT));
+            st.select_dir = dpad != 0 ? dpad : s.stick_dir;
+            st.gas = act_pedal(ACT_GAS);
+            st.brake = act_pedal(ACT_BRAKE);
+            st.shift_up = act_down(ACT_SHIFT_UP) && !s.act_was[ACT_SHIFT_UP];
+            st.shift_down = act_down(ACT_SHIFT_DOWN) && !s.act_was[ACT_SHIFT_DOWN];
+            st.view = act_down(ACT_VIEW);
+            st.handbrake = act_down(ACT_HANDBRAKE);
         }
+        for (int a = 0; a < ACT_COUNT; a++) s.act_was[a] = act_down(a);
         std::copy(std::begin(now_down), std::end(now_down), std::begin(s.buttons));
         s.left_trigger = lt, s.right_trigger = rt;
     }
+    bind_pad_held(held_mask);
 }
 
 std::vector<PadKey> Gamepads::take_keys() {
@@ -185,8 +246,29 @@ std::vector<PadKey> Gamepads::take_keys() {
 }
 
 void Gamepads::rumble(int i, float low, float high, int ms) {
-    if (!slot_[i].pad) return;
+    if (!slot_[i].pad || rumble_ <= 0) return;   // (VIBRATION OFF: nothing to send)
+    // The call waits for the pad (on Xbox pads SDL sends it at once, with
+    // XInput): timed, so a slow one shows in out/slow.log
     float k = RUMBLE_STRENGTH[std::clamp(rumble_, 0, 3)] * 65535.0f;
+    Uint64 from = SDL_GetTicksNS();
     SDL_RumbleGamepad(slot_[i].pad, Uint16(std::clamp(low, 0.0f, 1.0f) * k), Uint16(std::clamp(high, 0.0f, 1.0f) * k),
                       Uint32(ms));
+    g_vibration_seconds += double(SDL_GetTicksNS() - from) * 1e-9;
+}
+
+void Gamepads::rumble_triggers(int i, float left, float right, int ms) {
+    Slot& s = slot_[i];
+    if (!s.pad || rumble_ <= 0) return;
+    // (raw input knows a pad's trigger motors only once it has matched the
+    // pad with Windows.Gaming.Input, after its first input: asked again then)
+    if (!s.trigger_motors) {
+        s.trigger_motors = SDL_GetBooleanProperty(SDL_GetGamepadProperties(s.pad), SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
+        if (!s.trigger_motors) return;
+        printf("[gamepad] %d: trigger rumble\n", i + 1);
+    }
+    float k = RUMBLE_STRENGTH[std::clamp(rumble_, 0, 3)] * 65535.0f;
+    Uint64 from = SDL_GetTicksNS();
+    SDL_RumbleGamepadTriggers(s.pad, Uint16(std::clamp(left, 0.0f, 1.0f) * k), Uint16(std::clamp(right, 0.0f, 1.0f) * k),
+                              Uint32(ms));
+    g_vibration_seconds += double(SDL_GetTicksNS() - from) * 1e-9;
 }

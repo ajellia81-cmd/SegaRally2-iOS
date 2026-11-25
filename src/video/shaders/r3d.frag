@@ -21,7 +21,7 @@ layout(location = 9) in vec4 clip_before;
 layout(location = 10) in vec4 dust_light;   // DUST: the light bounced onto it (rgb) and how much of the sun reaches it (a), r3d.vert
 
 layout(set = 0, binding = 0) uniform usampler2D texture_ram;   // 2048x2048 R16_UINT
-layout(set = 0, binding = 1) uniform sampler2D replacements[4096];   // texture pack, RGBA8 with mips
+layout(set = 0, binding = 1) uniform sampler2D replacements[];   // texture pack, RGBA8 with mips
 
 layout(push_constant) uniform Viewport {
     mat4 proj;
@@ -31,14 +31,16 @@ layout(push_constant) uniform Viewport {
     vec4 quality;
 } vp;
 
-layout(set = 0, binding = 4) uniform sampler2D shadow_map;     // sun shadows (depth seen from the sun)
-layout(set = 0, binding = 5) uniform sampler2D scene_depth;    // the opaque world's depth (soft particles)
+layout(set = 1, binding = 0) uniform sampler2D shadow_map;     // sun shadows (depth seen from the sun)
+layout(set = 1, binding = 1) uniform sampler2D scene_depth;    // the opaque world's depth (soft particles)
+layout(set = 1, binding = 2) uniform sampler2D car_probes;     // the cars' light probes (car_probe.frag)
 
 #define ATMOSPHERE_BINDING 2
 #include "atmosphere.glsl"
 
 layout(location = 0) out vec4 out_color;
-layout(location = 1) out vec2 out_motion;   // DLAA only: pixels from here to the previous image
+layout(location = 1) out vec4 out_motion;   // DLAA only: pixels from here to the previous image; w how much
+                                            // of it a see-through surface lays over what is behind (blended)
 layout(location = 2) out vec4 out_glow;     // bloom: the bright part of luminous world surfaces
 
 #include "r3d_texture.glsl"
@@ -50,7 +52,8 @@ layout(location = 2) out vec4 out_glow;     // bloom: the bright part of luminou
 // Sun shadows (not in the original): how much of the sun reaches this point
 // of the game world, 0..1, from the shadow map drawn from the sun this frame
 bool sun_shadowed() {
-    return atm.shadow.x > 0.0 && vp.sun.w > 0.0 && (flags & (WORLD | NO_SHADOW)) == WORLD;
+    return atm.shadow.x > 0.0 && vp.sun.w > 0.0 &&
+           ((flags & (WORLD | NO_SHADOW)) == WORLD || ((flags & CAR) != 0u && atm.car_shadow.x > 0.0));
 }
 #ifdef RAY_TRACING
 // Whether they are traced here (traced_shadow) instead
@@ -93,6 +96,33 @@ float sun_shadow(vec3 n) {
     return mix(1.0, lit, atm.shadow.x * fade);
 }
 
+// Light probes on the cars (not in the original): the sun and the sky at the
+// car this pixel is on (CAR: the cars in viewports of their own, which take
+// none of the world's shadows), from its three slices along it (rear,
+// middle, front: car_probe.frag) blended by where along the car the pixel
+// lies. (1, 1) elsewhere, or with them off
+vec2 car_light() {
+    int cars = int(atm.car_probe.x + 0.5);
+    if (cars == 0 || (flags & CAR) == 0u) return vec2(1.0);
+    // The car whose middle is nearest (each car's own viewport: they are far
+    // apart next to their size)
+    int best = 0;
+    float nearest = 1e30;
+    for (int c = 0; c < CAR_PROBE_CARS; c++) {
+        if (c >= cars) break;
+        vec3 d = view_pos - atm.car_box[c * 3].xyz;
+        if (dot(d, d) < nearest) nearest = dot(d, d), best = c;
+    }
+    vec4 box = atm.car_box[best * 3];
+    float along = dot(view_pos - box.xyz, atm.car_box[best * 3 + 1].xyz) / max(0.6 * box.w, 0.01);
+    float x = clamp(along, -1.0, 1.0) + 1.0;   // 0 the rear slice, 1 the middle, 2 the front
+    int i = min(int(x), 1);
+    vec2 a = texelFetch(car_probes, ivec2(best * CAR_PROBES + i, 0), 0).rg;
+    vec2 b = texelFetch(car_probes, ivec2(best * CAR_PROBES + i + 1, 0), 0).rg;
+    vec2 l = clamp(mix(a, b, x - float(i)), 0.0, 1.0);
+    return vec2(mix(1.0, l.x, atm.car_probe.y), mix(1.0, l.y, atm.car_probe.z));
+}
+
 #ifdef RAY_TRACING
 // Sun shadows traced through the world: a few rays spread over the sun's
 // disc, so the shadow is sharp where the caster touches the ground and
@@ -114,7 +144,9 @@ SunRays sun_rays(vec3 n) {
     SunRays r;
     float nl = length(n);
     vec3 N = nl > 0.0 ? n / nl : vec3(0.0);
-    r.L = normalize(vp.sun.xyz);
+    // (the cars in viewports of their own: towards the world's sun, whose
+    // shadows they take, rather than the one the game lights them with)
+    r.L = normalize((flags & CAR) != 0u ? atm.sun.xyz : vp.sun.xyz);
     // Off the surface by a little more as it gets farther (depth precision),
     // and more on surfaces the sun grazes (boards and walls side-on to it), whose
     // rays otherwise met the surface itself: dark specks
@@ -143,6 +175,9 @@ SunRays sun_rays(vec3 n) {
 // solid, in between through foliage
 float sun_ray(SunRays r, float a, float radius) {
     vec3 dir = normalize(r.L + (r.X * cos(a) + r.Y * sin(a)) * radius);
+    // (a car in a viewport of its own: the scenery only, not its own bodywork
+    // nor the other cars)
+    if ((flags & CAR) != 0u) return rt_light(r.origin, dir, SUN_RANGE, RT_LOW);
     if (!r.apart) return rt_light(r.origin, dir, SUN_RANGE, RT_LOW | RT_ACTOR);
     float light = rt_light(r.origin, dir, SUN_RANGE, RT_LOW);
     return light > 0.0 ? light * rt_light(r.near, dir, min(SUN_RANGE, 60.0), RT_ACTOR) : 0.0;
@@ -402,8 +437,9 @@ vec4 dust() {
         float through = pow(max(dot(normalize(view_pos), sun_dir), 0.0), 5.0);
         // (the sun, where it reaches the puff: under the trees and behind a
         // car the dust is in their shade, with what the ground throws back)
+        // (and not all of it: the low cloud glared in full sun)
         vec3 light = vec3(ambient) + dust_light.rgb +
-                     sun * dust_light.a * (vec3(1.0, 0.97, 0.91) * (0.3 + 0.8 * wrap * wrap) + 0.45 * through);
+                     sun * ((tex & 8u) != 0u ? 1.0 : 0.6) * dust_light.a * (vec3(1.0, 0.97, 0.91) * (0.3 + 0.8 * wrap * wrap) + 0.45 * through);
         light *= mix(1.0, 0.86, body * body);   // darker in its thick middle
         c.rgb = color.rgb * light * mix(0.82, 1.1, n2) * (0.9 + 0.2 * fract(seed * 7.31));
         c.a = body * wisp * mix(0.7, 1.0, smoothstep(0.3, 0.7, n2)) * color.a * pow(1.0 - t, 1.3);
@@ -413,7 +449,23 @@ vec4 dust() {
         vec2 p = vec2(max(abs(q.x) * aspect - (aspect - 1.0), 0.0), q.y);
         float d = length(p);
         c.rgb = color.rgb * (ambient + dust_light.rgb + sun * dust_light.a * 0.85) * (1.0 - 0.35 * d * d);
-        c.a = (1.0 - smoothstep(0.55, 1.0, d)) * (1.0 - smoothstep(0.75, 1.0, t)) / mix(1.0, aspect, 0.5);
+        if ((tex & 4u) != 0u) {   // (bit 2: all but a puddle's drops)
+            // A solid lump of earth: opaque, with a ragged edge of its own
+            // (round its outline from its seed, and finer bumps), dark and
+            // dull in the light, and it shrinks away at the end rather than
+            // fading into a smudge
+            c.rgb = color.rgb * (ambient + dust_light.rgb + sun * dust_light.a * 0.4) * (0.75 - 0.25 * d);
+            if ((tex & 8u) != 0u)   // a clump of snow: bright, catching the sun
+                c.rgb = color.rgb * (ambient + dust_light.rgb + sun * dust_light.a * 0.9) * (0.95 - 0.15 * d);
+            vec2 dir = d > 1e-4 ? p / d : vec2(1.0, 0.0);
+            float lump = atm_noise(vec3(dir * 1.6, seed * 57.0)) - 0.5;
+            float bump = atm_noise(vec3(q * 4.0, seed * 31.0 + 5.0)) - 0.5;
+            float edge = 0.72 - 0.3 * smoothstep(0.7, 1.0, t) + 0.45 * lump + 0.12 * bump;
+            float aa = max(fwidth(d), 0.02);
+            c.a = 1.0 - smoothstep(edge - aa, edge + aa, d);
+        } else {
+            c.a = (1.0 - smoothstep(0.55, 1.0, d)) * (1.0 - smoothstep(0.75, 1.0, t)) / mix(1.0, aspect, 0.5);
+        }
     }
     return c;
 }
@@ -427,17 +479,23 @@ void main() {
     // derivatives give the viewport size without passing it in
     vec2 ndc = clip_now.xy / clip_now.w;
     vec2 px_per_ndc = 1.0 / vec2(dFdx(ndc.x), dFdy(ndc.y));
-    out_motion = (clip_before.xy / clip_before.w - ndc) * px_per_ndc;
+    out_motion = vec4((clip_before.xy / clip_before.w - ndc) * px_per_ndc, 0.0, 0.0);
     gl_SampleMask[0] = -1;   // a statically written mask must be set on every path
     vec4 col = color;
     if ((flags & DUST) != 0u) {   // only in the translucent pass
         if (vp.quality.x <= -1000.0 || vp.quality.x > 0.0 || vp.fog_color.w < 0.0) discard;
         bool puff = (tex & 3u) == 0u;
-        // Not in the eye's face: the cloud the camera drives through thins out before it
-        float fade = puff ? smoothstep(0.3, 1.6, -view_pos.z) : smoothstep(0.8, 2.2, -view_pos.z);
+        // Not in the eye's face: the cloud the camera drives through thins out
+        // over the last few metres before it (it would wall the picture off)
+        // (the player's own car's cloud, tex bit 4, a little closer: it is only
+        // a few metres in front of the chase camera)
+        float fade = puff ? ((tex & 16u) != 0u ? smoothstep(0.5, 2.5, -view_pos.z) : smoothstep(0.8, 4.0, -view_pos.z))
+                          : smoothstep(0.8, 2.2, -view_pos.z);
         if (atm.soft.x > 0.0) {   // soft where it meets the road and what stands behind, over its size
             float d = texelFetch(scene_depth, ivec2(gl_FragCoord.xy), 0).r;
-            float soft = puff ? clamp(params.z * 0.6, 0.15, 1.0) : 0.05;
+            // (a puff's own soft edge is short: the cloud lies low over the road,
+            // and over its whole size it faded into nothing against it)
+            float soft = puff ? clamp(params.z * 0.2, 0.1, 0.35) : 0.05;
             if (d > 0.0) fade *= clamp((view_pos.z + 1e-3 / d) / soft, 0.0, 1.0);
         }
         // Where it will not show whatever its pattern is (in the eye's face, at
@@ -453,6 +511,11 @@ void main() {
         if (atm.haze.a > 0.0) c.rgb = distance_haze(c.rgb, view_pos, fog);
         out_color = c;
         out_glow = vec4(0.0, 0.0, 0.0, c.a);
+        // Where the cloud is dense its own motion, not that of the road behind
+        // it: DLAA/DLSS looked for the history of the road there, a frame's
+        // travel up the screen, and found the car's bumper (a ghost of it in
+        // the dust under the car). Blended over what is behind as the cloud is
+        out_motion.w = atm.dust_mv.x > 0.0 ? smoothstep(atm.dust_mv.y, atm.dust_mv.z, c.a) : 0.0;
         return;
     }
     if ((flags & TRANSLATOR) != 0u) col.rgb *= 16.0;
@@ -460,6 +523,7 @@ void main() {
     // Sun shadow pass (fog_color.w < 0): only what stands near the ground casts
     // shadows; canopies and roofs high above would put whole scenes in the dark
     if (vp.fog_color.w < 0.0 && dot(view_pos, vp.sun.xyz) + vp.fog_color.x > vp.fog_color.y) discard;
+    if (vp.fog_color.w < 0.0 && glow_sprite(flags)) discard;   // (a camera flash casts no shadow)
 
     vec4 t = vec4(1.0);
     if ((flags & TEXTURED) != 0u) {
@@ -488,8 +552,15 @@ void main() {
         return;
     }
     // Texture alpha (spec 7.2): solid texels belong to the opaque pass, the
-    // see-through ones to the translucent pass
-    if ((flags & TEX_ALPHA) != 0u && (vp.quality.x > 0.0 ? c.a < 1.0 : c.a >= 1.0)) discard;
+    // see-through ones to the translucent pass. Not the world's self-lit
+    // sprites (fire, explosions, the halos of lights and camera flashes): they
+    // go whole to the translucent pass. Their solid part took the ambient
+    // occlusion, applied between the two passes (a grain over the sprite), and
+    // wrote depth that the soft particles faded the rest of the same sprite
+    // against (a noisy edge). The sun's shadow pass keeps the split
+    bool effect = vp.fog_color.w >= 0.0 &&
+                  (flags & (WORLD | TEXTURED | LUMINOUS | TEX_ALPHA | SPECULAR | CAR | ACTOR)) == (WORLD | TEXTURED | LUMINOUS | TEX_ALPHA);
+    if ((flags & TEX_ALPHA) != 0u && (vp.quality.x > 0.0 ? c.a < 1.0 || effect : c.a >= 1.0 && !effect)) discard;
 
     vec3 n = normal;
     float s = 0.0;
@@ -514,14 +585,26 @@ void main() {
     if (sun_count.x >= 0.0) sun_part = sun_disc(n, sun_count, sun_across);
     vec2 sun_block = 3.0 * sun_part.xy + sun_first().x * dFdxFine(sun_part.xy) + sun_first().y * dFdyFine(sun_part.xy);
 #endif
+    // The car's light probes: the sun and the sky where it is (1, 1 for the rest)
+    vec2 probe = car_light();
+    // The car's sun pixel by pixel (car_shadow), where it is lit at all: the
+    // probes' smooth sun stays for its glint and fill
+    bool car_pixel = (flags & CAR) != 0u && sun_shadowed();
+    float car_sun = probe.x;
     if ((flags & LUMINOUS) == 0u) {
         if (sunlit) {
 #ifdef RAY_TRACING
-            s *= sun_count.x >= 0.0 ? traced_shadow(sun_part, sun_block) : sun_shadow(n);
+            float shade = sun_count.x >= 0.0 ? traced_shadow(sun_part, sun_block) : sun_shadow(n);
 #else
-            s *= sun_shadow(n);
+            float shade = sun_shadow(n);
 #endif
+            s *= shade;
+            if (car_pixel) car_sun = shade;
         }
+        // (the car in the shade: its sun, and the highlights with it, go;
+        // under a roof or beside a wall, some of its sky too)
+        if (!car_pixel) s *= probe.x;
+        ambient *= probe.y;
         vec3 light = vec3(s * vp.sun.w + ambient);
         // Clear outdoor scenes (SUN): a stronger, warmer sun and a softer,
         // slightly bluer ambient (light from the sky) for more contrast
@@ -587,7 +670,8 @@ void main() {
             if (dot(fn, view_pos) > 0.0) fn = -fn;
             float down = 0.5 - 0.5 * dot(fn, normalize(atm.axes[1].xyz));
             float world_sun = max(vp.sun.w, 0.0) * (atm.sunlight.z > 0.0 ? atm.sunlight.x : 1.0);
-            light += vec3(1.0, 0.92, 0.80) * world_sun * fill * (0.6 + 0.4 * down);
+            // (the ground round a car in the shade is mostly in the shade too: less of it)
+            light += vec3(1.0, 0.92, 0.80) * world_sun * fill * (0.6 + 0.4 * down) * mix(0.35, 1.0, probe.x) * probe.y;
         }
         // The spotlight: a flat lobe, as in the original
         if ((flags & WORLD) != 0u && atm.spot.z > 0.0) light += atm.spot_color.rgb * spotlight().x;
@@ -668,7 +752,7 @@ void main() {
         if (length(vp.sun.xyz) > 0.01) {
             // a sharp glint on the glass, a broad sheen on the satin paint
             float glint = pow(max(dot(r, normalize(vp.sun.xyz)), 0.0), glass ? 900.0 : 60.0);
-            c.rgb += vec3(1.0, 0.97, 0.9) * glint * (glass ? 2.0 : 0.35) * clean * vp.sun.w;
+            c.rgb += vec3(1.0, 0.97, 0.9) * glint * (glass ? 2.0 : 0.35) * clean * vp.sun.w * car_sun;
         }
     }
     // The original clips the light at white; with HDR lighting the highlights
@@ -708,9 +792,25 @@ void main() {
     // Textured ones only: the game's untextured black patch under each car (its
     // shadow) lies 3 cm over the road once the car is set down on it
     // (settle_player_car), and faded over 2 m it was gone
+    // Not what lies on the surface behind it (atm.soft.x 2): the tyre tracks
+    // the game lays on the sand, a few centimetres over it, were faded to
+    // nothing. Told by its distance from the eye changing across the screen
+    // as that of the surface behind does (a sprite standing in the ground, a
+    // cloud, change otherwise)
     if (vp.quality.x < 0.0 && atm.soft.x > 0.0 && (flags & (WORLD | TEXTURED)) == (WORLD | TEXTURED)) {
-        float d = texelFetch(scene_depth, ivec2(gl_FragCoord.xy), 0).r;
-        if (d > 0.0) c.a *= clamp((view_pos.z + 1e-3 / d) / atm.soft.y, 0.0, 1.0);
+        ivec2 at = ivec2(gl_FragCoord.xy), last = textureSize(scene_depth, 0) - 1;
+        float d = texelFetch(scene_depth, at, 0).r;
+        bool lying = false;
+        if (atm.soft.x > 1.5 && d > 0.0 && at.x < last.x && at.y < last.y) {
+            float dx = texelFetch(scene_depth, at + ivec2(1, 0), 0).r, dy = texelFetch(scene_depth, at + ivec2(0, 1), 0).r;
+            if (dx > 0.0 && dy > 0.0) {
+                vec2 behind = vec2(1e-3 / dx - 1e-3 / d, 1e-3 / dy - 1e-3 / d);   // the surface behind: its distance's change a pixel on
+                vec2 own = vec2(dFdx(-view_pos.z), dFdy(-view_pos.z));
+                float size = abs(behind.x) + abs(behind.y) + abs(own.x) + abs(own.y);
+                lying = size > 1e-6 && abs(behind.x - own.x) + abs(behind.y - own.y) < 0.15 * size;
+            }
+        }
+        if (d > 0.0 && !lying) c.a *= clamp((view_pos.z + 1e-3 / d) / atm.soft.y, 0.0, 1.0);
     }
     out_color = c;
     // Bloom source: fire, explosions and lights are drawn unlit (luminous);

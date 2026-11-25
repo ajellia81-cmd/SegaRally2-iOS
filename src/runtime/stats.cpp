@@ -22,6 +22,10 @@
 // of its own).
 #include "stats.h"
 
+#include "achievements_csv.h"
+#include "disk_writer.h"
+#include "game_ram.h"
+
 #include <algorithm>
 #include <bit>
 #include <cstdio>
@@ -33,24 +37,10 @@
 
 #include "ppc_rt.h"
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#endif
-
 namespace {
 
-// Game RAM
-constexpr uint32_t SEQUENCE = 0x22D618;       // 0 attract, 1 a game, -1 power on
-constexpr uint32_t PHASE = 0x22D624;          // in a game: 1 selects and races, 2-5 the screens after the last
-constexpr uint32_t GAME = 0x22CF14;           // the game structure
-constexpr uint32_t G_MODE = GAME + 0x00, G_ROUND = GAME + 0x34, G_CLOCK = GAME + 0x70, G_LEFT = GAME + 0x74;
-constexpr uint32_t G_GOAL = GAME + 0x7C, G_STAGES = GAME + 0x90, G_LAPS = GAME + 0x94, G_CHECKPOINTS = GAME + 0x98;
-constexpr uint32_t G_RANK = GAME + 0x104, G_TOTAL = GAME + 0x168, G_RACE_TIME = GAME + 0x16C;
-constexpr uint32_t G_LAP_TIMES = GAME + 0x684, G_COMPLETE = GAME + 0x6F0, G_RANKING = GAME + 0x6F4;
-constexpr uint32_t HUD_POSITION = 0x13AB74, CARS = 0x225A18;
-constexpr uint32_t SELECT_CAR = 0x224324, SELECT_GEARS = 0x224334;
+// Game RAM (game_ram.h)
+using namespace game_ram;
 constexpr int MODE_CHAMPIONSHIP = 0, MODE_PRACTICE = 2;
 constexpr int CLOCK_COUNTING = 2;
 constexpr int MAX_LAPS = 8;
@@ -69,7 +59,7 @@ int course_of(int round) {
     case 2: return 1;   // MOUNTAIN
     case 5: return 2;   // SWEDISH (snowy)
     case 4: return 3;   // MONACO (Riviera)
-    default: return -1;   // the two courses of the first Sega Rally, not raced
+    default: return -1;   // 0 DESERT_OLD, 1 FOREST: in the ROM, not on the course select (no records)
     }
 }
 
@@ -80,7 +70,7 @@ const std::vector<AchievementInfo> TABLE = {
     {"snowy", L"SNOWY CLEARED", L"Clear the Snowy stage in the championship", 1},
     {"riviera", L"RIVIERA CLEARED", L"Clear the Riviera stage in the championship", 1},
     {"champion", L"CHAMPION", L"Finish the championship in 1st place", 1},
-    {"from_the_back", L"FROM THE BACK", L"Win a championship stage starting last", 1},
+    {"from_the_back", L"FROM THE BACK", L"Start last on the grid and win the championship", 1},
     {"stick_shift", L"STICK SHIFT", L"Finish the championship with the manual gearbox", 1},
     {"full_garage", L"FULL GARAGE", L"Finish a race with every car", STAT_OPEN_CARS},
     {"training_days", L"TRAINING DAYS", L"Finish a practice race on all four courses", STAT_COURSES},
@@ -110,17 +100,10 @@ int64_t raw_progress(const Stats& s, const std::string& k) {
 struct Ini {
     std::vector<std::pair<std::string, int64_t>> rows;
     void put(const std::string& k, int64_t v) { rows.push_back({k, v}); }
-    bool save(const char* path) const {
-        std::string tmp = std::string(path) + ".tmp";
-        FILE* f = fopen(tmp.c_str(), "w");
-        if (!f) return false;
-        for (auto& [k, v] : rows) fprintf(f, "%s = %lld\n", k.c_str(), (long long)v);
-        bool ok = fclose(f) == 0;
-#ifdef _WIN32
-        return ok && MoveFileExA(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING);
-#else
-        return ok && rename(tmp.c_str(), path) == 0;
-#endif
+    void save(const char* path) const {   // (by the disk writer's thread)
+        std::string text;
+        for (auto& [k, v] : rows) text += k + " = " + std::to_string(v) + "\n";
+        disk_replace(path, std::move(text));
     }
     static Ini load(const char* path) {
         Ini ini;
@@ -182,6 +165,65 @@ struct Game {
     }
 };
 
+// ---- save/achievements.json: the table with the progress and unlock times ----
+// Written for the launcher (NicoLauncher), which shows them on the game's page
+// without knowing this game's table; the format is in its docs/manifest.md.
+// Nothing reads it back: save/achievements.ini stays the game's own record.
+// The same list goes to achievements/achievements.csv (achievements_csv.h).
+
+void json_string(std::string& out, const wchar_t* w) {
+    out += '"';
+    for (; *w; w++) {
+        uint32_t c = uint32_t(*w);
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += char(c);
+        } else if (c < 0x20) {
+            char b[8];
+            snprintf(b, sizeof b, "\\u%04x", unsigned(c));
+            out += b;
+        } else if (c < 0x80) {
+            out += char(c);
+        } else if (c < 0x800) {
+            out += char(0xC0 | (c >> 6));
+            out += char(0x80 | (c & 0x3F));
+        } else {
+            out += char(0xE0 | ((c >> 12) & 0x0F));
+            out += char(0x80 | ((c >> 6) & 0x3F));
+            out += char(0x80 | (c & 0x3F));
+        }
+    }
+    out += '"';
+}
+
+void write_achievements_json(const Stats& s, const std::vector<int64_t>& unlocked) {
+    std::string out = "{\n  \"schema\": 1,\n  \"achievements\": [\n";
+    std::vector<CsvAchievement> csv;
+    for (size_t i = 0; i < TABLE.size(); i++) {
+        const AchievementInfo& a = TABLE[i];
+        int64_t p = std::clamp<int64_t>(raw_progress(s, a.key), 0, a.goal);
+        int64_t when = i < unlocked.size() ? unlocked[i] : 0;
+        if (when) p = a.goal;
+        csv.push_back({a.key, a.name, a.text, a.goal, p, when});
+        out += "    {\"id\": \"" + std::string(a.key) + "\", \"name\": ";
+        json_string(out, a.name);
+        out += ", \"description\": ";
+        json_string(out, a.text);
+        out += ", \"goal\": " + std::to_string(a.goal) + ", \"progress\": " + std::to_string(p);
+        if (std::string(a.key) == "veteran") {   // play time, counted in frames
+            int minutes = int(double(p) / FRAME_HZ / 60);
+            char b[48];
+            snprintf(b, sizeof b, "%dh %02dm / %dh", minutes / 60, minutes % 60, int(double(a.goal) / FRAME_HZ / 3600 + 0.5));
+            out += std::string(", \"progress_text\": \"") + b + "\"";
+        }
+        out += ", \"unlocked\": " + std::to_string(when) + "}";
+        out += i + 1 < TABLE.size() ? ",\n" : "\n";
+    }
+    out += "  ]\n}\n";
+    disk_replace("save/achievements.json", std::move(out));
+    write_achievements_csv(csv);
+}
+
 struct Tracker {
     bool on = false;
     std::mutex mutex;   // everything below: the window reads copies
@@ -195,10 +237,12 @@ struct Tracker {
     bool in_game = false, cheated = false, game_counted = false;
     Game was;
     int start_position = -1, start_cars = 0;   // of the race on: its place on the grid
+    bool started_last = false;   // this game started a championship race last on the grid (FROM THE BACK)
     bool was_extending = false;
     int finished_round = -1;   // of the race whose finish line was crossed last
     uint64_t saved_at = 0;
-    bool dirty = false;
+    bool dirty = false;    // a record, a count or an achievement changed: saved at once
+    bool played = false;   // only the play time went up: saved every few minutes
 
     bool counting() const { return in_game && !cheated; }
 
@@ -221,9 +265,11 @@ struct Tracker {
         Ini a;
         for (size_t i = 0; i < TABLE.size(); i++)
             if (unlocked[i]) a.put(TABLE[i].key, unlocked[i]);
-        if (!ini.save(STATS_FILE) || !a.save(ACHIEVEMENTS_FILE)) printf("[achievements] could not save save/stats.ini\n");
+        ini.save(STATS_FILE);
+        a.save(ACHIEVEMENTS_FILE);
+        write_achievements_json(stats, unlocked);
         saved_at = frame;
-        dirty = false;
+        dirty = played = false;
     }
 
     // With the mutex held
@@ -264,13 +310,11 @@ struct Tracker {
     // the race last finished)
     void stage_cleared() {
         int course = course_of(finished_round), rank = int32_t(rd32(G_RANK));
-        bool from_back = start_cars > 1 && start_position == start_cars - 1 && rank == 0;
         printf("[achievements] stage cleared: round %d, rank %d of %d (from %d)%s\n", finished_round, rank + 1,
                start_cars, start_position + 1, counting() ? "" : " (not counted)");
         if (!counting()) return;
         stats.stages_cleared++;
         if (course >= 0) stats.course[course].clears++;
-        if (from_back) stats.from_the_back++;
         dirty = true;
     }
 
@@ -285,6 +329,9 @@ struct Tracker {
         if (rank >= 1 && (stats.best_champ_position == 0 || rank < stats.best_champ_position)) stats.best_champ_position = rank;
         keep_best(stats.best_champ_time, total);
         if (rank == 1) stats.championships_won++;
+        // FROM THE BACK: last on the grid (only Desert starts you there; it can't
+        // be won, so the climb is to 1st over the whole championship)
+        if (rank == 1 && started_last) stats.from_the_back++;
         if (gears == 1) stats.manual_championships++;
         dirty = true;
     }
@@ -300,15 +347,16 @@ struct Tracker {
         }
         if (was.sequence != 1 && g.sequence == 1) {   // a credit taken: a new game
             in_game = true;
-            cheated = game_counted = false;
+            cheated = game_counted = started_last = false;
         }
         if (g.racing() && counting()) {
             stats.play_frames++;
-            dirty = true;
+            played = true;
         }
         if (g.racing() && g.clock == CLOCK_COUNTING && was.clock != CLOCK_COUNTING) {   // a race starts
             start_position = g.position;
             start_cars = int32_t(rd32(CARS));
+            if (g.mode == MODE_CHAMPIONSHIP && start_cars > 1 && start_position == start_cars - 1) started_last = true;
             printf("[achievements] race start: round %d, mode %d, %d of %d on the grid%s\n", g.round, g.mode,
                    start_position + 1, start_cars, counting() ? "" : " (not counted)");
             if (counting()) {
@@ -348,11 +396,14 @@ struct Tracker {
         if (in_game && was.sequence == 1 && g.sequence != 1) {   // the game is over
             in_game = cheated = false;
             check_achievements();
-            if (dirty) save();
+            if (dirty || played) save();
         }
         was = g;
         check_achievements();
-        if (dirty && frame - saved_at > uint64_t(frames_of(30))) save();
+        // The files go out from the disk writer's thread: the game thread only
+        // builds their text (a slow drive used to stop the game for a moment
+        // here, every 30 s of racing)
+        if (dirty || (played && frame - saved_at > uint64_t(frames_of(300)))) save();
     }
 };
 
@@ -370,14 +421,18 @@ int64_t achievement_progress(const Stats& s, int index) {
 void stats_init() {
     std::lock_guard<std::mutex> lock(g.mutex);
     g.load();
+    write_achievements_json(g.stats, g.unlocked);   // for the launcher, from the first launch of a new build
     g.on = true;
     g.rebase = true;
 }
 
+// (at exit: also waits for every file still being written, the EEPROM's too)
 void stats_save() {
-    if (!g.on) return;
-    std::lock_guard<std::mutex> lock(g.mutex);
-    g.save();
+    if (g.on) {
+        std::lock_guard<std::mutex> lock(g.mutex);
+        g.save();
+    }
+    disk_flush();
 }
 
 StatsView stats_view() {

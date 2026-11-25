@@ -1,11 +1,14 @@
-<p align="center">
-  <img src="docs/img/marquee.png" alt="Sega Rally 2" width="100%">
-</p>
+<h1 align="center">Nico SR2</h1>
 
 <p align="center">
-  <b>Sega's 1998 arcade rally game, running natively on PC.</b><br>
-  Not an emulator: the original code, recompiled to C++, with a modern Vulkan renderer.
+  <b>An unofficial, fan-made recompilation of the 1998 arcade game Sega Rally 2.</b><br>
+  Not an emulator: the original program, recompiled to C++ on your own PC from your own copy, with a modern Vulkan renderer.
 </p>
+
+> [!IMPORTANT]
+> **Unofficial fan project.** Not affiliated with, endorsed or sponsored by SEGA. Nothing from the
+> original game is in this repository: no ROM, no code, no music or voices. To play you need your
+> own copy of the arcade game (`srally2.zip`), and the game is built from it on your PC.
 
 <p align="center">
   <a href="https://www.youtube.com/@snicolast"><img src="https://img.shields.io/badge/YouTube-@snicolast-red?logo=youtube&logoColor=white" alt="YouTube: snicolast"></a>
@@ -20,12 +23,12 @@
 
 - **True widescreen**, not stretched, with the HUD at the corners.
 - **Ray tracing**: shadows, global illumination and reflections on the cars.
-- **Real dust**: billowing clouds and flying stones instead of flat sprites.
+- **Real dust**: billowing clouds and flying stones instead of the arcade's flat polygon trails.
 - **HD liveries and HUD**, redrawn for this port.
 - **Sharp and smooth**: NVIDIA DLAA and DLSS, or MSAA, and 120 / 144 Hz and above.
 - **Arcade sound**, with surround and headphone modes.
 - **Keyboard, gamepad or wheel** (wheel experimental).
-- **Achievements and statistics**: 14 achievements, your best laps and times per course, in RECORDS.
+- **Achievements and statistics**: 14 achievements, your best laps and times per course, in RECORDS. The achievements are also written to `achievements/achievements.csv` for [PlayniteAchievements](https://github.com/justin-delano/PlayniteAchievements) (Editor, Spreadsheet Import).
 
 <table>
   <tr>
@@ -33,10 +36,6 @@
     <td><img src="docs/img/snow.jpg" alt="Snow thrown up by the wheels on the snowy stage"></td>
   </tr>
 </table>
-
-<p align="center">
-  <img src="docs/img/menu.jpg" alt="Main menu" width="100%">
-</p>
 
 ## ⚠️ ROM not included
 
@@ -47,44 +46,22 @@ versions will not work. `build.bat` says which chips are missing.
 ## Install
 
 You need Windows 10/11 (64-bit) and a GPU with a Vulkan 1.3 driver (most from 2016 on). Ray
-tracing needs an NVIDIA RTX or an AMD RX 6000 or newer; DLAA and DLSS, an NVIDIA RTX. On other
-cards those options switch themselves off, and the game builds the same on any GPU.
+tracing needs an NVIDIA RTX 30 or an AMD RX 7000 or newer (not an integrated GPU); DLAA and
+DLSS, an NVIDIA RTX. On other cards those options switch themselves off, and the game builds
+the same on any GPU.
 
-1. Download this repository (green **Code** button > **Download ZIP**) and unzip it.
-2. Put `srally2.zip` in the folder.
-3. Double-click `install.bat`. It installs Python 3 and the Visual Studio 2022 C++ build tools
-   with winget (a few GB, accept the Windows prompt), then builds the game.
-4. Play with `SegaRally2.exe`.
+Install it with **[NicoLauncher](https://github.com/snicolast/NicoLauncher-Hub)**, a free app that
+downloads, builds, updates and starts the game for you. No Visual Studio, nothing to set up by hand.
 
-<details>
-<summary>Manual install</summary>
-
-Install [Python 3.10 or later](https://www.python.org/downloads/) and
-[Build Tools for Visual Studio 2022](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
-with the *Desktop development with C++* workload. The full workload is over 6 GB; the build only
-needs the MSVC compiler, CMake and a Windows SDK. In a command prompt:
-
-```
-winget install Microsoft.VisualStudio.2022.BuildTools --override "--passive --wait --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.VC.CMake.Project --add Microsoft.VisualStudio.Component.Windows11SDK.22621"
-```
-
-Or in the Visual Studio Installer, choose *Individual components* instead of the workload and
-tick *MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)*, *C++ CMake tools for Windows*
-and one *Windows 11 SDK* (it works on Windows 10 too).
-
-Then run `build.bat` with `srally2.zip` next to it (or pass its path: `build.bat D:\roms\srally2.zip`).
-It downloads SDL3, miniz and NVIDIA DLSS on the first run. DLSS is optional: if that download
-fails, the game is built without it and uses MSAA.
-</details>
-
-If the build can't download SDL3 or miniz (a proxy, an antivirus, a flaky connection), it lists
-the links: download them with your browser, put them in `third_party\downloads\` keeping the file
-name and run `build.bat` again.
+1. Download **[NicoLauncher-setup.exe](https://github.com/snicolast/NicoLauncher-Hub/releases/latest)** and run it.
+2. In the launcher, open **Sega Rally 2**, press **Install** and choose your `srally2.zip` when it asks.
+3. Press **Play**.
 
 ### Update
 
-When there is a new version, the main menu says what is new and offers **UPDATE NOW**. Or run
-`update.bat` yourself: it downloads the changed files from GitHub (no git needed) and rebuilds.
+With NicoLauncher: it tells you when there is something new. Press **Update**.
+
+Without it: run `update.bat`. It downloads the changed files from GitHub (no git needed) and rebuilds.
 Your ROM, settings and textures are kept; files you edited are backed up to `out\update_backup\`.
 
 ## Controls
@@ -99,18 +76,46 @@ Your ROM, settings and textures are kept; files you edited are backed up to `out
 | Coin + start | 5, then 1 | BACK, then START |
 | Pause | Esc | START |
 
+**OPTIONS > CONTROLS** changes the car's keys and buttons (the keyboard's or the gamepad's, whichever
+you are using in the menu): choose an action and press the key or button. The menus, the pause and
+coin / start keep theirs.
+
 F11 or Alt+Enter toggles fullscreen. Everything else is in **Options**. In the selection screens
 "confirm with the pedal" means the accelerator. The gamepad rumbles with the wheel's force feedback.
 
-**Steering wheels (experimental)** are read through SDL, with force feedback. This has never been
-tested on a real wheel: the settings are in `save\wheel.ini`, and `set SR2_WHEEL_LOG=1` prints
-every axis and button you move. If you have one, please tell me how it goes in an issue.
+**OPTIONS > EXPERIENCE** picks **PC EDITION** (the menus, records and the new graphics) or **ARCADE
+ORIGINAL**: the cabinet as it was, from the SEGA logo and the attract, with free play or coins and
+its own settings. Its pause menu goes back to PC EDITION.
+
+**Steering wheels (experimental)** are read through SDL, DirectInput included, with force feedback.
+Players report it working on Logitech, Thrustmaster, Fanatec, Moza and Simucube bases; I have no wheel,
+so I can't test them myself. **OPTIONS > WHEEL** has a step-by-step WHEEL SETUP and sets each control by moving it (pedals, shifter or hand
+brake on their own USB device too), plus force feedback, rotation and dead zone; the wheel and pedals
+are drawn live there. Everything is saved in `save\wheel.ini`, and `set SR2_WHEEL_LOG=1` prints every
+axis and button you move. If yours gives trouble, please open an issue with that log.
+
+<table>
+  <tr>
+    <td><img src="docs/img/wheel.jpg" alt="OPTIONS > WHEEL: controls, force feedback and the wheel and pedals drawn live"></td>
+    <td><img src="docs/img/wheel_setup.jpg" alt="Setting a control by moving it: press the pedal all the way down"></td>
+  </tr>
+</table>
 
 ## Performance
 
-OPTIONS > DISPLAY > **QUALITY** sets the costly effects together, from LOW (laptops) to ULTRA.
-On an RTX, **ANTI-ALIASING: DLSS QUALITY** draws the 3D at two thirds of the size and rebuilds it
-sharp, about 30% lighter on the GPU than DLAA: the one to try first at 1440p, 4K or 120 Hz and above.
+Running slow? In OPTIONS, try these in order:
+
+- **DISPLAY > ANTI-ALIASING: DLSS QUALITY** (RTX cards). Still slow? BALANCED, then PERFORMANCE.
+- **GRAPHICS > RAY TRACING: OFF**, a big one.
+- **DISPLAY > MAX FPS** lower, or **RENDER SCALE** under 100%.
+
+## Experimental
+
+Untested on real hardware. Feedback welcome in the issues.
+
+- **Telemetry** (OPTIONS > EXPERIENCE > EXPERIMENTAL): sends speed, RPM, gear and G-forces for SimHub or a motion rig.
+  UDP `127.0.0.1:20777`, DiRT Rally format (default).
+  Or [OGS-TS](https://github.com/Open-Game-Standards/OGS-Telemetry-Standard) (TELEMETRY FORMAT), multicast `239.255.17.17:40123`. Thanks to Brian Gilbert.
 
 ## More
 
@@ -136,11 +141,17 @@ The code in this repository is under the [MIT License, with additional terms](LI
 The game itself (ROM, code, data, music and voices) is not included and stays the property of its
 owners: you need your own copy of `srally2.zip`.
 
+DLAA and DLSS use the [NVIDIA DLSS SDK](https://github.com/NVIDIA/DLSS), under NVIDIA's own license.
+NVIDIA's `nvngx_dlss.dll` is always downloaded from NVIDIA. The `dlss_bridge.dll` that NicoLauncher installs get
+is built from `tools/dlss_bridge` and kept, with NVIDIA's license and notice, in
+[NicoLauncher-Hub](https://github.com/snicolast/NicoLauncher-Hub/tree/main/dlss). NVIDIA, DLSS and RTX are
+trademarks of NVIDIA Corporation.
+
 **No prebuilt downloads.** The license does not allow anyone to share a compiled build of this
 port, a ROM, or anything made from one. I have never published any of them: everyone builds the
 game themselves from their own `srally2.zip`. Any ready-to-play download you find elsewhere is
 not from me, breaks the license, and is at your own risk.
 
-<sub>A fan project for personal use, not affiliated with or endorsed by Sega or by any of the car
-makers whose cars appear in the game. Sega Rally is a trademark of Sega; the car names and
+<sub>A fan project for personal use, not affiliated with or endorsed by SEGA or by any of the car
+makers whose cars appear in the game. Sega Rally is a trademark of SEGA; the car names and
 liveries belong to their owners.</sub>

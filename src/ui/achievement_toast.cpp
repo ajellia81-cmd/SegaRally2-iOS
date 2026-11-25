@@ -7,47 +7,20 @@
 
 #include <mmsystem.h>
 
+#include "ui_draw.h"
+
 namespace {
 
 // The menus' colours (ui/frontend.cpp)
-// Star Wars: lightsaber blue / cyan, the name in cool white to cyan
+// Colours kept from Star Wars Trilogy: blue / cyan, the name in cool white to cyan
 constexpr uint32_t GOLD_TOP = 0xF2FCFF, GOLD_BOTTOM = 0x7FE0FF;
 constexpr uint32_t PALE_TOP = 0xDCE6F2, PALE_BOTTOM = 0xAFC2DA, AMBER = 0x3CC8FF;
 constexpr double SHOW_SECONDS = 5, SLIDE_IN = 0.5, SLIDE_OUT = 0.4;
 constexpr double SHINE_AT = 0.4, SHINE_TIME = 0.55;   // a light sweep once it has landed
 
-const wchar_t* const FACES[3] = {L"Saira ExtraCondensed ExCond", L"Barlow Condensed", L"Jurassic Park"};
+const wchar_t* const FACES[2] = {L"Saira ExtraCondensed ExCond", L"Barlow Condensed"};
 
-float chan(uint32_t rgb, int shift) { return float((rgb >> shift) & 0xFF) / 255.0f; }
-
-uint32_t mix(uint32_t a, uint32_t b, float t) {
-    uint32_t r = 0;
-    for (int s = 0; s <= 16; s += 8) {
-        float v = chan(a, s) + (chan(b, s) - chan(a, s)) * t;
-        r |= uint32_t(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f) << s;
-    }
-    return r;
-}
-
-inline uint32_t over(uint32_t d, uint32_t rgb, int a) {   // a: 0..256, premultiplied BGRA
-    int k = 256 - a;
-    uint32_t rb = (((rgb & 0xFF00FFu) * a + (d & 0xFF00FFu) * k) >> 8) & 0xFF00FFu;
-    uint32_t g = (((rgb & 0x00FF00u) * a + (d & 0x00FF00u) * k) >> 8) & 0x00FF00u;
-    uint32_t da = ((255u * a + (d >> 24) * k) >> 8);
-    return rb | g | (da << 24);
-}
-
-std::vector<char> read_file(const std::string& path) {
-    std::vector<char> data;
-    if (FILE* f = fopen(path.c_str(), "rb")) {
-        fseek(f, 0, SEEK_END);
-        data.resize(size_t(ftell(f)));
-        fseek(f, 0, SEEK_SET);
-        if (fread(data.data(), 1, data.size(), f) != data.size()) data.clear();
-        fclose(f);
-    }
-    return data;
-}
+using ui_draw::mix, ui_draw::over, ui_draw::read_file;
 
 // Slide curves: overshoot a little on the way in, take a run up on the way out
 double ease_out_back(double t) {
@@ -105,17 +78,13 @@ std::vector<uint8_t> make_chime(float gain) {
 }  // namespace
 
 bool AchievementToast::init(const std::string& font_dir) {
-    static const char* const FILES[3] = {"SairaExtraCondensed-Bold.ttf", "BarlowCondensed-Bold.ttf",
-                                         "Jurassic_Park.ttf"};
+    static const char* const FILES[2] = {"SairaExtraCondensed-Bold.ttf", "BarlowCondensed-Bold.ttf"};
     for (const char* name : FILES) {
         font_data_.push_back(read_file(font_dir + "/" + name));
         auto& data = font_data_.back();
         DWORD count = 0;
         HANDLE h = data.empty() ? nullptr : AddFontMemResourceEx(data.data(), DWORD(data.size()), nullptr, &count);
-        if (h) {
-            font_handles_.push_back(h);
-            if (name == FILES[2]) jurassic_ = true;
-        }
+        if (h) font_handles_.push_back(h);
     }
     dc_ = CreateCompatibleDC(nullptr);
     return dc_ != nullptr;
@@ -145,8 +114,8 @@ HFONT AchievementToast::font(Family f, int px) {
     auto key = std::make_pair(int(f), px);
     auto it = fonts_.find(key);
     if (it != fonts_.end()) return it->second;
-    const wchar_t* face = f == TITLE ? (jurassic_ ? FACES[2] : FACES[0]) : FACES[1];
-    HFONT h = CreateFontW(-px, 0, 0, 0, f == TITLE && jurassic_ ? FW_NORMAL : FW_BOLD, FALSE, FALSE, FALSE,
+    const wchar_t* face = f == TITLE ? FACES[0] : FACES[1];
+    HFONT h = CreateFontW(-px, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                           DEFAULT_CHARSET, OUT_TT_ONLY_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH,
                           face);
     fonts_[key] = h;
@@ -159,41 +128,13 @@ const AchievementToast::Mask& AchievementToast::mask(Family f, int px, const std
     if (it != masks_.end()) return it->second;
     if (masks_.size() > 100) masks_.clear();
     Mask& m = masks_[key];
-    SelectObject(dc_, font(f, px));
-    std::wstring t = s;   // the Jurassic font's space is very narrow
-    if (f == TITLE && jurassic_) {
-        t.clear();
-        for (wchar_t c : s) t += c == L' ' ? std::wstring(L"   ") : std::wstring(1, c);
-    }
-    SIZE sz{};
-    GetTextExtentPoint32W(dc_, t.c_str(), int(t.size()), &sz);
-    TEXTMETRICW tm{};
-    GetTextMetricsW(dc_, &tm);
     m.pad = 2 + px / 6;
-    m.text_w = sz.cx;
-    m.ascent = tm.tmAscent;
-    m.w = sz.cx + 2 * m.pad;
-    m.h = sz.cy + 2 * m.pad;
-    BITMAPINFO bi{};
-    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-    bi.bmiHeader.biWidth = m.w;
-    bi.bmiHeader.biHeight = -m.h;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    void* bits = nullptr;
-    HBITMAP bmp = CreateDIBSection(dc_, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!bmp) return m;
-    HGDIOBJ old = SelectObject(dc_, bmp);
-    memset(bits, 0, size_t(m.w) * m.h * 4);
-    SetBkMode(dc_, TRANSPARENT);
-    SetTextColor(dc_, RGB(255, 255, 255));
-    TextOutW(dc_, m.pad, m.pad, t.c_str(), int(t.size()));
-    GdiFlush();
-    m.a.resize(size_t(m.w) * m.h);
-    const uint8_t* p = static_cast<const uint8_t*>(bits);
-    for (size_t i = 0; i < m.a.size(); i++) m.a[i] = p[i * 4 + 1];
-    SelectObject(dc_, old);
-    DeleteObject(bmp);
+    ui_draw::TextRaster t = ui_draw::rasterise_text(dc_, font(f, px), s, m.pad);
+    m.text_w = t.text_w;
+    m.ascent = t.tm.tmAscent;
+    m.w = t.w;
+    m.h = t.h;
+    m.a = std::move(t.a);
     return m;
 }
 

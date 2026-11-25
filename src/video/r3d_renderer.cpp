@@ -1,6 +1,7 @@
 #include "r3d_renderer.h"
 
 #include <algorithm>
+#include <chrono>
 #include <mutex>
 #include <cmath>
 #include <cstdio>
@@ -9,6 +10,9 @@
 #include "ao.frag.h"
 #include "ao_rt.frag.h"
 #include "ao_apply.frag.h"
+#include "car_probe.frag.h"
+#include "car_probe_rt.frag.h"
+#include "alpha_taa.frag.h"
 #include "bloom.frag.h"
 #include "compose.frag.h"
 #include "compose.vert.h"
@@ -55,6 +59,10 @@ struct AtmosphereUniform {
     float gi[4];
     float mirror[4];
     float rt[4];
+    float dust_mv[4];
+    float car_probe[4];
+    float car_box[48];
+    float car_shadow[4];
 };
 
 // The cars, stands and poles are a few units big, so the map covers little
@@ -62,15 +70,18 @@ struct AtmosphereUniform {
 // ray tracing were blotchy and thin ones vanished)
 constexpr uint32_t SHADOW_SIZE = 4096;   // shadow map, square
 constexpr float SHADOW_RANGE = 100.0f;   // how far in front of the camera shadows are drawn (view units)
-
-VkShaderModule make_module(VkDevice dev, const uint32_t* code, size_t bytes) {
-    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    ci.codeSize = bytes;
-    ci.pCode = code;
-    VkShaderModule m = VK_NULL_HANDLE;
-    vkCreateShaderModule(dev, &ci, nullptr, &m);
-    return m;
+// The shadow map's casters include the world's polygons turned away from the
+// camera (R3DScene::backs), as the traced shadows' do: left out, about half
+// the scenery cast no shadow, and as the camera turned the hills' and
+// cliffs' sides came and went, their shadows sweeping over the road in
+// chunks (GitHub issue #131). Uploaded after the scene's vertices.
+// SR2_SHADOWMAP_BACKS=0: as before
+bool shadowmap_backs() {
+    static const bool on = !(getenv("SR2_SHADOWMAP_BACKS") && atoi(getenv("SR2_SHADOWMAP_BACKS")) == 0);
+    return on;
 }
+// The 3D pass's depth, with a stencil for the cars' patch (blob_)
+constexpr VkFormat DEPTH_STENCIL = VK_FORMAT_D32_SFLOAT_S8_UINT;
 
 }  // namespace
 
@@ -81,15 +92,18 @@ struct R3DRenderer::ComposePush {
     float hud[4], sky[4], effects[4], motion[4];
 };
 
-ScreenLayout compute_layout(float win_w, float win_h, float max_aspect) {
+ScreenLayout compute_layout(float win_w, float win_h, float max_aspect, float px_aspect) {
     ScreenLayout l{};
-    float aspect = win_h > 0 ? win_w / win_h : 4.0f / 3.0f;
-    float max_w = SCREEN_H * std::max(max_aspect, float(SCREEN_W) / SCREEN_H);
+    l.px_aspect = px_aspect > 0 ? px_aspect : 1.0f;
+    // (in Model 3 pixels: a window's width counts px_aspect times fewer of them)
+    float aspect = win_h > 0 ? win_w / win_h / l.px_aspect : 4.0f / 3.0f;
+    float max_w = SCREEN_H * std::max(max_aspect / l.px_aspect, float(SCREEN_W) / SCREEN_H);
     l.view_w = std::clamp(SCREEN_H * aspect, float(SCREEN_W), max_w);
-    l.scale = std::min(win_w / l.view_w, win_h / SCREEN_H);
-    l.ox = (win_w - l.view_w * l.scale) / 2;
+    l.scale = std::min(win_w / (l.view_w * l.px_aspect), win_h / SCREEN_H);
+    l.ox = (win_w - l.view_w * l.scale * l.px_aspect) / 2;
     l.oy = (win_h - SCREEN_H * l.scale) / 2;
     l.game_x0 = (l.view_w - SCREEN_W) / 2;
+    l.hud_x = std::min(l.game_x0, (SCREEN_H * 16.0f / 9.0f - SCREEN_W) / 2);
     return l;
 }
 
@@ -150,6 +164,7 @@ bool R3DRenderer::create_image(Image& img, uint32_t w, uint32_t h, VkFormat form
 void R3DRenderer::destroy_image(Image& img) {
     if (img.view) vkDestroyImageView(dev_, img.view, nullptr);
     if (img.alpha_view) vkDestroyImageView(dev_, img.alpha_view, nullptr);
+    if (img.attach_view) vkDestroyImageView(dev_, img.attach_view, nullptr);
     if (img.image) vkDestroyImage(dev_, img.image, nullptr);
     if (img.memory) vkFreeMemory(dev_, img.memory, nullptr);
     img = Image{};
@@ -157,11 +172,11 @@ void R3DRenderer::destroy_image(Image& img) {
 
 void R3DRenderer::transition(VkCommandBuffer cmd, Image& img, VkImageLayout to, VkImageAspectFlags aspect) {
     if (img.layout == to) return;
-    vk_image_barrier(cmd, img.image, img.layout, to, aspect);
+    vk_image_barrier(cmd, img.image, img.layout, to, img.barrier_aspect ? img.barrier_aspect : aspect);
     img.layout = to;
 }
 
-bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, bool dlaa, bool dlss_quality) {
+bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, bool dlaa, int dlss_mode, int dlss_model) {
     vk_ = &vk;
     dev_ = vk.device();
     supersample_ = std::clamp(supersample, 0.5f, 4.0f);
@@ -169,12 +184,27 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     // DLAA does the anti-aliasing itself from aliased single-sample input
     if (dlaa && dlaa_.init(vk.instance(), vk.gpu(), dev_)) {
         msaa = 1;
-        upscale_ = dlss_quality ? 1.5f : 1.0f;   // DLSS's quality setting: two thirds of the size each way
+        int mode = std::clamp(dlss_mode, 0, dlss::MODE_COUNT - 1);
+        upscale_ = dlss::MODE_SCALE[mode];   // QUALITY two thirds of the size each way ... ULTRA PERFORMANCE a third
+        jitter_phases_ = uint32_t(8.0f * upscale_ * upscale_ + 0.5f);
+        VkPhysicalDeviceProperties gpu;
+        vkGetPhysicalDeviceProperties(vk.gpu(), &gpu);
+        bool fp8 = dlss::has_fp8(gpu.deviceName);
+        dlss_preset_ = dlss::preset_for(mode, dlss_model, fp8);
+        dlaa_.set_dynamic(getenv("SR2_NO_DYNRES") == nullptr);   // (dynamic_resolution(); before configure: dlss_bridge.dll)
+        dlaa_.configure(mode, dlss_preset_);
+        printf("[dlaa] mode %d (3D %.0f%% of the size), preset %c (%s, FP8 %s), %u jitter phases\n", mode,
+               100.0f / upscale_, char('A' + dlss_preset_ - 1), dlss_model ? "chosen" : "auto", fp8 ? "yes" : "no",
+               jitter_phases_);
+    } else if (dlaa) {   // no DLSS on this card (not an RTX, or no NGX): FXAA, far cheaper than MSAA on an old card
+        msaa = 1;
+        fxaa_ = true;
     }
     // Highest supported MSAA level not above the requested one
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(vk.gpu(), &props);
-    VkSampleCountFlags counts = props.limits.framebufferColorSampleCounts & props.limits.framebufferDepthSampleCounts;
+    VkSampleCountFlags counts = props.limits.framebufferColorSampleCounts & props.limits.framebufferDepthSampleCounts &
+                                 props.limits.framebufferStencilSampleCounts;
     samples_ = VK_SAMPLE_COUNT_1_BIT;
     for (int s = 2; s <= std::min(msaa, 8); s *= 2)
         if (counts & s) samples_ = VkSampleCountFlagBits(s);
@@ -205,8 +235,21 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                       VK_IMAGE_ASPECT_COLOR_BIT))
         return false;
+    if (!create_image(blank_color_, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, sampled, VK_IMAGE_ASPECT_COLOR_BIT)) return false;
+    if (!create_image(blank_depth_, 1, 1, VK_FORMAT_D32_SFLOAT, sampled, VK_IMAGE_ASPECT_DEPTH_BIT)) return false;
+    if (!create_image(car_probe_, CAR_PROBE_CARS * CAR_PROBES, 1, VK_FORMAT_R16G16B16A16_SFLOAT,
+                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                      VK_IMAGE_ASPECT_COLOR_BIT))
+        return false;
     vk.run_once([&](VkCommandBuffer cmd) {
         transition(cmd, shadow_map_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        // The stand-ins: no glow, nothing near (reverse Z: 0 is the far end)
+        transition(cmd, blank_depth_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        VkClearDepthStencilValue far_away{0.0f, 0};
+        VkImageSubresourceRange depth_range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+        vkCmdClearDepthStencilImage(cmd, blank_depth_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &far_away, 1,
+                                    &depth_range);
+        transition(cmd, blank_depth_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
         VkClearColorValue start{};
         start.float32[0] = std::log(0.17f);   // a typical scene: exposure 1
         VkImageSubresourceRange one{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -215,11 +258,16 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
         transition(cmd, exposure_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         VkClearColorValue zero{};
         VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        for (Image* img : {&texture_ram_, &back_, &front_, &text_cells_, &sky_coords_}) {
+        for (Image* img : {&texture_ram_, &back_, &front_, &text_cells_, &sky_coords_, &blank_color_}) {
             transition(cmd, *img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             vkCmdClearColorImage(cmd, img->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
             transition(cmd, *img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
+        VkClearColorValue open{};   // the cars' probes: all the sun, all the sky, until taken
+        open.float32[0] = open.float32[1] = open.float32[2] = open.float32[3] = 1.0f;
+        transition(cmd, car_probe_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkCmdClearColorImage(cmd, car_probe_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &open, 1, &range);
+        transition(cmd, car_probe_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     });
 
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -247,32 +295,58 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     // (what the traced rays need is also the vertex shader's: it traces the
     // light of each puff of dust, r3d.vert)
     const VkShaderStageFlags rt_stages = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT;
-    VkDescriptorSetLayoutBinding b0[7] = {
+    // Texture pack slots: as many as the GPU allows in one shader stage, up to
+    // TexturePack::MAX_SLOTS (Intel drivers allow few without update-after-bind)
+    const bool uab = vk.update_after_bind();
+    {
+        VkPhysicalDeviceVulkan12Properties p12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        p2.pNext = &p12;
+        vkGetPhysicalDeviceProperties2(vk.gpu(), &p2);
+        const VkPhysicalDeviceLimits& l = p2.properties.limits;
+        uint64_t limit = uab ? std::min({p12.maxPerStageDescriptorUpdateAfterBindSamplers,
+                                         p12.maxPerStageDescriptorUpdateAfterBindSampledImages,
+                                         p12.maxDescriptorSetUpdateAfterBindSamplers,
+                                         p12.maxDescriptorSetUpdateAfterBindSampledImages,
+                                         p12.maxPerStageUpdateAfterBindResources})
+                             : std::min({l.maxPerStageDescriptorSamplers, l.maxPerStageDescriptorSampledImages,
+                                         l.maxDescriptorSetSamplers, l.maxDescriptorSetSampledImages,
+                                         l.maxPerStageResources});
+        // (16: room for the stage's other textures, buffers and attachments)
+        texture_slots_ = uint32_t(std::clamp<int64_t>(int64_t(limit) - 16, 2, TexturePack::MAX_SLOTS));
+        if (texture_slots_ < TexturePack::MAX_SLOTS)
+            printf("[video] texture pack limited to %u images by the GPU (%s limit %llu)\n", texture_slots_,
+                   uab ? "update-after-bind" : "descriptor", (unsigned long long)limit);
+    }
+    // (the sun shadow map and the world depth, once 4 and 5: set 1, r3d_aux_layout_)
+    VkDescriptorSetLayoutBinding b0[5] = {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, rt_stages},
-        {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, TexturePack::MAX_SLOTS, rt_stages},
+        {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, texture_slots_, rt_stages},
         {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, rt_stages},
-        {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},   // sun shadow map (no 3)
-        {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},   // world depth (soft particles)
         {6, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, rt_stages},   // ray tracing: the world
         {7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, rt_stages},   // ray tracing: cut-out triangles
     };
-    const uint32_t r3d_bindings = rt_.ready() ? 7 : 5;
+    const uint32_t r3d_bindings = rt_.ready() ? 5 : 3;
     // Replacement slots are filled while earlier frames may still be in flight
-    VkDescriptorBindingFlags bflags[7] = {
-        0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT, 0, 0, 0, 0, 0};
+    const VkDescriptorBindingFlags pending =
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
+    VkDescriptorBindingFlags bflags[5] = {
+        0, pending | (uab ? VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT : 0u), 0, 0, 0};
     VkDescriptorSetLayoutBindingFlagsCreateInfo bfi{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
     bfi.bindingCount = r3d_bindings;
     bfi.pBindingFlags = bflags;
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     li.pNext = &bfi;
+    li.flags = uab ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT : 0u;
     li.bindingCount = r3d_bindings;
     li.pBindings = b0;
     vkCreateDescriptorSetLayout(dev_, &li, nullptr, &r3d_set_layout_);
+    li.flags = 0;
     li.pNext = nullptr;
     // 5: high-resolution text atlas (only bound when there is one), 6: text cells,
-    // 7: alpha of the 3D image (in red), 8: bloom, 9: backdrop replacement coordinates,
-    // 11: exposure, 12: diffusion, 13: tight bloom (no 10)
-    VkDescriptorSetLayoutBinding cb[13];
+    // 7: alpha of the 3D image (in red), 9: backdrop replacement coordinates
+    // (the bloom, exposure, diffusion and tight bloom, once 8, 11, 12, 13: set 1, compose_fx_layout_)
+    VkDescriptorSetLayoutBinding cb[9];
     for (uint32_t i = 0; i < 3; i++)
         cb[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
     cb[3] = {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Pack2D::MAX_SLOTS, VK_SHADER_STAGE_FRAGMENT_BIT};
@@ -280,19 +354,29 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     cb[5] = {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
     cb[6] = {6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
     cb[7] = {7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
-    cb[8] = {8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
-    cb[9] = {9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
-    cb[10] = {11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
-    cb[11] = {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
-    cb[12] = {13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
-    VkDescriptorBindingFlags cflags[13] = {0, 0, 0, bflags[1], 0, bflags[1], 0, 0, 0, 0, 0, 0, 0};
-    bfi.bindingCount = 13;
+    cb[8] = {9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
+    // The 2D pictures (Pack2D::MAX_SLOTS) also update-after-bind when the GPU has it: its
+    // limits for that are far above the plain ones (Intel), like the texture pack's
+    VkDescriptorBindingFlags cflags[9] = {
+        0, 0, 0, pending | (uab ? VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT : 0u), 0, pending, 0, 0, 0};
+    bfi.bindingCount = 9;
     bfi.pBindingFlags = cflags;
     li.pNext = &bfi;
-    li.bindingCount = 13;
+    li.flags = uab ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT : 0u;
+    li.bindingCount = 9;
     li.pBindings = cb;
     vkCreateDescriptorSetLayout(dev_, &li, nullptr, &compose_set_layout_);
+    li.flags = 0;
     li.pNext = nullptr;
+    // The second sets (issue #158): images that some pass draws into
+    VkDescriptorSetLayoutBinding fxb[4];
+    for (uint32_t i = 0; i < 4; i++)
+        fxb[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
+    li.bindingCount = 3;   // shadow map, world depth, the cars' light probes
+    li.pBindings = fxb;
+    vkCreateDescriptorSetLayout(dev_, &li, nullptr, &r3d_aux_layout_);
+    li.bindingCount = 4;   // bloom, exposure, diffusion, tight bloom
+    vkCreateDescriptorSetLayout(dev_, &li, nullptr, &compose_fx_layout_);
     // Bloom passes: one source image each
     li.bindingCount = 1;
     li.pBindings = cb;
@@ -300,15 +384,19 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     // Ambient occlusion: world depth and the raw occlusion
     li.bindingCount = 2;
     vkCreateDescriptorSetLayout(dev_, &li, nullptr, &ao_set_layout_);
+    // The alpha over time with DLAA: jittered alpha, motion vectors, history
+    li.bindingCount = 3;
+    vkCreateDescriptorSetLayout(dev_, &li, nullptr, &alpha_set_layout_);
 
     VkDescriptorPoolSize ps[4] = {
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 36 + TexturePack::MAX_SLOTS + Pack2D::MAX_SLOTS},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 50 + texture_slots_ + Pack2D::MAX_SLOTS},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
     };
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pi.maxSets = 10;
+    pi.maxSets = 18;
+    if (uab) pi.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pi.poolSizeCount = rt_.ready() ? 4 : 2;
     pi.pPoolSizes = ps;
     vkCreateDescriptorPool(dev_, &pi, nullptr, &pool_);
@@ -324,6 +412,37 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     for (VkDescriptorSet& s : diff_sets_) vkAllocateDescriptorSets(dev_, &ai, &s);
     ai.pSetLayouts = &ao_set_layout_;
     vkAllocateDescriptorSets(dev_, &ai, &ao_set_);
+    ai.pSetLayouts = &alpha_set_layout_;
+    vkAllocateDescriptorSets(dev_, &ai, &alpha_set_);
+    ai.pSetLayouts = &r3d_aux_layout_;
+    for (VkDescriptorSet* s : {&r3d_aux_set_, &r3d_aux_opaque_set_, &r3d_aux_shadow_set_, &r3d_aux_probe_set_})
+        vkAllocateDescriptorSets(dev_, &ai, s);
+    ai.pSetLayouts = &compose_fx_layout_;
+    for (VkDescriptorSet* s : {&compose_fx_set_, &compose_fx_inner_set_, &compose_fx_measure_set_})
+        vkAllocateDescriptorSets(dev_, &ai, s);
+    {   // The second sets: the stand-ins until the images exist (ensure_targets)
+        auto put = [&](VkDescriptorSet set, uint32_t binding, VkSampler sampler, VkImageView view) {
+            VkDescriptorImageInfo info{sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkWriteDescriptorSet sw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            sw.dstSet = set;
+            sw.dstBinding = binding;
+            sw.descriptorCount = 1;
+            sw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            sw.pImageInfo = &info;
+            vkUpdateDescriptorSets(dev_, 1, &sw, 0, nullptr);
+        };
+        for (VkDescriptorSet s : {r3d_aux_set_, r3d_aux_opaque_set_, r3d_aux_shadow_set_, r3d_aux_probe_set_}) {
+            put(s, 0, nearest_, s == r3d_aux_shadow_set_ ? blank_depth_.view : shadow_map_.view);
+            put(s, 1, nearest_, blank_depth_.view);
+            put(s, 2, nearest_, s == r3d_aux_probe_set_ ? blank_color_.view : car_probe_.view);
+        }
+        for (VkDescriptorSet s : {compose_fx_set_, compose_fx_inner_set_, compose_fx_measure_set_}) {
+            put(s, 0, linear_, blank_color_.view);
+            put(s, 1, nearest_, s == compose_fx_measure_set_ ? blank_color_.view : exposure_.view);
+            put(s, 2, linear_, blank_color_.view);
+            put(s, 3, linear_, blank_color_.view);
+        }
+    }
 
     VkDescriptorImageInfo tex{nearest_, texture_ram_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -331,10 +450,6 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     w.descriptorCount = 1;
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w.pImageInfo = &tex;
-    vkUpdateDescriptorSets(dev_, 1, &w, 0, nullptr);
-    VkDescriptorImageInfo shadow{nearest_, shadow_map_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    w.dstBinding = 4;
-    w.pImageInfo = &shadow;
     vkUpdateDescriptorSets(dev_, 1, &w, 0, nullptr);
     if (rt_.ready()) {
         VkAccelerationStructureKHR tlas = rt_.tlas();
@@ -367,11 +482,6 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
         fw[i].pBufferInfo = &atmosphere_info;
     }
     vkUpdateDescriptorSets(dev_, 2, fw, 0, nullptr);
-    VkDescriptorImageInfo exposure{nearest_, exposure_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    w.dstSet = compose_set_;
-    w.dstBinding = 11;
-    w.pImageInfo = &exposure;
-    vkUpdateDescriptorSets(dev_, 1, &w, 0, nullptr);
     VkDescriptorImageInfo cells{nearest_, text_cells_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     w.dstSet = compose_set_;
     w.dstBinding = 6;
@@ -384,19 +494,24 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
 
     VkPushConstantRange pr{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(ViewportPush)};
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    pli.setLayoutCount = 1;
-    pli.pSetLayouts = &r3d_set_layout_;
+    VkDescriptorSetLayout r3d_sets[2] = {r3d_set_layout_, r3d_aux_layout_};
+    pli.setLayoutCount = 2;
+    pli.pSetLayouts = r3d_sets;
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &pr;
     vkCreatePipelineLayout(dev_, &pli, nullptr, &r3d_layout_);
     VkPushConstantRange cpr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(ComposePush)};
-    pli.pSetLayouts = &compose_set_layout_;
+    VkDescriptorSetLayout compose_sets[2] = {compose_set_layout_, compose_fx_layout_};
+    pli.pSetLayouts = compose_sets;
     pli.pPushConstantRanges = &cpr;
     vkCreatePipelineLayout(dev_, &pli, nullptr, &compose_layout_);
+    pli.setLayoutCount = 1;
     VkPushConstantRange bpr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
     pli.pSetLayouts = &bloom_set_layout_;
     pli.pPushConstantRanges = &bpr;
     vkCreatePipelineLayout(dev_, &pli, nullptr, &bloom_layout_);
+    pli.pSetLayouts = &alpha_set_layout_;   // same 16 bytes of push constants
+    vkCreatePipelineLayout(dev_, &pli, nullptr, &alpha_layout_);
     VkPushConstantRange apr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 96};
     // Traced, the ambient occlusion also sees the 3D pass's set (the world's rays)
     VkDescriptorSetLayout ao_sets[2] = {ao_set_layout_, r3d_set_layout_};
@@ -406,6 +521,20 @@ bool R3DRenderer::init(VkPresenter& vk, float supersample, int msaa, int aniso, 
     vkCreatePipelineLayout(dev_, &pli, nullptr, &ao_layout_);
 
     return create_pipelines();
+}
+
+// The composition's sets: the main one and, as set 1, the bloom / exposure /
+// diffusion images (or stand-ins for the one a pass draws into)
+void R3DRenderer::bind_compose_sets(VkCommandBuffer cmd, VkDescriptorSet fx) {
+    VkDescriptorSet sets[2] = {compose_set_, fx};
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compose_layout_, 0, 2, sets, 0, nullptr);
+}
+
+// The 3D pass's sets: the main one and, as set 1, the shadow map and the world
+// depth (or stand-ins where they are being drawn or not readable yet)
+void R3DRenderer::bind_r3d_sets(VkCommandBuffer cmd, VkDescriptorSet aux) {
+    VkDescriptorSet sets[2] = {r3d_set_, aux};
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r3d_layout_, 0, 2, sets, 0, nullptr);
 }
 
 VkPipeline R3DRenderer::make_pipeline(const PipelineDesc& d) {
@@ -446,19 +575,32 @@ VkPipeline R3DRenderer::make_pipeline(const PipelineDesc& d) {
     ds.depthTestEnable = d.depth;
     ds.depthWriteEnable = d.depth_write;
     ds.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;   // reverse Z
-    if (d.once) {
-        ds.depthWriteEnable = VK_TRUE;
-        ds.depthCompareOp = VK_COMPARE_OP_GREATER;
-    }
-    if (d.bias != 0) {
-        rs.depthBiasEnable = VK_TRUE;
-        rs.depthBiasConstantFactor = d.bias;
+    if (d.once) {   // passes where the stencil is still 0 and marks it: one blend per pixel (per sample)
+        ds.stencilTestEnable = VK_TRUE;
+        ds.front.failOp = VK_STENCIL_OP_KEEP;
+        ds.front.passOp = VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+        ds.front.depthFailOp = VK_STENCIL_OP_KEEP;
+        ds.front.compareOp = VK_COMPARE_OP_EQUAL;
+        ds.front.compareMask = ds.front.writeMask = 0xFF;
+        ds.front.reference = 0;
+        ds.back = ds.front;
     }
     VkPipelineColorBlendAttachmentState cbas[3]{};
     VkPipelineColorBlendAttachmentState& cba = cbas[0];
     cba.colorWriteMask = 0xF;
-    // Motion vectors: written by the opaque pass only, translucent surfaces keep what is behind
-    cbas[1].colorWriteMask = d.depth_write ? VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT : 0;
+    // Motion vectors: written by the opaque pass; translucent surfaces keep what
+    // is behind, except the dust where it is dense (its own laid over it by its
+    // w, r3d.frag; 0 for the rest)
+    cbas[1].colorWriteMask = d.depth_write || d.blend ? VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT : 0;
+    if (d.blend && !d.depth_write) {
+        cbas[1].blendEnable = VK_TRUE;
+        cbas[1].srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        cbas[1].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cbas[1].colorBlendOp = VK_BLEND_OP_ADD;
+        cbas[1].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        cbas[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cbas[1].alphaBlendOp = VK_BLEND_OP_ADD;
+    }
     if (d.blend) {
         cba.blendEnable = VK_TRUE;
         cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
@@ -491,6 +633,10 @@ VkPipeline R3DRenderer::make_pipeline(const PipelineDesc& d) {
         cba.colorBlendOp = VK_BLEND_OP_ADD;
         cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT;
     }
+    // Without the motion image (DLAA off) its slot is there with no image: it
+    // takes the colour's blend, as every slot must where the GPU has no
+    // independentBlend (all the same, or the pipeline is invalid: issue #158)
+    if (!d.motion || !vk_->independent_blend()) cbas[1] = cba;
     // Bloom source: blended like the colour. With it the motion slot is always
     // there (without an image when DLAA is off)
     cbas[2] = cba;
@@ -510,7 +656,8 @@ VkPipeline R3DRenderer::make_pipeline(const PipelineDesc& d) {
     VkFormat formats[3] = {d.color, d.motion ? VK_FORMAT_R16G16_SFLOAT : VK_FORMAT_UNDEFINED, VK_FORMAT_R8G8B8A8_UNORM};
     rend.colorAttachmentCount = attachments;
     rend.pColorAttachmentFormats = formats;
-    rend.depthAttachmentFormat = d.depth ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED;
+    rend.depthAttachmentFormat = !d.depth ? VK_FORMAT_UNDEFINED : d.stencil ? DEPTH_STENCIL : VK_FORMAT_D32_SFLOAT;
+    rend.stencilAttachmentFormat = d.depth && d.stencil ? DEPTH_STENCIL : VK_FORMAT_UNDEFINED;
 
     VkGraphicsPipelineCreateInfo gp{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     gp.pNext = &rend;
@@ -532,22 +679,25 @@ VkPipeline R3DRenderer::make_pipeline(const PipelineDesc& d) {
 }
 
 bool R3DRenderer::create_pipelines() {
-    VkShaderModule r3d_vs = rt_.ready() ? make_module(dev_, spv_r3d_rt_vert, sizeof(spv_r3d_rt_vert))
-                                        : make_module(dev_, spv_r3d_vert, sizeof(spv_r3d_vert));
+    VkShaderModule r3d_vs = rt_.ready() ? vk_->shader_module(spv_r3d_rt_vert, sizeof(spv_r3d_rt_vert))
+                                        : vk_->shader_module(spv_r3d_vert, sizeof(spv_r3d_vert));
     // With ray queries the 3D pass can also trace the sun shadows
-    VkShaderModule r3d_fs = rt_.ready() ? make_module(dev_, spv_r3d_rt_frag, sizeof(spv_r3d_rt_frag))
-                                        : make_module(dev_, spv_r3d_frag, sizeof(spv_r3d_frag));
-    VkShaderModule c_vs = make_module(dev_, spv_compose_vert, sizeof(spv_compose_vert));
-    VkShaderModule c_fs = make_module(dev_, spv_compose_frag, sizeof(spv_compose_frag));
-    VkShaderModule b_fs = make_module(dev_, spv_bloom_frag, sizeof(spv_bloom_frag));
-    VkShaderModule ao_fs = rt_.ready() ? make_module(dev_, spv_ao_rt_frag, sizeof(spv_ao_rt_frag))
-                                       : make_module(dev_, spv_ao_frag, sizeof(spv_ao_frag));
-    VkShaderModule aoa_fs = make_module(dev_, spv_ao_apply_frag, sizeof(spv_ao_apply_frag));
+    VkShaderModule r3d_fs = rt_.ready() ? vk_->shader_module(spv_r3d_rt_frag, sizeof(spv_r3d_rt_frag))
+                                        : vk_->shader_module(spv_r3d_frag, sizeof(spv_r3d_frag));
+    VkShaderModule c_vs = vk_->shader_module(spv_compose_vert, sizeof(spv_compose_vert));
+    VkShaderModule c_fs = vk_->shader_module(spv_compose_frag, sizeof(spv_compose_frag));
+    VkShaderModule b_fs = vk_->shader_module(spv_bloom_frag, sizeof(spv_bloom_frag));
+    VkShaderModule ao_fs = rt_.ready() ? vk_->shader_module(spv_ao_rt_frag, sizeof(spv_ao_rt_frag))
+                                       : vk_->shader_module(spv_ao_frag, sizeof(spv_ao_frag));
+    VkShaderModule aoa_fs = vk_->shader_module(spv_ao_apply_frag, sizeof(spv_ao_apply_frag));
+    VkShaderModule alpha_fs = vk_->shader_module(spv_alpha_taa_frag, sizeof(spv_alpha_taa_frag));
+    VkShaderModule probe_fs = rt_.ready() ? vk_->shader_module(spv_car_probe_rt_frag, sizeof(spv_car_probe_rt_frag))
+                                          : vk_->shader_module(spv_car_probe_frag, sizeof(spv_car_probe_frag));
     bool motion = motion_pass_ = dlaa_.ready();
     // The world: 3D geometry into the HDR image, with the motion and glow slots
     PipelineDesc world{.vs = r3d_vs, .fs = r3d_fs, .layout = r3d_layout_, .color = VK_FORMAT_R16G16B16A16_SFLOAT,
                        .depth = true, .depth_write = true, .vertex_input = true, .samples = samples_,
-                       .motion = motion, .glow = true};
+                       .motion = motion, .glow = true, .stencil = true};
     opaque_ = make_pipeline(world);
     PipelineDesc translucent = world;
     translucent.depth_write = false;
@@ -558,16 +708,14 @@ bool R3DRenderer::create_pipelines() {
     trans_depth_ = make_pipeline(trans_depth);
     // The game's dark patch under each car (its shadow), made of several
     // shapes laid over each other: blended over one another they came out
-    // nearly black. It is blended once at each pixel instead: its nearest depth
-    // goes first a hair farther (blob_depth_; 1 unit, the least that also
-    // leaves no seam where two of its shapes cross), then the first of it to
-    // pass, nearer than that, takes the pixel (blob_)
+    // nearly black. It is blended once at each pixel instead, with the
+    // stencil: the first of it to pass the depth test takes the pixel and
+    // marks it (blob_). (It was done with its depth drawn first a hair
+    // farther, but where the patch lay within that hair of the road the road
+    // won, the patch blended twice there and flickering black streaks crossed it)
     PipelineDesc blob = translucent;
     blob.once = true;
     blob_ = make_pipeline(blob);
-    PipelineDesc blob_depth = trans_depth;
-    blob_depth.bias = -1.0f;
-    blob_depth_ = make_pipeline(blob_depth);
     shadow_ = make_pipeline({.vs = r3d_vs, .fs = r3d_fs, .layout = r3d_layout_, .color = VK_FORMAT_UNDEFINED,
                              .depth = true, .depth_write = true, .vertex_input = true});
     // Full-screen passes: a triangle over the target, no vertex input
@@ -590,8 +738,12 @@ bool R3DRenderer::create_pipelines() {
                                .samples = samples_, .multiply = true});
     ao_apply_glow_ = make_pipeline({.vs = c_vs, .fs = aoa_fs, .layout = ao_layout_, .color = VK_FORMAT_R8G8B8A8_UNORM,
                                     .samples = samples_, .multiply = true});
-    for (auto m : {r3d_vs, r3d_fs, c_vs, c_fs, b_fs, ao_fs, aoa_fs}) vkDestroyShaderModule(dev_, m, nullptr);
-    return opaque_ && translucent_ && blob_ && blob_depth_ && trans_depth_ && shadow_ && compose_measure_ && compose_ && bloom_ && ao_pass_ && ao_apply_ && ao_apply_glow_;
+    alpha_taa_ = make_pipeline({.vs = c_vs, .fs = alpha_fs, .layout = alpha_layout_, .color = VK_FORMAT_R8_UNORM});
+    // The cars' light probes: blended over the stored ones by the alpha the shader gives
+    car_probe_pass_ = make_pipeline({.vs = c_vs, .fs = probe_fs, .layout = r3d_layout_,
+                                     .color = VK_FORMAT_R16G16B16A16_SFLOAT, .blend = true});
+    for (auto m : {r3d_vs, r3d_fs, c_vs, c_fs, b_fs, ao_fs, aoa_fs, alpha_fs, probe_fs}) vkDestroyShaderModule(dev_, m, nullptr);
+    return opaque_ && translucent_ && blob_ && trans_depth_ && shadow_ && compose_measure_ && compose_ && bloom_ && ao_pass_ && ao_apply_ && ao_apply_glow_ && alpha_taa_ && car_probe_pass_;
 }
 
 // w, h: the 3D image as drawn; up_w, up_h: as DLSS hands it on (the same but with DLSS upscaling)
@@ -604,7 +756,8 @@ void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t
     destroy_image(depth_);
     destroy_image(motion_);
     destroy_image(dlaa_out_);
-    destroy_image(dlaa_alpha_);
+    destroy_image(alpha_out_);
+    destroy_image(alpha_history_);
     for (Image* img : {&glow_, &glow_ms_, &bloom_a_, &bloom_b_, &bloom_c_, &depth_resolved_, &ao_, &diff_a_, &diff_b_})
         destroy_image(*img);
     create_image(color_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -620,15 +773,26 @@ void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t
         create_image(color_ms_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                      VK_IMAGE_ASPECT_COLOR_BIT, samples_);
     bool dlaa = motion_pass_;
-    create_image(depth_, w, h, VK_FORMAT_D32_SFLOAT,
+    create_image(depth_, w, h, DEPTH_STENCIL,
                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                  VK_IMAGE_ASPECT_DEPTH_BIT, samples_);
     // The world's depth, kept after its opaque surfaces (sample 0 of it with
     // MSAA, a copy without) for the ambient occlusion and the soft particles;
     // and the raw occlusion
-    create_image(depth_resolved_, w, h, VK_FORMAT_D32_SFLOAT,
+    create_image(depth_resolved_, w, h, DEPTH_STENCIL,
                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                  VK_IMAGE_ASPECT_DEPTH_BIT);
+    // With a stencil (the cars' patch, blob_): the views above read the depth,
+    // these draw into both; layout changes cover both aspects
+    for (Image* img : {&depth_, &depth_resolved_}) {
+        VkImageViewCreateInfo dvi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        dvi.image = img->image;
+        dvi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        dvi.format = DEPTH_STENCIL;
+        dvi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+        vkCreateImageView(dev_, &dvi, nullptr, &img->attach_view);
+        img->barrier_aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    }
     depth_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
     // The occlusion at half resolution (one pixel in four): ao_apply.frag
     // brings it back to full size along the depth edges. (Its colour: the
@@ -649,10 +813,11 @@ void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t
             aw[i].pImageInfo = &src[i];
         }
         vkUpdateDescriptorSets(dev_, 2, aw, 0, nullptr);
-        // ... and for the soft particles in the 3D pass
+        // ... and for the soft particles in the 3D pass (once it is readable:
+        // before that the pass binds r3d_aux_opaque_set_, with a stand-in)
         VkWriteDescriptorSet dw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        dw.dstSet = r3d_set_;
-        dw.dstBinding = 5;
+        dw.dstSet = r3d_aux_set_;
+        dw.dstBinding = 1;
         dw.descriptorCount = 1;
         dw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         dw.pImageInfo = &src[0];
@@ -661,10 +826,29 @@ void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t
     if (dlaa) {
         create_image(motion_, w, h, VK_FORMAT_R16G16_SFLOAT,
                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        // (transfer: NGX clears it itself, VUID-vkCmdClearColorImage-image-00002)
         create_image(dlaa_out_, up_w, up_h, VK_FORMAT_R16G16B16A16_SFLOAT,
-                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
-        create_image(dlaa_alpha_, up_w, up_h, VK_FORMAT_R8G8B8A8_UNORM,
-                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                     VK_IMAGE_ASPECT_COLOR_BIT);
+        create_image(alpha_out_, up_w, up_h, VK_FORMAT_R8_UNORM,
+                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                     VK_IMAGE_ASPECT_COLOR_BIT);
+        create_image(alpha_history_, up_w, up_h, VK_FORMAT_R8_UNORM,
+                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        alpha_history_valid_ = false;
+        VkDescriptorImageInfo alpha_info[3] = {{linear_, color_.alpha_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                                       {nearest_, motion_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                                       {linear_, alpha_history_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+        VkWriteDescriptorSet alpha_writes[3];
+        for (uint32_t i = 0; i < 3; i++) {
+            alpha_writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            alpha_writes[i].dstSet = alpha_set_;
+            alpha_writes[i].dstBinding = i;
+            alpha_writes[i].descriptorCount = 1;
+            alpha_writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            alpha_writes[i].pImageInfo = &alpha_info[i];
+        }
+        vkUpdateDescriptorSets(dev_, 3, alpha_writes, 0, nullptr);
     }
     // Bloom: glow written by the 3D pass, then reduced to a quarter and blurred
     const VkImageUsageFlags target = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -685,8 +869,8 @@ void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t
         VkWriteDescriptorSet bw[6];
         for (int i = 0; i < 6; i++) {
             bw[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            bw[i].dstSet = i < 4 ? bloom_sets_[i] : compose_set_;
-            bw[i].dstBinding = i < 4 ? 0 : i == 4 ? 8 : 13;
+            bw[i].dstSet = i < 4 ? bloom_sets_[i] : compose_fx_set_;
+            bw[i].dstBinding = i < 4 ? 0 : i == 4 ? 0 : 3;
             bw[i].descriptorCount = 1;
             bw[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             bw[i].pImageInfo = &src[i];
@@ -704,8 +888,8 @@ void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t
         VkWriteDescriptorSet dw[3];
         for (int i = 0; i < 3; i++) {
             dw[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            dw[i].dstSet = i < 2 ? diff_sets_[i] : compose_set_;
-            dw[i].dstBinding = i < 2 ? 0 : 12;
+            dw[i].dstSet = i < 2 ? diff_sets_[i] : compose_fx_set_;
+            dw[i].dstBinding = i < 2 ? 0 : 2;
             dw[i].descriptorCount = 1;
             dw[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             dw[i].pImageInfo = &src[i];
@@ -713,7 +897,7 @@ void R3DRenderer::ensure_targets(uint32_t w, uint32_t h, uint32_t up_w, uint32_t
         vkUpdateDescriptorSets(dev_, 3, dw, 0, nullptr);
     }
     composed_view_ = VK_NULL_HANDLE;
-    if (dlaa_.ready()) bind_scene_image(dlaa_out_.view, dlaa_alpha_.view);
+    if (dlaa_.ready()) bind_scene_image(dlaa_out_.view, alpha_out_.view);
     else bind_scene_image(color_.view, color_.alpha_view);
     VkDescriptorImageInfo infos[3] = {
         {linear_, color_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
@@ -758,9 +942,12 @@ void R3DRenderer::set_layers(const uint32_t* back, const uint32_t* front) {
     memcpy(dst + BACK_W * SCREEN_H * 4, front, SCREEN_W * SCREEN_H * 4);
     layers_dirty_ = true;
     // Average colour of each row of the back layer, for the horizon colour
+    // (over the 200 columns past each side it always had, as before the
+    // margin grew for ultrawide views)
+    constexpr int AVG_FROM = BACK_MARGIN - 200, AVG_TO = BACK_MARGIN + SCREEN_W + 200;
     for (int y = 0; y < SCREEN_H; y++) {
         float sum[3] = {0, 0, 0}, n = 0;
-        for (int x = 0; x < BACK_W; x += 2) {
+        for (int x = AVG_FROM; x < AVG_TO; x += 2) {
             uint32_t p = back[y * BACK_W + x];
             float a = float(p >> 24);
             if (a < 128) continue;
@@ -1028,10 +1215,12 @@ void R3DRenderer::update_atmosphere(const ScreenLayout& lay, uint32_t target_w, 
         // Projection as used for the world viewport (widened when it fills the screen)
         bool full = w->x <= 0.5f && w->w >= SCREEN_W - 0.5f;
         float widen = full ? lay.view_w / SCREEN_W : 1.0f;
-        u.view[0] = w->proj[0] / widen;
-        u.view[1] = w->proj[5];
-        u.view[2] = w->proj[8] / widen;
-        u.view[3] = w->proj[9];
+        float wp[16];   // (its lens at this image's t, as the models are drawn: R3DScene::proj_at)
+        scene_->proj_at(size_t(w - scene_->viewports.data()), interp_, wp);
+        u.view[0] = wp[0] / widen;
+        u.view[1] = wp[5];
+        u.view[2] = wp[8] / widen;
+        u.view[3] = wp[9];
 
         // Distance haze. Horizon colour: a pale haze, tinted by the back
         // layer just above the horizon (where a level view direction meets
@@ -1151,8 +1340,17 @@ void R3DRenderer::update_atmosphere(const ScreenLayout& lay, uint32_t target_w, 
                 u.rt[3] = dlaa_.ready() ? golden - std::floor(golden) : 0.0f;
             }
         }
-        u.soft[0] = soft_particles_ ? 1.0f : 0.0f;
+        // (2: what lies on the surface behind it, as the tyre tracks on the
+        // sand, is not softened, r3d.frag; SR2_SOFT_DECALS=1: it is, as before)
+        static const bool soft_decals = getenv("SR2_SOFT_DECALS") && atoi(getenv("SR2_SOFT_DECALS")) == 1;
+        u.soft[0] = soft_particles_ ? (soft_decals ? 1.0f : 2.0f) : 0.0f;
         u.soft[1] = 2.0f;
+        // The dust's own motion vectors where it is dense, from 30% to 50%
+        // opacity (r3d.frag). SR2_DUST_MV=0: the road's behind it, as before
+        static const bool dust_mv = !(getenv("SR2_DUST_MV") && atoi(getenv("SR2_DUST_MV")) == 0);
+        u.dust_mv[0] = dust_mv ? 1.0f : 0.0f;
+        u.dust_mv[1] = 0.3f;
+        u.dust_mv[2] = 0.5f;
         // Light in the game's fog, with the distance haze: strength, brighter
         // upwards, drifting banks
         if (w->fog_density > 0) {
@@ -1177,15 +1375,8 @@ void R3DRenderer::update_atmosphere(const ScreenLayout& lay, uint32_t target_w, 
     (void)tone_read;
     u.soft[3] = tone[0];
     u.sunlight[3] = tone[1];
-    // SUN: more contrast in clear outdoor scenes (sunlit, little of the game's
-    // own fog); the fogged, dark and indoor scenes keep the game's light
-    if (w && sun_ && w->sun_intensity > 0.3f) {
-        float fogged = std::clamp(w->scroll_fog * 2.0f + w->fog_density * 300.0f, 0.0f, 1.0f);
-        float k = 1.0f - fogged;
-        u.sunlight[0] = 1.0f + 0.45f * k;
-        u.sunlight[1] = 1.0f - 0.4f * k;
-        u.sunlight[2] = k;
-    }
+    // SUN: more contrast in clear outdoor scenes (r3d_sun_gains)
+    if (w) u.sunlight[2] = r3d_sun_gains(*w, sun_, u.sunlight[0], u.sunlight[1]);
     u.mirror[3] = reflections_ ? 1.0f : 0.0f;   // r3d.frag: ray traced reflections on the cars
     // The world viewport's spotlight (spec 7.1), applied to the game world
     if (w && w->spot_radius[0] > 0 && w->spot_radius[1] > 0) {
@@ -1214,9 +1405,16 @@ void R3DRenderer::update_atmosphere(const ScreenLayout& lay, uint32_t target_w, 
     u.mirror[0] = car_fill[1];
     if (rt_gi_ && gi_tune().strength > 0) {   // the player's car's and the dust's share of the global illumination (r3d.frag, r3d.vert)
         u.gi[1] = gi_tune().strength;
-        u.gi[2] = 2.0f * gi_tune().rays;   // the car's rays: four, eight on HIGH
+        u.gi[2] = 2.0f * gi_tune().rays;   // the car's rays: four
         u.gi[3] = gi_tune().reach;
     }
+    // The cars' light probes: only where something tells sun from shade (the
+    // traced shadows, or the shadow map)
+    car_probe_cars_ = 0;
+    if (w && car_probes_on_ && (shadow_frame_ || u.rt[0] > 0.0f)) car_boxes(u.car_box, u.car_probe, &u.axes[4]);
+    // ... and their sun shadows pixel by pixel on top (SR2_CAR_SHADOW=0: the probes' alone)
+    static const bool car_shadow = !(getenv("SR2_CAR_SHADOW") && atoi(getenv("SR2_CAR_SHADOW")) == 0);
+    u.car_shadow[0] = w && car_shadow && car_shadows_on_ && (shadow_frame_ || u.rt[0] > 0.0f) ? 1.0f : 0.0f;
     memcpy(atmosphere_uniform_.mapped, &u, sizeof(u));
 }
 
@@ -1225,8 +1423,10 @@ struct R3DRenderer::Frame {
     VkCommandBuffer cmd;
     VkExtent2D extent;       // the window
     ScreenLayout lay;        // placement of the game screen in it
-    uint32_t out_w, out_h;   // internal 3D resolution
-    uint32_t up_w, up_h;     // ... and what DLSS makes of it (the same, but with DLSS upscaling)
+    uint32_t out_w, out_h;   // internal 3D resolution: what is drawn this image
+    uint32_t full_w, full_h; // ... and the targets' size: the same, or larger with dynamic resolution
+                             // (the image in their top left corner)
+    uint32_t up_w, up_h;     // what DLSS makes of it (the same as full, but with DLSS upscaling)
     size_t vcount;           // vertices of the scene
     float before;            // motion vectors: how far back the previously displayed image was
     float jitter_x, jitter_y, alpha_seed;   // DLAA: sub-pixel shift and alpha-test noise seed
@@ -1273,24 +1473,29 @@ void R3DRenderer::record_uploads(const Frame& f) {
         transition(cmd, sky_coords_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         layers_dirty_ = false;
     }
-    size_t total = vcount;
+    const size_t nbacks = vcount && shadowmap_backs() ? scene_->backs.size() : 0;
+    size_t total = vcount + nbacks;
     if (total * sizeof(R3DVertex) > vertices_.size) {
         vkDeviceWaitIdle(dev_);
         destroy_buffer(vertices_);
         create_buffer(vertices_, total * sizeof(R3DVertex) * 2, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     }
     if (vcount) memcpy(vertices_.mapped, scene_->vertices.data(), vcount * sizeof(R3DVertex));
+    if (nbacks)
+        memcpy(static_cast<R3DVertex*>(vertices_.mapped) + vcount, scene_->backs.data(), nbacks * sizeof(R3DVertex));
+    backs_uploaded_ = nbacks;
 }
 
 // Global illumination: the rays for every pixel of the half-size image (16
 // times as many for each block of 4x4 put together, ao_apply.frag) and how
-// far they reach. LOW: two, 30 units (the walls, the banks and the trees
-// beside the road); HIGH: four, 60 units (the rock faces and the far banks
-// too). SR2_GI="strength,rays,reach": debugging aid (a negative strength
-// shows the bounced light alone)
+// far they reach: two, 30 units (the walls, the banks and the trees beside
+// the road). (A HIGH level, four rays reaching 60 units, cost a lot more on
+// the graphics card for little to see: dropped, GitHub issue #14.)
+// SR2_GI="strength,rays,reach": debugging aid (a negative strength shows the
+// bounced light alone)
 R3DRenderer::GiTune R3DRenderer::gi_tune() const {
     static const char* env = getenv("SR2_GI");
-    GiTune t = gi_ >= 2 ? GiTune{1.0f, 4.0f, 60.0f} : GiTune{1.0f, 2.0f, 30.0f};
+    GiTune t{1.0f, 2.0f, 30.0f};
     if (env) sscanf(env, "%f,%f,%f", &t.strength, &t.rays, &t.reach);
     return t;
 }
@@ -1349,7 +1554,7 @@ void R3DRenderer::record_shadows(const Frame& f) {
         vkCmdBeginRendering(cmd, &sr);
         VkDeviceSize zero = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &vertices_.buffer, &zero);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r3d_layout_, 0, 1, &r3d_set_, 0, nullptr);
+        bind_r3d_sets(cmd, r3d_aux_shadow_set_);   // (the shadow map being drawn: a stand-in for it)
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_);
         VkViewport sv{0, 0, float(SHADOW_SIZE), float(SHADOW_SIZE), 0, 1};
         vkCmdSetViewport(cmd, 0, 1, &sv);
@@ -1378,6 +1583,9 @@ void R3DRenderer::record_shadows(const Frame& f) {
             vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                                sizeof(pc), &pc);
             vkCmdDraw(cmd, v.opaque_count, 1, v.opaque_first, 0);
+            // (the world's back faces too: shadowmap_backs)
+            if (v.world && v.back_count && size_t(v.back_first) + v.back_count <= backs_uploaded_)
+                vkCmdDraw(cmd, v.back_count, 1, uint32_t(vcount + v.back_first), 0);
         }
         vkCmdEndRendering(cmd);
         transition(cmd, shadow_map_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -1385,6 +1593,159 @@ void R3DRenderer::record_shadows(const Frame& f) {
 }
 
 // The game world and HUD into color_ (and glow_, motion_, depth_)
+// Light probes on the cars (not in the original): the cars drawn in viewports
+// of their own (CAR: the player's, the rivals near it) took none of the
+// world's sun shadows, and drove into the shade of the trees as bright as in
+// the open. Each car's box this image, from its solid polygons as they are
+// drawn (between the game frames too): along its length (the longer way
+// across the world's up), across it and up, for car_probe.frag to place its
+// probes on and r3d.frag to read them back. box: CAR_PROBE_CARS x 3 vec4
+// (atmosphere.glsl car_box), probe: car_probe; up: the world's up (view space).
+// SR2_CAR_PROBE="sun,sky": how much of each the cars take (1,0.8; 0 = off);
+// SR2_CAR_PROBE_TAU=S: how long the probes take to settle (0.1 s; 0 = at once)
+void R3DRenderer::car_boxes(float* box, float* probe, const float* up) {
+    static float take[2] = {1.0f, 0.8f};
+    static const bool read = [] {
+        if (const char* e = getenv("SR2_CAR_PROBE")) {
+            take[1] = 0.0f;
+            sscanf(e, "%f,%f", &take[0], &take[1]);
+        }
+        return true;
+    }();
+    (void)read;
+    static const float tau = getenv("SR2_CAR_PROBE_TAU") ? float(atof(getenv("SR2_CAR_PROBE_TAU"))) : 0.1f;
+    probe[0] = 0.0f;
+    if (!scene_ || (take[0] <= 0.0f && take[1] <= 0.0f)) return;
+    float ul = std::sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+    if (ul < 1e-6f) return;
+    const float U[3] = {up[0] / ul, up[1] / ul, up[2] / ul};
+    auto cross = [](const float* a, const float* b, float* o) {
+        o[0] = a[1] * b[2] - a[2] * b[1];
+        o[1] = a[2] * b[0] - a[0] * b[2];
+        o[2] = a[0] * b[1] - a[1] * b[0];
+    };
+    auto dot = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    auto normalise = [](float* v) {
+        float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        if (l > 1e-9f) v[0] /= l, v[1] /= l, v[2] /= l;
+    };
+    // Two directions across the world's up, to find each car's length in
+    float A[3], B[3];
+    const float other[3] = {std::fabs(U[0]) < 0.9f ? 1.0f : 0.0f, std::fabs(U[0]) < 0.9f ? 0.0f : 1.0f, 0.0f};
+    cross(U, other, A);
+    normalise(A);
+    cross(U, A, B);
+    // How far this image's probes move the stored ones: the same share each
+    // second whatever the frame rate
+    double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    float dt = car_probe_time_ > 0 ? float(std::clamp(now - car_probe_time_, 0.0, 0.25)) : 0.0f;
+    car_probe_time_ = now;
+    float ease = tau > 0.0f ? 1.0f - std::exp(-dt / tau) : 1.0f;
+    for (int i = 0; i < CAR_PROBE_CARS * 12; i++) box[i] = 0.0f;
+    for (int c = 0; c < CAR_PROBE_CARS; c++) box[c * 12] = box[c * 12 + 1] = box[c * 12 + 2] = 1e6f;   // (nowhere)
+    int count = 0;
+    bool taken[CAR_PROBE_CARS] = {};
+    const std::vector<R3DVertex>& vs = scene_->vertices;
+    for (const R3DViewport& v : scene_->viewports) {
+        if (v.world || v.opaque_count < 3 || size_t(v.opaque_first) + v.opaque_count > vs.size()) continue;
+        if (!(vs[v.opaque_first].flags & R3D_CAR)) continue;
+        // Its place: the one it had (seen within the last two game frames), or a free one
+        int slot = -1;
+        for (int c = 0; c < CAR_PROBE_CARS && slot < 0; c++)
+            if (car_slots_[c].used && car_slots_[c].node == v.node && !taken[c] && scene_->frame - car_slots_[c].frame <= 2)
+                slot = c;
+        bool fresh = slot < 0;
+        for (int c = 0; c < CAR_PROBE_CARS && slot < 0; c++)
+            if (!taken[c] && (!car_slots_[c].used || scene_->frame - car_slots_[c].frame > 2)) slot = c;
+        if (slot < 0) continue;   // (more cars than places)
+        taken[slot] = true;
+        // Its corners as drawn this image, their middle and their spread across the world's up
+        auto at = [&](const R3DVertex& x, float* p) {
+            for (int k = 0; k < 3; k++) p[k] = x.prev[k] + (x.pos[k] - x.prev[k]) * interp_;
+        };
+        double mean[3] = {0, 0, 0};
+        for (uint32_t i = v.opaque_first; i < v.opaque_first + v.opaque_count; i++) {
+            float p[3];
+            at(vs[i], p);
+            for (int k = 0; k < 3; k++) mean[k] += p[k];
+        }
+        float m[3];
+        for (int k = 0; k < 3; k++) m[k] = float(mean[k] / double(v.opaque_count));
+        double saa = 0, sab = 0, sbb = 0;
+        for (uint32_t i = v.opaque_first; i < v.opaque_first + v.opaque_count; i++) {
+            float p[3];
+            at(vs[i], p);
+            float d[3] = {p[0] - m[0], p[1] - m[1], p[2] - m[2]};
+            double a = dot(d, A), b = dot(d, B);
+            saa += a * a, sab += a * b, sbb += b * b;
+        }
+        float angle = 0.5f * float(std::atan2(2.0 * sab, saa - sbb));
+        float F[3] = {A[0] * std::cos(angle) + B[0] * std::sin(angle), A[1] * std::cos(angle) + B[1] * std::sin(angle),
+                      A[2] * std::cos(angle) + B[2] * std::sin(angle)};
+        normalise(F);
+        CarSlot& cs = car_slots_[slot];
+        if (!fresh && dot(F, cs.forward) < 0.0f) F[0] = -F[0], F[1] = -F[1], F[2] = -F[2];
+        cs.node = v.node;
+        cs.frame = scene_->frame;
+        cs.used = true;
+        for (int k = 0; k < 3; k++) cs.forward[k] = F[k];
+        float S[3];
+        cross(F, U, S);
+        normalise(S);
+        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        for (uint32_t i = v.opaque_first; i < v.opaque_first + v.opaque_count; i++) {
+            float p[3];
+            at(vs[i], p);
+            float d[3] = {p[0] - m[0], p[1] - m[1], p[2] - m[2]};
+            float e[3] = {dot(d, F), dot(d, S), dot(d, U)};
+            for (int k = 0; k < 3; k++) lo[k] = std::min(lo[k], e[k]), hi[k] = std::max(hi[k], e[k]);
+        }
+        float mid[3] = {0.5f * (lo[0] + hi[0]), 0.5f * (lo[1] + hi[1]), 0.5f * (lo[2] + hi[2])};
+        float* b = box + slot * 12;
+        for (int k = 0; k < 3; k++) b[k] = m[k] + F[k] * mid[0] + S[k] * mid[1] + U[k] * mid[2];
+        b[3] = 0.5f * (hi[0] - lo[0]);
+        for (int k = 0; k < 3; k++) b[4 + k] = F[k];
+        b[7] = 0.5f * (hi[1] - lo[1]);
+        b[8] = 0.5f * (hi[2] - lo[2]);
+        b[9] = fresh ? 1.0f : ease;   // (a car just come: its probes as they are)
+        count = std::max(count, slot + 1);
+    }
+    car_probe_cars_ = count;
+    probe[0] = float(count);
+    probe[1] = std::max(take[0], 0.0f);
+    probe[2] = std::max(take[1], 0.0f);
+    float turn = float(car_probe_images_++) * 0.618034f;
+    probe[3] = turn - std::floor(turn);
+}
+
+// The cars' light probes, taken after the shadow map (car_probe.frag): one
+// texel for each slice of each car, blended over what was stored there
+void R3DRenderer::record_car_probes(const Frame& f) {
+    if (!car_probe_cars_ || !car_probe_pass_) return;
+    VkCommandBuffer cmd = f.cmd;
+    transition(cmd, car_probe_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo at{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    at.imageView = car_probe_.view;
+    at.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    at.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    at.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea = {{0, 0}, {car_probe_.w, car_probe_.h}};
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &at;
+    vkCmdBeginRendering(cmd, &ri);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, car_probe_pass_);
+    bind_r3d_sets(cmd, r3d_aux_probe_set_);
+    VkViewport pv{0, 0, float(car_probe_.w), float(car_probe_.h), 0, 1};
+    vkCmdSetViewport(cmd, 0, 1, &pv);
+    VkRect2D pr{{0, 0}, {car_probe_.w, car_probe_.h}};
+    vkCmdSetScissor(cmd, 0, 1, &pr);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+    transition(cmd, car_probe_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
 void R3DRenderer::record_world(const Frame& f) {
     VkCommandBuffer cmd = f.cmd;
     const ScreenLayout& lay = f.lay;
@@ -1404,7 +1765,7 @@ void R3DRenderer::record_world(const Frame& f) {
     glow_.layout = glow_ms_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
     transition(cmd, glow_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     if (msaa) transition(cmd, glow_ms_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    transition(cmd, depth_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    transition(cmd, depth_, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
     VkRenderingAttachmentInfo cas[3] = {{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO},
                                         {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO},
                                         {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO}};
@@ -1434,15 +1795,15 @@ void R3DRenderer::record_world(const Frame& f) {
     cas[2].imageView = msaa ? glow_ms_.view : glow_.view;
     if (msaa) cas[2].resolveImageView = glow_.view;
     VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    da.imageView = depth_.view;
-    da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    da.imageView = depth_.attach_view;
+    da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     da.storeOp = motion_pass_ || split ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
     if (split && msaa) {   // sample 0 of the depth, readable without multisampling
-        transition(cmd, depth_resolved_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        transition(cmd, depth_resolved_, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
         da.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
-        da.resolveImageView = depth_resolved_.view;
-        da.resolveImageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        da.resolveImageView = depth_resolved_.attach_view;
+        da.resolveImageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
     da.clearValue.depthStencil = {0.0f, 0};
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -1451,12 +1812,13 @@ void R3DRenderer::record_world(const Frame& f) {
     ri.colorAttachmentCount = 3;
     ri.pColorAttachments = cas;
     ri.pDepthAttachment = &da;
+    ri.pStencilAttachment = &da;   // the same image (the cars' patch: blob_)
     vkCmdBeginRendering(cmd, &ri);
 
     if (vcount) {
         VkDeviceSize zero = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &vertices_.buffer, &zero);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r3d_layout_, 0, 1, &r3d_set_, 0, nullptr);
+        bind_r3d_sets(cmd, r3d_aux_opaque_set_);   // (the world depth is not readable yet: a stand-in)
         float sx = float(out_w) / lay.view_w, sy = float(out_h) / SCREEN_H;
         float widen = lay.view_w / SCREEN_W;
         const auto& vps = scene_->viewports;
@@ -1466,7 +1828,7 @@ void R3DRenderer::record_world(const Frame& f) {
             size_t j = i;
             while (j < vps.size() && vps[j].priority == vps[i].priority) j++;
             if (!first_priority) {   // each priority starts with a cleared depth buffer
-                VkClearAttachment clr{VK_IMAGE_ASPECT_DEPTH_BIT, 0, {}};
+                VkClearAttachment clr{VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, {}};
                 clr.clearValue.depthStencil = {0.0f, 0};
                 VkClearRect rect{{{0, 0}, {out_w, out_h}}, 0, 1};
                 vkCmdClearAttachments(cmd, 1, &clr, 1, &rect);
@@ -1499,10 +1861,10 @@ void R3DRenderer::record_world(const Frame& f) {
                     VkRenderingInfo rag = ri;
                     rag.pColorAttachments = again;
                     rag.pDepthAttachment = &dagain;
+                    rag.pStencilAttachment = &dagain;
                     vkCmdBeginRendering(cmd, &rag);
                     vkCmdBindVertexBuffers(cmd, 0, 1, &vertices_.buffer, &zero);
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r3d_layout_, 0, 1, &r3d_set_, 0,
-                                            nullptr);
+                    bind_r3d_sets(cmd, r3d_aux_set_);   // now with the world depth
                 }
                 if (step == 1) continue;
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pass == 0 ? opaque_ : translucent_);
@@ -1520,9 +1882,10 @@ void R3DRenderer::record_world(const Frame& f) {
                         const int* s = sr2_split_;
                         bool top = v.y + v.h <= SR2_HUD_TOP_ROWS, bottom = v.y >= SR2_HUD_BOTTOM_ROW - 8;
                         bool top_left = v.y + v.h <= SR2_HUD_LEFT_ROWS;
-                        if ((top_left && v.x + v.w <= s[0]) || (bottom && s[2] > 0 && v.x + v.w <= s[2])) vx = v.x;
+                        if ((top_left && v.x + v.w <= s[0]) || (bottom && s[2] > 0 && v.x + v.w <= s[2]))
+                            vx = v.x + lay.game_x0 - lay.hud_x;
                         else if ((top && s[1] > 0 && v.x >= s[1]) || (bottom && s[2] > 0 && v.x >= s[2]))
-                            vx = v.x + 2.0f * lay.game_x0;
+                            vx = v.x + lay.game_x0 + lay.hud_x;
                     }
                     VkViewport viewport{vx * sx + jitter_x, v.y * sy + jitter_y, vw * sx, v.h * sy, 0.0f, 1.0f};
                     vkCmdSetViewport(cmd, 0, 1, &viewport);
@@ -1532,11 +1895,23 @@ void R3DRenderer::record_world(const Frame& f) {
                                  std::min(out_h - uint32_t(y0), uint32_t(v.h * sy + 0.5f))}};
                     vkCmdSetScissor(cmd, 0, 1, &sc);
                     ViewportPush pc{};
-                    memcpy(pc.proj, v.proj, 64);
+                    // Its lens at this image's t (R3DScene::proj_at), and at the
+                    // previous image's for the motion vectors: that one's x and y
+                    // scale and offset in the projection's places that are always
+                    // 0 (column 0 rows 1 and 2, column 1 rows 0 and 2), column 0
+                    // row 3 set to 1 to say so (r3d.vert; the shadow pass's matrix
+                    // has 0 there)
+                    size_t vi = size_t(&v - scene_->viewports.data());
+                    scene_->proj_at(vi, interp_, pc.proj);
+                    float pb[16];
+                    scene_->proj_at(vi, before, pb);
                     if (full) {
                         pc.proj[0] /= widen;
                         pc.proj[8] /= widen;
+                        pb[0] /= widen;
+                        pb[8] /= widen;
                     }
+                    pc.proj[1] = pb[0], pc.proj[2] = pb[5], pc.proj[4] = pb[8], pc.proj[6] = pb[9], pc.proj[3] = 1.0f;
                     pc.sun[0] = v.sun[0];
                     pc.sun[1] = v.sun[1];
                     pc.sun[2] = v.sun[2];
@@ -1554,7 +1929,7 @@ void R3DRenderer::record_world(const Frame& f) {
                     pc.params[3] = before;
                     pc.quality[0] = pass == 0 ? float(samples_) + alpha_seed : -float(samples_);
                     pc.quality[1] = aniso_;
-                    pc.quality[2] = 1.0f / upscale_;   // DLSS upscaling: textures as sharp as the picture shown needs
+                    pc.quality[2] = float(out_w) / float(f.up_w);   // DLSS upscaling: textures as sharp as the picture shown needs
                     pc.quality[3] = interp_;
                     // Translucent surfaces that are not effects (a whole model made
                     // see-through, like the Carnotaurus' camouflage): only the
@@ -1563,7 +1938,7 @@ void R3DRenderer::record_world(const Frame& f) {
                     // or luminous effects keep blending in list order.
                     // The world's see-through surfaces go in runs: the game's
                     // dark patch under each car (its shadow) with pipelines of
-                    // its own (blob_depth_, blob_: blended once at each pixel)
+                    // its own (blob_: blended once at each pixel, no depth first)
                     const std::vector<R3DVertex>& vs = scene_->vertices;
                     auto is_blob = [&](uint32_t i) {
                         const R3DVertex& x = vs[i];
@@ -1582,8 +1957,10 @@ void R3DRenderer::record_world(const Frame& f) {
                             uint32_t b = a + 3;
                             while (b < end && is_blob(b) == here) b += 3;
                             b = std::min(b, end);
-                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, here ? blob : other);
-                            vkCmdDraw(cmd, b - a, 1, a, 0);
+                            if (VkPipeline p = here ? blob : other) {
+                                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+                                vkCmdDraw(cmd, b - a, 1, a, 0);
+                            }
                             a = b;
                         }
                     };
@@ -1592,7 +1969,7 @@ void R3DRenderer::record_world(const Frame& f) {
                         pd.quality[0] = -1000.0f;
                         vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                            0, sizeof(pd), &pd);
-                        draw_runs(trans_depth_, blob_depth_);
+                        draw_runs(trans_depth_, VK_NULL_HANDLE);
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, translucent_);
                     }
                     vkCmdPushConstants(cmd, r3d_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -1633,7 +2010,7 @@ void R3DRenderer::record_world_depth(const Frame& f, const R3DViewport& w, bool 
         copy.extent = {out_w, out_h, 1};
         vkCmdCopyImage(cmd, depth_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, depth_resolved_.image,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-        transition(cmd, depth_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+        transition(cmd, depth_, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
     }
     Image& dsrc = depth_resolved_;
     transition(cmd, dsrc, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -1653,8 +2030,12 @@ void R3DRenderer::record_world_depth(const Frame& f, const R3DViewport& w, bool 
     static const bool rt_split = getenv("LW_RTSPLIT") != nullptr;   // debugging aid: traced left, shadow map right
     static const float ao_rays = getenv("SR2_AO_ALL_RAYS") ? 20.5f : 20.0f;   // debugging aid: no probing rays first (ao.frag)
     const GiTune gi = gi_tune();
-    float ap[24] = {w.proj[0] / (full ? widen : 1.0f), w.proj[5], w.proj[8] / (full ? widen : 1.0f),
-                    w.proj[9], vx * sx + jitter_x, w.y * sy + jitter_y, vw * sx, w.h * sy,
+    float wp[16];   // (its lens at this image's t, as drawn: R3DScene::proj_at)
+    size_t wi = size_t(&w - scene_->viewports.data());
+    if (wi < scene_->viewports.size()) scene_->proj_at(wi, interp_, wp);
+    else memcpy(wp, w.proj, sizeof(wp));
+    float ap[24] = {wp[0] / (full ? widen : 1.0f), wp[5], wp[8] / (full ? widen : 1.0f),
+                    wp[9], vx * sx + jitter_x, w.y * sy + jitter_y, vw * sx, w.h * sy,
                     ao_radius, std::min(ao_strength_, 1.0f) * 0.85f * ao_gain, w.fog_density, w.fog_start,
                     alpha_seed, 0.12f * float(out_h), rt_ao_ ? ao_rays : 0.0f, rt_split ? 1.0f : 0.0f,
                     rt_gi_ ? gi.strength : 0.0f, rt_gi_ ? gi.rays : 0.0f, gi.reach, gi_turn(),
@@ -1698,6 +2079,50 @@ void R3DRenderer::record_world_depth(const Frame& f, const R3DViewport& w, bool 
     }
 }
 
+// The alpha with DLAA over time (alpha_taa.frag) into alpha_out_, which the
+// composition reads, then copied to alpha_history_ for the next image
+void R3DRenderer::record_alpha(const Frame& f) {
+    VkCommandBuffer cmd = f.cmd;
+    if (alpha_history_.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        transition(cmd, alpha_history_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    alpha_out_.layout = VK_IMAGE_LAYOUT_UNDEFINED;   // fully rewritten
+    transition(cmd, alpha_out_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    ca.imageView = alpha_out_.view;
+    ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    ca.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea = {{0, 0}, {alpha_out_.w, alpha_out_.h}};
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &ca;
+    vkCmdBeginRendering(cmd, &ri);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alpha_taa_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alpha_layout_, 0, 1, &alpha_set_, 0, nullptr);
+    VkViewport v{0, 0, float(alpha_out_.w), float(alpha_out_.h), 0, 1};
+    vkCmdSetViewport(cmd, 0, 1, &v);
+    VkRect2D sc{{0, 0}, {alpha_out_.w, alpha_out_.h}};
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    // The new value weighs a tenth: about ten images of history
+    // (z: the share of the 3D targets drawn, their top left part; negative: no history)
+    float drawn = float(f.out_w) / float(f.full_w);
+    float p[4] = {1.0f / float(f.full_w), 1.0f / float(f.full_h), alpha_history_valid_ ? drawn : -drawn, 0.1f};
+    vkCmdPushConstants(cmd, alpha_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(p), p);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+    transition(cmd, alpha_out_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    transition(cmd, alpha_history_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageCopy c{};
+    c.srcSubresource = c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    c.extent = {alpha_out_.w, alpha_out_.h, 1};
+    vkCmdCopyImage(cmd, alpha_out_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, alpha_history_.image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    transition(cmd, alpha_history_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    transition(cmd, alpha_out_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    alpha_history_valid_ = true;
+}
+
 void R3DRenderer::record_dlaa(const Frame& f) {
     VkCommandBuffer cmd = f.cmd;
     const uint32_t out_w = f.out_w, out_h = f.out_h;
@@ -1709,23 +2134,16 @@ void R3DRenderer::record_dlaa(const Frame& f) {
         dlaa_out_.layout = VK_IMAGE_LAYOUT_UNDEFINED;   // fully rewritten
         transition(cmd, dlaa_out_, VK_IMAGE_LAYOUT_GENERAL);
         bool ok = dlaa_.evaluate(cmd, {color_.image, color_.view, VK_FORMAT_R16G16B16A16_SFLOAT},
-                                 {depth_.image, depth_.view, VK_FORMAT_D32_SFLOAT},
+                                 {depth_.image, depth_.view, DEPTH_STENCIL},
                                  {motion_.image, motion_.view, VK_FORMAT_R16G16_SFLOAT},
-                                 {dlaa_out_.image, dlaa_out_.view, VK_FORMAT_R16G16B16A16_SFLOAT}, out_w, out_h, f.up_w,
-                                 f.up_h, jitter_x, jitter_y, false);
+                                 {dlaa_out_.image, dlaa_out_.view, VK_FORMAT_R16G16B16A16_SFLOAT}, f.full_w, f.full_h,
+                                 f.up_w, f.up_h, jitter_x, jitter_y, false, 0, out_w, out_h);
+        transition(cmd, dlaa_out_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         // Its alpha separately: where the 3D image is partly transparent the
         // 2D background shows through, and a jittered alpha would make every
-        // edge against it shimmer (the ammo counter over the sky)
-        dlaa_alpha_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
-        transition(cmd, dlaa_alpha_, VK_IMAGE_LAYOUT_GENERAL);
-        ok = ok && dlaa_.evaluate(cmd, {color_.image, color_.alpha_view, VK_FORMAT_R16G16B16A16_SFLOAT},
-                                  {depth_.image, depth_.view, VK_FORMAT_D32_SFLOAT},
-                                  {motion_.image, motion_.view, VK_FORMAT_R16G16_SFLOAT},
-                                  {dlaa_alpha_.image, dlaa_alpha_.view, VK_FORMAT_R8G8B8A8_UNORM}, out_w, out_h,
-                                  f.up_w, f.up_h, jitter_x, jitter_y, false, 1);
-        transition(cmd, dlaa_out_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        transition(cmd, dlaa_alpha_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        if (!ok) bind_scene_image(color_.view, color_.alpha_view);   // stopped working: plain image from now on
+        // edge against it shimmer (the car turning on the car select screen)
+        if (ok) record_alpha(f);
+        else bind_scene_image(color_.view, color_.alpha_view);   // stopped working: plain image from now on
     }
 }
 
@@ -1760,13 +2178,13 @@ R3DRenderer::ComposePush R3DRenderer::compose_push(const Frame& f) const {
     float W = float(extent.width), H = float(extent.height);
     bool extend_back = back_layer_extended();
     const bool sr2_on = sr2_hud_on();
-    ComposePush pc{.scale = {lay.view_w * lay.scale / W, SCREEN_H * lay.scale / H},
+    ComposePush pc{.scale = {lay.view_w * lay.scale * lay.px_aspect / W, SCREEN_H * lay.scale / H},
                    .offset = {lay.ox / W, lay.oy / H},
-                   .sharpen = {sharpen_, 0},
+                   .sharpen = {sharpen_, fxaa() ? 1.0f : 0.0f},
                    .window = {W, H},
                    .layer2d = {lay.game_x0 / lay.view_w, SCREEN_W / lay.view_w},
                    .filter2d = {smooth_2d_ ? 1.0f : 0.0f, lay.scale},
-                   .hud = {sr2_on ? lay.game_x0 : 0.0f, hdr_ ? 1.0f : 0.0f,
+                   .hud = {sr2_on ? lay.hud_x : 0.0f, hdr_ ? 1.0f : 0.0f,
                            overlay_brightness_, extend_back ? 1.0f : 0.0f},
                    .sky = {0, 0, 0, sr2_between_screens() ? 4.0f : 0.0f},
                    .effects = {bloom_strength_, saturation_, gamma_, 0},
@@ -1853,15 +2271,16 @@ void R3DRenderer::record_bloom(const Frame& f, const ComposePush& pc) {
             vkCmdSetViewport(cmd, 0, 1, &bv);
             VkRect2D br{{0, 0}, {st.to->w, st.to->h}};
             vkCmdSetScissor(cmd, 0, 1, &br);
-            float bp[4] = {1.0f / float(st.from->w), 1.0f / float(st.from->h), st.mode, st.spread};
+            // (the glow: its top left part drawn, with dynamic resolution)
+            float spread = st.from == &glow_ ? float(f.out_w) / float(f.full_w) : st.spread;
+            float bp[4] = {1.0f / float(st.from->w), 1.0f / float(st.from->h), st.mode, spread};
             vkCmdPushConstants(cmd, bloom_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(bp), bp);
             vkCmdDraw(cmd, 3, 1, 0, 0);
             if (st.mode == 0 && sky_glow > 0) {
                 // The sky as the composition shows it (the game's or its replacement,
                 // with the fogs, minus what the 3D covers): its brightest part
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compose_glow_);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compose_layout_, 0, 1, &compose_set_, 0,
-                                        nullptr);
+                bind_compose_sets(cmd, compose_fx_inner_set_);   // (bloom_a_ being drawn: a stand-in for it)
                 ComposePush gp = reduced(pc, *st.to);
                 gp.sky[1] = sky_glow;   // glow mode
                 vkCmdPushConstants(cmd, compose_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(gp), &gp);
@@ -1883,7 +2302,7 @@ void R3DRenderer::record_diffusion(const Frame& f, const ComposePush& pc) {
     if (bloom_strength_ > 0) {
         begin_quarter(cmd, diff_a_, VK_ATTACHMENT_LOAD_OP_CLEAR);   // cleared: the scene pass adds onto it
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compose_glow_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compose_layout_, 0, 1, &compose_set_, 0, nullptr);
+        bind_compose_sets(cmd, compose_fx_inner_set_);   // (diff_a_ being drawn: a stand-in for it)
         ComposePush dp = reduced(pc, diff_a_);
         dp.sky[3] = 3;       // scene mode
         dp.effects[0] = 0;   // (no diffusion of the diffusion)
@@ -1925,7 +2344,7 @@ void R3DRenderer::record_exposure(const Frame& f, const ComposePush& pc) {
         er.pColorAttachments = &ea;
         vkCmdBeginRendering(cmd, &er);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compose_measure_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compose_layout_, 0, 1, &compose_set_, 0, nullptr);
+        bind_compose_sets(cmd, compose_fx_measure_set_);   // (exposure_ being drawn: stand-ins)
         VkViewport ev{0, 0, 1, 1, 0, 1};
         vkCmdSetViewport(cmd, 0, 1, &ev);
         VkRect2D eb{{0, 0}, {1, 1}};
@@ -1955,7 +2374,7 @@ void R3DRenderer::record_compose(const Frame& f, const ComposePush& pc, VkImageV
     ti.pColorAttachments = &ta;
     vkCmdBeginRendering(cmd, &ti);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compose_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, compose_layout_, 0, 1, &compose_set_, 0, nullptr);
+    bind_compose_sets(cmd, compose_fx_set_);
     VkViewport full{0, 0, float(extent.width), float(extent.height), 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &full);
     VkRect2D all{{0, 0}, extent};
@@ -1971,12 +2390,40 @@ void R3DRenderer::record(VkCommandBuffer cmd, VkImageView target, VkExtent2D ext
     Frame f{};
     f.cmd = cmd;
     f.extent = extent;
-    f.lay = compute_layout(float(extent.width), float(extent.height), max_aspect_);
-    f.up_w = std::max(1u, uint32_t(f.lay.view_w * f.lay.scale * supersample_));
+    f.lay = compute_layout(float(extent.width), float(extent.height), max_aspect_, px_aspect_);
+    f.up_w = std::max(1u, uint32_t(f.lay.view_w * f.lay.scale * f.lay.px_aspect * supersample_));
     f.up_h = std::max(1u, uint32_t(SCREEN_H * f.lay.scale * supersample_));
-    f.out_w = upscale_ > 1.0f ? std::max(1u, uint32_t(float(f.up_w) / upscale_ + 0.5f)) : f.up_w;
-    f.out_h = upscale_ > 1.0f ? std::max(1u, uint32_t(float(f.up_h) / upscale_ + 0.5f)) : f.up_h;
-    ensure_targets(f.out_w, f.out_h, f.up_w, f.up_h);
+    f.full_w = upscale_ > 1.0f ? std::max(1u, uint32_t(float(f.up_w) / upscale_ + 0.5f)) : f.up_w;
+    f.full_h = upscale_ > 1.0f ? std::max(1u, uint32_t(float(f.up_h) / upscale_ + 0.5f)) : f.up_h;
+    {   // (once per size: the 3D's own resolution, RENDER SCALE / --scale)
+        static uint32_t logged_w = 0, logged_h = 0;
+        if (f.full_w != logged_w || f.full_h != logged_h) {
+            logged_w = f.full_w, logged_h = f.full_h;
+            printf("[video] 3D drawn at %ux%u (scale %.2f)\n", f.full_w, f.full_h, supersample_);
+        }
+    }
+    ensure_targets(f.full_w, f.full_h, f.up_w, f.up_h);
+    // Dynamic resolution: this image drawn in the top left part of the
+    // targets. (The height from the width's share: the same shape, for the
+    // passes that take one share for both)
+    // Never below what DLSS takes: half of its output each way (NGX's
+    // dynamic minimum, the same for DLAA made as QUALITY; a smaller part is
+    // refused, 0xBAD00005, and DLSS stops for good), nor below 70% of the full
+    // size. DLSS PERFORMANCE and ULTRA PERFORMANCE are there already: always
+    // the full size
+    uint32_t min_w = std::min(f.full_w, (f.up_w + 1) / 2), min_h = std::min(f.full_h, (f.up_h + 1) / 2);
+    dyn_min_ = std::max(float(min_w) / float(f.full_w), 0.7f);
+    dyn_fixed_ms_ = std::max(1.0, 2.0 * double(f.up_w) * double(f.up_h) / (2560.0 * 1440.0));
+    // (SR2_DYNRES_SCALE=F: debugging aid, always that share, to look at a
+    // smaller image; also with --shot)
+    static const float forced = getenv("SR2_DYNRES_SCALE") ? float(atof(getenv("SR2_DYNRES_SCALE"))) : 0.0f;
+    static const bool off = getenv("SR2_NO_DYNRES") != nullptr;
+    if (forced > 0.0f && !off && dlaa_.dynamic_resolution() && motion_pass_)
+        dyn_scale_ = std::clamp(forced, float(min_w) / float(f.full_w), 1.0f);   // (down to DLSS's own minimum)
+    else if (!dynamic_resolution()) dyn_scale_ = 1.0f;
+    else dyn_scale_ = std::clamp(dyn_scale_, dyn_min_, 1.0f);
+    f.out_w = std::clamp(uint32_t(float(f.full_w) * dyn_scale_ + 0.5f), min_w, f.full_w);
+    f.out_h = std::clamp(uint32_t(float(f.full_h) * float(f.out_w) / float(f.full_w) + 0.5f), min_h, f.full_h);
     // Always timed: out/slow.log notes the slowest image of a slow second
     // (worst_gpu_frame); SR2_GPUTIME also prints the averages
     if (!gpu_times_) {
@@ -2005,8 +2452,8 @@ void R3DRenderer::record(VkCommandBuffer cmd, VkImageView target, VkExtent2D ext
     drawn_serial_ = scene_serial_;
     drawn_interp_ = interp_;
     // DLAA: the image is shifted by a different sub-pixel amount each frame
-    // (Halton 2,3 over 8 phases; 18 when DLSS upscales: 8 for each pixel it
-    // makes) so it can gather detail between pixels
+    // (Halton 2,3 over 8 phases; when DLSS upscales 8 for each pixel it makes:
+    // jitter_phases_) so it can gather detail between pixels
     float jitter_x = 0, jitter_y = 0, alpha_seed = 0;
     if (dlaa_.ready()) {
         auto halton = [](uint32_t i, uint32_t base) {
@@ -2017,7 +2464,7 @@ void R3DRenderer::record(VkCommandBuffer cmd, VkImageView target, VkExtent2D ext
             }
             return r;
         };
-        uint32_t phase = uint32_t(jitter_index_++ % (upscale_ > 1.0f ? 18 : 8)) + 1;
+        uint32_t phase = uint32_t(jitter_index_++ % jitter_phases_) + 1;
         jitter_x = halton(phase, 2) - 0.5f;
         jitter_y = halton(phase, 3) - 0.5f;
         // Alpha-tested edges (foliage): noise threshold that changes every frame
@@ -2033,6 +2480,7 @@ void R3DRenderer::record(VkCommandBuffer cmd, VkImageView target, VkExtent2D ext
     record_ray_tracing(f);
     if (gpu_times_) gpu_time_mark(cmd, GPU_RT);
     record_shadows(f);
+    record_car_probes(f);
     if (gpu_times_) gpu_time_mark(cmd, GPU_SHADOWS);
     record_world(f);
     if (gpu_times_ && !gpu_ao_marked_) {   // no occlusion pass this frame: it took no time
@@ -2057,6 +2505,46 @@ void R3DRenderer::record(VkCommandBuffer cmd, VkImageView target, VkExtent2D ext
 }
 
 // The previous frame is done (one frame in flight): its times are added up
+// Dynamic resolution: with DLSS's own library (not through dlss_bridge.dll)
+// and a refresh to keep to. SR2_NO_DYNRES: debugging aid, always the full size
+bool R3DRenderer::dynamic_resolution() const {
+    static const bool off = getenv("SR2_NO_DYNRES") != nullptr;
+    return !off && gpu_budget_ms_ > 0.0f && dlaa_.dynamic_resolution() && motion_pass_;
+}
+
+// The share of the 3D drawn next, from the time the graphics card took for
+// the last image. Near the end of the refresh (90% of it) down towards what
+// should take 80%, at most 8% a step (a single slow image, the graphics
+// card busy with something else for a moment, sent it straight to the
+// smallest size for a dozen images); back up a step at a time once there is
+// room, never to where the estimate is over 85%. The estimate: what does not
+// change with the size (DLAA's own share, the traced structure, the
+// composition: some 2 ms at 1440p, more as the picture shown grows:
+// dyn_fixed_ms_) plus the rest as the pixels drawn. Never below 70% each way
+// (half the pixels), nor below what DLSS takes (dyn_min_, record)
+void R3DRenderer::update_dynamic_scale(double gpu_ms) {
+    if (getenv("SR2_DYNRES_SCALE")) return;   // (fixed: record)
+    if (!dynamic_resolution() || gpu_ms <= 0.0 || gpu_ms > 200.0) return;
+    const double budget = gpu_budget_ms_, fixed = dyn_fixed_ms_;
+    const float MIN_SCALE = dyn_min_;
+    double per_pixel = std::max(gpu_ms - fixed, 0.5) / (double(dyn_scale_) * dyn_scale_);   // at the full size
+    auto estimate = [&](float s) { return fixed + per_pixel * s * s; };
+    if (gpu_ms > 0.9 * budget) {
+        float s = float(std::sqrt(std::max(0.8 * budget - fixed, 0.1) / per_pixel));
+        dyn_scale_ = std::clamp(std::clamp(s, dyn_scale_ - 0.08f, dyn_scale_ - 0.02f), MIN_SCALE, 1.0f);
+        dyn_calm_ = 0;
+        return;
+    }
+    if (gpu_ms > 0.8 * budget) {
+        dyn_calm_ = 0;
+        return;
+    }
+    if (dyn_scale_ < 1.0f && ++dyn_calm_ >= 15) {
+        float s = std::min(dyn_scale_ + 0.01f, 1.0f);
+        if (estimate(s) < 0.85 * budget) dyn_scale_ = s;
+    }
+}
+
 void R3DRenderer::gpu_time_report(uint32_t out_w, uint32_t out_h) {
     if (!gpu_times_ || !gpu_pending_) return;
     uint64_t t[GPU_MARKS];
@@ -2064,6 +2552,7 @@ void R3DRenderer::gpu_time_report(uint32_t out_w, uint32_t out_h) {
         return;
     auto ms = [&](uint32_t from, uint32_t to) { return double(t[to] - t[from]) * timestamp_period_ * 1e-6; };
     double total = ms(GPU_START, GPU_COMPOSE);
+    update_dynamic_scale(total);
     if (total > gpu_worst_ms_ && total < 1000.0) {
         char text[320];
         snprintf(text, sizeof(text),
@@ -2080,9 +2569,9 @@ void R3DRenderer::gpu_time_report(uint32_t out_w, uint32_t out_h) {
     // occlusion, DLAA; polygons)
     static FILE* each = getenv("SR2_GPULOG") ? fopen(getenv("SR2_GPULOG"), "w") : nullptr;
     if (each)
-        fprintf(each, "%llu %.2f %.2f %.2f %.2f %.2f %zu\n", (unsigned long long)(scene_ ? scene_->frame : 0), total,
+        fprintf(each, "%llu %.2f %.2f %.2f %.2f %.2f %zu %ux%u\n", (unsigned long long)(scene_ ? scene_->frame : 0), total,
                 ms(GPU_UPLOADS, GPU_RT), ms(GPU_SHADOWS, GPU_AO_FROM) + ms(GPU_AO_TO, GPU_WORLD), ms(GPU_AO_FROM, GPU_AO_TO),
-                ms(GPU_WORLD, GPU_DLAA), scene_ ? scene_->polygons : size_t(0));
+                ms(GPU_WORLD, GPU_DLAA), scene_ ? scene_->polygons : size_t(0), out_w, out_h);
     static const bool print = getenv("SR2_GPUTIME") || getenv("LW_GPUTIME");
     if (!print) return;
     for (uint32_t i = 1; i < GPU_MARKS; i++) gpu_sum_[i] += ms(i - 1, i);
@@ -2116,13 +2605,13 @@ void R3DRenderer::gpu_time_mark(VkCommandBuffer cmd, uint32_t index) {
 void R3DRenderer::shutdown() {
     if (!dev_) return;
     vkDeviceWaitIdle(dev_);
-    for (auto p : {opaque_, translucent_, blob_, blob_depth_, trans_depth_, shadow_, compose_measure_, compose_, bloom_, compose_glow_, ao_pass_, ao_apply_, ao_apply_glow_})
+    for (auto p : {opaque_, translucent_, blob_, trans_depth_, shadow_, compose_measure_, compose_, bloom_, compose_glow_, ao_pass_, ao_apply_, ao_apply_glow_, alpha_taa_, car_probe_pass_})
         if (p) vkDestroyPipeline(dev_, p, nullptr);
     dlaa_.shutdown();
     rt_.shutdown();
     if (gpu_times_) vkDestroyQueryPool(dev_, gpu_times_, nullptr);
-    for (Image* img : {&texture_ram_, &back_, &front_, &text_cells_, &sky_coords_, &color_, &color_ms_, &depth_, &motion_, &dlaa_out_, &dlaa_alpha_,
-                        &glow_, &glow_ms_, &bloom_a_, &bloom_b_, &bloom_c_, &depth_resolved_, &ao_, &shadow_map_, &exposure_, &diff_a_, &diff_b_})
+    for (Image* img : {&texture_ram_, &back_, &front_, &text_cells_, &sky_coords_, &color_, &color_ms_, &depth_, &motion_, &dlaa_out_, &alpha_out_, &alpha_history_,
+                        &glow_, &glow_ms_, &bloom_a_, &bloom_b_, &bloom_c_, &depth_resolved_, &ao_, &shadow_map_, &exposure_, &diff_a_, &diff_b_, &blank_color_, &blank_depth_, &car_probe_})
         destroy_image(*img);
     for (Image& img : replacements_) destroy_image(img);
     for (auto& [slot, img] : overlay_images_) destroy_image(img);

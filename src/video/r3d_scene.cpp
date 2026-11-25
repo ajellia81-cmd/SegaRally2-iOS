@@ -92,6 +92,7 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
     rd_.reset(state);
     out_ = &out;
     keys_.clear();
+    back_keys_.clear();
     instance_count_.clear();
     node_key_ = 0;
     out.vertices.clear();
@@ -112,6 +113,49 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
     std::stable_sort(out.viewports.begin(), out.viewports.end(),
                      [](const R3DViewport& a, const R3DViewport& b) { return a.priority < b.priority; });
     if (remove_letterbox_) r3d_strip_letterbox(out);
+    // FOREST (the unused fifth stage) is lit with ambient 0.26 (DESERT and
+    // SNOWY 0.50, MOUNTAIN 0.45, RIVIERA 0.30): what is out of the sun, the
+    // house fronts turned from it at the start and the sun shadows, came out
+    // about half as light as on the other courses. Its world viewport gets
+    // DESERT's ambient and as much less sun as keeps level ground in the sun
+    // as bright as it was, with SUN's gains (FOREST with SUN: sun 1.0 -> 0.86).
+    // SR2_FOREST_AMBIENT=A: that ambient (0: as the game lights it)
+    if (forest_) {
+        static const float forest_ambient =
+            getenv("SR2_FOREST_AMBIENT") ? float(atof(getenv("SR2_FOREST_AMBIENT"))) : 0.5f;
+        for (R3DViewport& v : out.viewports) {
+            if (!v.world || v.ambient >= forest_ambient || v.sun_intensity <= 0) continue;
+            float sun_gain, ambient_gain;
+            r3d_sun_gains(v, sun_on_, sun_gain, ambient_gain);
+            const float* up = v.world_axes + 3;
+            float level = std::max(v.sun[0] * up[0] + v.sun[1] * up[1] + v.sun[2] * up[2], 0.3f);   // the sun on level ground
+            float less = (forest_ambient - v.ambient) * ambient_gain / (sun_gain * level);
+            v.ambient = forest_ambient;
+            // (kept above SUN's threshold, 0.3, or its gains would change with it)
+            v.sun_intensity = std::max(v.sun_intensity - less, std::min(v.sun_intensity, 0.31f));
+        }
+        // With the sun shadows, the road's shadows the game paints with the
+        // polygon's colour instead of in the texture (TexturePack::set_unpaint_shadows):
+        // a world texture also drawn white this frame, here in a grey of 0.30-0.47
+        // (FOREST's arch at the start: the plain road in 0x60, 0.38), drawn white
+        if (shadows_on_) {
+            std::unordered_set<uint32_t> white;
+            auto world_solid = [](const R3DVertex& x) {
+                return (x.flags & (R3D_WORLD | R3D_TEXTURED | R3D_LUMINOUS | R3D_ACTOR)) == (R3D_WORLD | R3D_TEXTURED);
+            };
+            for (size_t i = 0; i + 2 < out.vertices.size(); i += 3)
+                if (world_solid(out.vertices[i]) && (out.vertices[i].color & 0x00FFFFFFu) == 0x00FFFFFFu)
+                    white.insert(out.vertices[i].tex);
+            for (size_t i = 0; i + 2 < out.vertices.size(); i += 3) {
+                R3DVertex* tri = &out.vertices[i];
+                uint32_t c = tri[0].color, r = c & 0xFF;
+                if (!world_solid(tri[0]) || ((c >> 8) & 0xFF) != r || ((c >> 16) & 0xFF) != r || r < 0x4D || r > 0x78 ||
+                    !white.count(tri[0].tex))
+                    continue;
+                for (int k = 0; k < 3; k++) tri[k].color |= 0x00FFFFFFu;
+            }
+        }
+    }
     // SR2_SCENEDUMP=file (debugging aid): the first scene's viewports and vertices as the
     // game places them, to measure outside (heights over the road...)
     if (static int dumps = 0; getenv("SR2_SCENEDUMP") && dumps++ == 0)
@@ -156,21 +200,50 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
         if (v.world) world_vp = &v;
     for (const R3DViewport& v : out.viewports) {
         if (v.world || v.x > 0.5f || v.w < 495.5f || v.opaque_count < 200 || v.sun_intensity <= 0) continue;
-        if (world_vp && v.priority != world_vp->priority) continue;
+        // Without a world viewport (menus: the course select's 3D frames round
+        // the pictures) there is no car to light
+        if (!world_vp || v.priority != world_vp->priority) continue;
         for (uint32_t i = v.opaque_first; i < v.opaque_first + v.opaque_count; i++) out.vertices[i].flags |= R3D_CAR;
         for (uint32_t i = v.trans_first; i < v.trans_first + v.trans_count; i++) out.vertices[i].flags |= R3D_CAR;
     }
     settle_player_car(out);
     static const float shine = getenv("SR2_SHINE") ? float(atof(getenv("SR2_SHINE"))) : 0.0f;   // the cars' painted shine layer, F of its strength: left out (it veiled the paint, a grey box over the roof); SR2_SHINE=F brings it back
+    // (Not the glows the game draws with a texture alpha too, alpha tested,
+    // which the shine layer never is: the spectators' camera flashes, turned
+    // their own way to face an outside camera, are actors, and went with it:
+    // none was ever seen behind the car; the cars' own exhaust flames too)
     if (shine != 1.0f)
         for (R3DVertex& x : out.vertices)
-            if ((x.flags & (R3D_CAR | R3D_ACTOR)) && (x.flags & (R3D_LUMINOUS | R3D_TEX_ALPHA)) == (R3D_LUMINOUS | R3D_TEX_ALPHA))
+            if ((x.flags & (R3D_CAR | R3D_ACTOR)) && (x.flags & (R3D_LUMINOUS | R3D_TEX_ALPHA)) == (R3D_LUMINOUS | R3D_TEX_ALPHA) &&
+                !(x.flags & R3D_ALPHA_TEST))
                 x.color = (x.color & 0x00FFFFFFu) | (uint32_t(std::clamp(float(x.color >> 24) * shine, 0.0f, 255.0f)) << 24);
     // Full-screen fills (fades, flashes) outside the world reach the window's sides
     r3d_widen_screen_fills(out, std::max(fov_widened_, view_wide_));
     auto t3 = clock::now();
     if (pack_ && texture_ram_ && pack_->active()) apply_texture_pack(out);
     auto t4 = clock::now();
+    // Each viewport's lens in the frame before (the same state built twice
+    // keeps the one before it), by its node; one that jumped (a cut) is not
+    // blended (R3DScene::proj_at)
+    if (out.frame != lens_last_frame_ || lens_last_.empty()) {
+        lens_prev_.swap(lens_last_);
+        lens_prev_frame_ = lens_last_frame_;
+    }
+    lens_last_.clear();
+    lens_last_frame_ = out.frame;
+    for (R3DViewport& v : out.viewports) {
+        std::array<float, 4> now = {v.proj[0], v.proj[5], v.proj[8], v.proj[9]};
+        lens_last_[v.node] = now;
+        auto it = lens_prev_.find(v.node);
+        if (it == lens_prev_.end() || lens_prev_frame_ == ~0ull || out.frame <= lens_prev_frame_ || out.frame - lens_prev_frame_ > 4) continue;
+        const std::array<float, 4>& was = it->second;
+        bool cut = false;
+        for (int k = 0; k < 2; k++) cut = cut || was[k] == 0 || std::fabs(now[k] / was[k] - 1.0f) > 0.15f;
+        for (int k = 2; k < 4; k++) cut = cut || std::fabs(now[k] - was[k]) > 0.1f;
+        if (cut) continue;
+        v.has_prev_lens = true;
+        for (int k = 0; k < 4; k++) v.prev_lens[k] = was[k];
+    }
     link_previous(out);
     static const bool no_smooth = getenv("SR2_NO_SMOOTH") != nullptr, no_sync = getenv("SR2_NO_SYNC") != nullptr;
     auto t4b = clock::now();
@@ -216,7 +289,7 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
                (x.color & 0x00FFFFFFu) == 0 && (x.color >> 24) < 255;
     };
     std::unordered_set<uint32_t> set_down;   // the patches' vertices already lowered (two cars side by side)
-    auto settle = [&](const R3DViewport* car, float& car_lift_, uint32_t& car_lift_skips_, uint64_t& patch_seen) {
+    auto settle = [&](const R3DViewport* car, CarLift& lift) {
     // The car's bodywork (not its glass, its dust): where it is, its lowest point
     double su = 0, sw = 0;
     size_t count = 0;
@@ -275,7 +348,7 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
         return ground > -1e29f;
     };
     // This frame's measure
-    float raw = -1;
+    float raw = -1, patch_gap = 1;   // patch_gap: the patch over the road (its middle), when measured
     std::vector<float> gaps;
     for (size_t i = 0; i < patches.size(); i += 3) {
         const float* p = vs[patches[i]].pos;
@@ -284,7 +357,15 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
     }
     if (gaps.size() >= 8) {
         std::nth_element(gaps.begin(), gaps.begin() + gaps.size() / 2, gaps.end());
-        raw = gaps[gaps.size() / 2];
+        raw = patch_gap = gaps[gaps.size() / 2];
+        // FOREST (the patch raised below): by its lowest fifth, so a patch
+        // tilted against the road (landing from a jump) is clear of it all
+        // over; not where that is far under the middle (a bank beside the road)
+        if (forest_) {
+            std::nth_element(gaps.begin(), gaps.begin() + gaps.size() / 5, gaps.begin() + gaps.size() / 2);
+            float low = gaps[gaps.size() / 5];
+            if (raw - low <= 0.1f) patch_gap = low;
+        }
     } else if (count >= 90) {
         // No patch: the game lays none under the cars farther away (some 40 m
         // on), which hover all the same, and over a road drawn with less
@@ -334,36 +415,64 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
         }
     }
     bool measured = raw > -0.1f && raw < 0.45f;
-    if (measured) patch_seen = out.frame;
-    else if (out.frame - patch_seen > 120) car_lift_ = -1;   // (kept through a jump, not for good)
+    // Kept while it cannot be measured, however long: in the air, and as the
+    // car drives off from a camera standing by the road (the championship's
+    // start: 40 m off, no road drawn within 4 m of it), where it was let go
+    // after two seconds and the car rose 31 cm in one frame and stayed up.
+    // Only another race starts afresh (car_lifts_). SR2_LIFT_EXPIRE=1: let go
+    // after two seconds, as before
+    static const bool expire = getenv("SR2_LIFT_EXPIRE") && atoi(getenv("SR2_LIFT_EXPIRE")) == 1;
+    if (expire && !measured && out.frame - lift.patch > 120) lift.height = -1;
     if (measured) {
         raw = std::max(raw, 0.0f);
-        if (car_lift_ < 0) {
-            car_lift_ = raw;
-            car_lift_skips_ = 0;
-        } else if (std::fabs(raw - car_lift_) <= 0.1f) {
-            car_lift_ += 0.15f * (raw - car_lift_);
-            car_lift_skips_ = 0;
-        } else if (++car_lift_skips_ >= 30) {
-            // (a kerb, a bump under the patch is not followed, unless it stays)
-            car_lift_ = raw;
-            car_lift_skips_ = 0;
+        // A kerb, a bump under the patch: the measure steps from one frame to
+        // the next, and is not followed unless it stays. Where it drifts (the
+        // car moving off over other ground, the flagman's legs over the patch)
+        // it is followed, never in one jump either way: held, then let go all
+        // at once after half a second, the car hung over the road at the start
+        // and then dropped onto it (as settle_cars does for the other cars)
+        bool step = out.frame - lift.patch <= 3 && std::fabs(raw - lift.raw) > 0.05f;
+        if (lift.height < 0) {
+            lift.height = raw, lift.skips = 0, lift.kerb = false;
+        } else if (std::fabs(raw - lift.height) <= 0.1f) {
+            lift.height += 0.15f * (raw - lift.height), lift.skips = 0, lift.kerb = false;
+        } else {
+            if (step) lift.kerb = true, lift.skips = 0;
+            if (!lift.kerb || ++lift.skips >= 30) lift.height += std::clamp(0.5f * (raw - lift.height), -0.03f, 0.03f);   // (3 cm a frame)
         }
+        lift.raw = raw;
+        lift.patch = out.frame;
     }
     if (log)
         printf("[car] frame %llu car %06X patch %zu road %zu raw %.3f lowest %.3f lift %.3f\n",
-               (unsigned long long)out.frame, car->node, patches.size(), road.size(), raw, low[1], car_lift_);
-    float down = car_lift_;
-    if (down <= 0.002f) return;
+               (unsigned long long)out.frame, car->node, patches.size(), road.size(), raw, low[1], lift.height);
+    float down = lift.height;
+    if (down <= 0.002f && !forest_) return;   // (FOREST: its patch may still be raised, below)
     auto lower = [&](R3DVertex& x, float by) {
         for (int k = 0; k < 3; k++) x.pos[k] -= by * up[k], x.prev[k] -= by * up[k];
     };
-    for (uint32_t i = car->opaque_first; i < car->opaque_first + car->opaque_count && i < vs.size(); i++) lower(vs[i], down);
-    for (uint32_t i = car->trans_first; i < car->trans_first + car->trans_count && i < vs.size(); i++) lower(vs[i], down);
-    for (uint32_t i = car->back_first; i < car->back_first + car->back_count && i < out.backs.size(); i++) lower(out.backs[i], down);
-    // The patch: 3 cm clear of the road (on it, the two would flicker through each other)
+    if (down > 0.002f) {
+        for (uint32_t i = car->opaque_first; i < car->opaque_first + car->opaque_count && i < vs.size(); i++) lower(vs[i], down);
+        for (uint32_t i = car->trans_first; i < car->trans_first + car->trans_count && i < vs.size(); i++) lower(vs[i], down);
+        for (uint32_t i = car->back_first; i < car->back_first + car->back_count && i < out.backs.size(); i++) lower(out.backs[i], down);
+    }
+    // The patch: 3 cm clear of the road (on it, the two would flicker through
+    // each other), and never lower than this frame's measure puts it: the lift
+    // is held while the measure jumps, and something else may have set the
+    // patch down already (at the desert's start a held lift pushed it under
+    // the road for half a second)
+    float patch_down = measured ? std::min(down, raw) : down;
+    // FOREST: over some bumps its road is drawn up to some 20 cm above the
+    // ground the game lays the patch on, for a few frames at a time (Sergi's
+    // carlog: the middle 22 cm under the road), and as the car lands from a
+    // jump the patch comes down to the road (0.4 cm over it for some 15
+    // frames): under the road or on it, the shadow went out or flickered.
+    // There it is raised to 3 cm over the road, by its lowest fifth (patch_gap;
+    // only on FOREST, the other courses as they were)
+    bool raise = forest_ && patch_gap < 0.03f && patch_gap > -0.5f;
+    if (raise) patch_down = patch_gap;
     for (uint32_t k : patches) {
-        if (down > 0.03f) lower(vs[k], down - 0.03f);
+        if (patch_down > 0.03f || raise) lower(vs[k], patch_down - 0.03f);
         set_down.insert(k);
     }
     };
@@ -375,7 +484,7 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
         CarLift& lift = car_lifts_[v.node];
         if (out.frame - lift.frame > 30) lift.height = -1, lift.skips = 0;   // another race, another camera
         lift.frame = out.frame;
-        settle(&v, lift.height, lift.skips, lift.patch);
+        settle(&v, lift);
     }
     for (auto it = car_lifts_.begin(); it != car_lifts_.end();)
         it = out.frame - it->second.frame > 30 ? car_lifts_.erase(it) : std::next(it);
@@ -570,12 +679,15 @@ uint32_t R3DSceneBuilder::instance_key(uint32_t model_addr) {
     return r3d_mix_key(k, instance_count_[k]++);   // the same model drawn again through the same path
 }
 
+// SR2_COPIES_AS_IS: copies paired by their place in the view alone, as before (to compare)
+static const bool copies_as_is = getenv("SR2_COPIES_AS_IS") != nullptr;
+
 // Copies of one model (the ammo counter's cartridges) are told apart by the
 // path and order they are drawn in, and the game reorders its list from frame
 // to frame: a cartridge would then be interpolated towards its neighbour and
 // bob up and down. Each copy takes the key of the nearest copy of the
 // previous frame instead.
-void R3DSceneBuilder::pair_copies() {
+void R3DSceneBuilder::pair_copies(const R3DScene& out) {
     auto& now = copies_now_;
     auto& before = copies_before_;
     auto& rekey = rekey_;
@@ -589,6 +701,75 @@ void R3DSceneBuilder::pair_copies() {
     for (auto& list : viewport_instances_)
         for (R3DInstance& in : list) now[in.path].push_back(&in);
     for (const PrevInstance& p : prev_instances_) before[p.path].push_back(&p);
+    // Each model's place in the world (the world's viewport: world axis k, in
+    // view space, is world_axes[3k..3k+2])
+    for (size_t vi = 0; vi < viewport_instances_.size(); vi++) {
+        const R3DViewport* wv = nullptr;
+        for (const R3DViewport& v : out.viewports)
+            if (v.build_index == vi && v.world) wv = &v;
+        for (R3DInstance& in : viewport_instances_[vi]) {
+            in.has_world = wv != nullptr;
+            if (!wv) continue;
+            for (int k = 0; k < 3; k++)
+                in.world[k] = wv->camera[k] + wv->world_axes[k * 3] * in.origin[0] + wv->world_axes[k * 3 + 1] * in.origin[1] +
+                              wv->world_axes[k * 3 + 2] * in.origin[2];
+        }
+    }
+    placed_.clear();
+    // A copy riding on another model is told by its place on it: the two
+    // heads in a car (driver's, co-driver's: one model) come in either order
+    // from frame to frame, 60 cm apart across the car; with the car moving
+    // that much across the camera's view in a frame (the attract's cameras
+    // beside the road, a car going past them) each head was paired with the
+    // other one's place, or with none, and the heads wobbled in the cabin like
+    // rag dolls. A copy rides on the biggest model within 3 m turned its own
+    // way (not the scenery's): a car's bodywork
+    for (size_t vi = 0; vi < viewport_instances_.size() && !copies_as_is; vi++) {
+        auto& list = viewport_instances_[vi];
+        const float* world = nullptr;
+        const R3DViewport* vp = nullptr;
+        for (const R3DViewport& v : out.viewports)
+            if (v.build_index == vi) vp = &v, world = v.world ? v.world_axes : nullptr;
+        // (turned the scenery's way: a car driving straight along one of the
+        // world's axes, its head at rest in it, which R3DWorldTracker found to
+        // be a car's: R3D_ACTOR)
+        auto scenery = [&](const R3DInstance& in) {
+            if (!world || !r3d_same_axes(in.axes, world)) return false;
+            uint32_t first = in.opaque[1] > in.opaque[0] ? vp->opaque_first + in.opaque[0] : vp->trans_first + in.trans[0];
+            return first >= out.vertices.size() || !(out.vertices[first].flags & R3D_ACTOR);
+        };
+        auto& bases = bases_;
+        bases.clear();
+        for (const R3DInstance& in : list)
+            if (in.polygons >= 200 && !scenery(in)) bases.push_back(&in);
+        if (bases.empty()) continue;
+        for (R3DInstance& in : list) {
+            auto group = now.find(in.path);
+            if (group->second.size() < 2 || group->second.size() > 64) continue;
+            // (not the scenery's copies, the fence posts, nor sprites: the dust
+            // and stones a car throws, a polygon or two)
+            if (in.polygons < 8 || scenery(in)) continue;
+            const R3DInstance* best = nullptr;
+            for (const R3DInstance* b : bases) {
+                if (b->path == in.path) continue;
+                float d[3] = {in.origin[0] - b->origin[0], in.origin[1] - b->origin[1], in.origin[2] - b->origin[2]};
+                if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 3.0f * 3.0f) continue;
+                if (!best || b->polygons > best->polygons) best = b;
+            }
+            if (!best) continue;
+            float d[3] = {in.origin[0] - best->origin[0], in.origin[1] - best->origin[1], in.origin[2] - best->origin[2]};
+            for (int c = 0; c < 3; c++) in.ride[c] = d[0] * best->axes[c * 3] + d[1] * best->axes[c * 3 + 1] + d[2] * best->axes[c * 3 + 2];
+            in.ride_on = best->model;
+        }
+    }
+    // ... only where every copy rides (both heads in their cars): a few of a
+    // group near a car, the rest not, are no passengers (spectators)
+    for (auto& [path, copies] : now)
+        for (const R3DInstance* in : copies)
+            if (!in->ride_on) {
+                for (R3DInstance* c : copies) c->ride_on = 0;
+                break;
+            }
     for (auto& [path, copies] : now) {
         if (copies.empty()) continue;
         auto it = before.find(path);   // (an empty list: the path was not drawn last frame)
@@ -600,10 +781,28 @@ void R3DSceneBuilder::pair_copies() {
         // another one was.
         struct Pair { float d; uint32_t a, b; };
         std::vector<Pair> pairs;
+        // In the world's viewport, by their place in the world: the game hands
+        // some of its copies out afresh every frame (Riviera's lamp halos, the
+        // chevron boards at the bends: those nearest the camera), and by their
+        // place in the view a copy was paired with another one a few metres
+        // off as the camera moved; drawn between frames it slid from one place
+        // to the other (halos running along the street, boards rising out of
+        // the ground and sinking back)
+        auto by_world = [&](const R3DInstance* a, const PrevInstance* b) { return !copies_as_is && a->has_world && b->has_world; };
         for (uint32_t a = 0; a < copies.size(); a++)
             for (uint32_t b = 0; b < old.size(); b++) {
                 float d = 0;
-                for (int c = 0; c < 3; c++) d += std::fabs(copies[a]->origin[c] - old[b]->origin[c]);
+                if (by_world(copies[a], old[b]))
+                    for (int c = 0; c < 3; c++) d += std::fabs(copies[a]->world[c] - old[b]->world[c]);
+                else
+                    for (int c = 0; c < 3; c++) d += std::fabs(copies[a]->origin[c] - old[b]->origin[c]);
+                // (riding on the same model: by the place on it first; the
+                // view then tells two cars of one kind apart)
+                if (copies[a]->ride_on && copies[a]->ride_on == old[b]->ride_on) {
+                    float r = 0;
+                    for (int c = 0; c < 3; c++) r += std::fabs(copies[a]->ride[c] - old[b]->ride[c]);
+                    d = r + 0.1f * d;
+                }
                 // The partner found by list order wins unless another is clearly closer
                 if (copies[a]->key == old[b]->key) d *= 0.5f;
                 pairs.push_back({d, a, b});
@@ -612,13 +811,25 @@ void R3DSceneBuilder::pair_copies() {
         std::vector<uint32_t> key(copies.size(), 0);
         std::vector<bool> paired(copies.size()), taken(old.size());
         std::unordered_set<uint32_t> used;
-        for (const Pair& p : pairs)
-            if (!paired[p.a] && !taken[p.b]) {
-                paired[p.a] = taken[p.b] = true;
-                key[p.a] = old[p.b]->key;
-                used.insert(old[p.b]->key);
+        for (const Pair& p : pairs) {
+            if (paired[p.a] || taken[p.b]) continue;
+            // (the nearest left is far off in the world: a copy put somewhere
+            // new, not one that moved; it stands still in the world where it
+            // is now: link_previous, with the glow sprites)
+            if (by_world(copies[p.a], old[p.b]) && !copies[p.a]->ride_on) {
+                float e[3] = {copies[p.a]->world[0] - old[p.b]->world[0], copies[p.a]->world[1] - old[p.b]->world[1],
+                              copies[p.a]->world[2] - old[p.b]->world[2]};
+                if (e[0] * e[0] + e[1] * e[1] + e[2] * e[2] > 1.5f * 1.5f) continue;
             }
+            paired[p.a] = taken[p.b] = true;
+            key[p.a] = old[p.b]->key;
+            used.insert(old[p.b]->key);
+        }
         // Copies without a partner keep a key of the group nobody else has
+        // (nor had last frame, in the world: they are not followed from there)
+        for (uint32_t a = 0; a < copies.size(); a++)
+            if (!paired[a] && copies[a]->has_world && !copies_as_is)
+                for (const PrevInstance* p : old) used.insert(p->key);
         uint32_t n = 0;
         for (uint32_t a = 0; a < copies.size(); a++) {
             if (paired[a]) continue;
@@ -627,6 +838,7 @@ void R3DSceneBuilder::pair_copies() {
             while (used.count(k));
             used.insert(k);
             key[a] = k;
+            if (copies[a]->has_world && !copies_as_is && !copies[a]->ride_on) placed_.insert(k);
         }
         for (uint32_t a = 0; a < copies.size(); a++)
             if (key[a] != copies[a]->key) {
@@ -656,7 +868,7 @@ void R3DSceneBuilder::pair_copies() {
             for (auto& [from, to] : rekey) back[to] = from;
             for (auto& list : viewport_instances_)
                 for (R3DInstance& in : list) {
-                    if (prev_keys.count(in.key)) continue;
+                    if (prev_keys.count(in.key) || placed_.count(in.key)) continue;   // (nor a copy put somewhere new)
                     auto it = by_model.find(in.start);
                     if (it == by_model.end()) continue;
                     const PrevInstance* best = nullptr;
@@ -691,11 +903,24 @@ void R3DSceneBuilder::pair_copies() {
             }
             if (found) k = uint64_t(to) << 32 | (k & 0xFFFFFFFFull);
         }
+        have = false;
+        for (uint64_t& k : back_keys_) {
+            uint32_t hi = uint32_t(k >> 32);
+            if (!have || hi != last) {
+                auto it = rekey.find(hi);
+                found = it != rekey.end();
+                if (found) to = it->second;
+                last = hi, have = true;
+            }
+            if (found) k = uint64_t(to) << 32 | (k & 0xFFFFFFFFull);
+        }
     }
     prev_instances_.clear();
     for (const auto& list : viewport_instances_)
         for (const R3DInstance& in : list)
-            prev_instances_.push_back({in.key, in.path, in.start, {in.origin[0], in.origin[1], in.origin[2]}});
+            prev_instances_.push_back({in.key, in.path, in.start, {in.origin[0], in.origin[1], in.origin[2]},
+                                       {in.ride[0], in.ride[1], in.ride[2]}, in.ride_on,
+                                       {in.world[0], in.world[1], in.world[2]}, in.has_world});
 }
 
 // Fills R3DVertex::prev from the previous frame. Vertices that are new, or
@@ -704,15 +929,15 @@ void R3DSceneBuilder::pair_copies() {
 // blending their vertices in a straight line folds the polygons.
 void R3DSceneBuilder::link_previous(R3DScene& out) {
     out.moving = 0;
-    pair_copies();
+    pair_copies(out);
     auto& axes = axes_;
     auto& spinning = spinning_;
     auto& origins = origins_;
     axes.clear();
     spinning.clear();
     origins.clear();
-    for (const auto& list : viewport_instances_)
-        for (const R3DInstance& in : list) {
+    for (size_t vi = 0; vi < viewport_instances_.size(); vi++)
+        for (const R3DInstance& in : viewport_instances_[vi]) {
             std::array<float, 9>& a = axes[in.key];
             memcpy(a.data(), in.axes, sizeof(in.axes));
             origins[in.key] = {in.origin[0], in.origin[1], in.origin[2]};
@@ -746,7 +971,29 @@ void R3DSceneBuilder::link_previous(R3DScene& out) {
     // with 40000 polygons), in an open-addressing table kept from frame to
     // frame (Lost World's: a new std::unordered_map each frame was most of
     // the preparation's time)
-    index_.reset(out.vertices.size() / 3 + 16);
+    index_.reset((out.vertices.size() + out.backs.size()) / 3 + 16);
+    // A polygon facing the camera whose partner last frame faced away (a back
+    // face, below) is followed only if it is scenery standing still: not a
+    // car or a person, and where the camera's move puts it within 30 cm.
+    // Everything else links as it always has
+    const R3DViewport* still_vp = nullptr;
+    for (const R3DViewport& v : out.viewports)
+        if (v.world) still_vp = &v;
+    bool still_ok = still_vp && prev_world_valid_;
+    if (still_ok) {
+        const float *ax = still_vp->world_axes, *pax = prev_world_axes_;
+        float d[3] = {still_vp->camera[0] - prev_world_camera_[0], still_vp->camera[1] - prev_world_camera_[1], still_vp->camera[2] - prev_world_camera_[2]};
+        float a = ax[6] * pax[6] + ax[7] * pax[7] + ax[8] * pax[8], b = ax[3] * pax[3] + ax[4] * pax[4] + ax[5] * pax[5];
+        still_ok = d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= 10.0f * 10.0f && a >= 0.9f && b >= 0.9f;
+    }
+    auto stands_still = [&](const R3DVertex& v, const float* p) {
+        if (!still_ok || (v.flags & (R3D_ACTOR | R3D_CAR))) return false;
+        const float *ax = still_vp->world_axes, *cam = still_vp->camera, *pax = prev_world_axes_, *pcam = prev_world_camera_;
+        float w[3], e[3];
+        for (int k = 0; k < 3; k++) w[k] = cam[k] + ax[k * 3] * v.pos[0] + ax[k * 3 + 1] * v.pos[1] + ax[k * 3 + 2] * v.pos[2] - pcam[k];
+        for (int k = 0; k < 3; k++) e[k] = w[0] * pax[k] + w[1] * pax[3 + k] + w[2] * pax[6 + k] - p[k];
+        return e[0] * e[0] + e[1] * e[1] + e[2] * e[2] <= 0.3f * 0.3f;
+    };
     uint32_t last_hi = 0;
     bool last_spin = false, have_hi = false;
     const float* spin_move = nullptr;
@@ -774,18 +1021,256 @@ void R3DSceneBuilder::link_previous(R3DScene& out) {
         size_t j = size_t(was) + corner;
         if (j >= prev_positions_.size() || j >= prev_keys_.size() || prev_keys_[j] != key) continue;
         const float* p = prev_positions_[j].data();
+        if (j >= prev_front_count_ && !stands_still(v, p)) continue;
         float dx = p[0] - v.pos[0], dy = p[1] - v.pos[1], dz = p[2] - v.pos[2];
         float limit = 0.25f * std::max(1.0f, std::fabs(v.pos[2]));
         if (dx * dx + dy * dy + dz * dz > limit * limit) continue;
         memcpy(v.prev, p, sizeof(v.prev));
         out.moving += dx != 0 || dy != 0 || dz != 0;
     }
+    // The glow sprites of the world (the streetlights' halos at Riviera, the
+    // spectators' camera flashes): the game hands them out to the lamps
+    // nearest the camera from a pool of its own, so as a lamp goes by its halo
+    // is drawn at the next one, under the same key. Paired with last frame's
+    // as any other model, each slid from lamp to lamp between frames, the
+    // faster the car went the more (they seemed to flicker, or to run along
+    // the street). They stand still in the world: each moves as the scenery
+    // beside it did (or, with none near, as the camera did), except one on
+    // another car (its exhaust's flames), left paired to move with the car.
+    // So do the copies the game put somewhere new this frame (pair_copies:
+    // placed_), not followed from anywhere: left where this frame has them in
+    // the view, they would ride along with the camera
+    static const bool no_glow_fix = getenv("SR2_GLOW_LINK") != nullptr;   // as before, to compare
+    const R3DViewport* wv = nullptr;
+    for (const R3DViewport& v : out.viewports)
+        if (v.world) wv = &v;
+    if (wv && prev_world_valid_ && !no_glow_fix) {
+        const float *ax = wv->world_axes, *cam = wv->camera, *pax = prev_world_axes_, *pcam = prev_world_camera_;
+        auto dot3 = [](const float* p, const float* q) { return p[0] * q[0] + p[1] * q[1] + p[2] * q[2]; };
+        float d[3] = {cam[0] - pcam[0], cam[1] - pcam[1], cam[2] - pcam[2]};
+        // (as R3DRenderer::world_pose: a camera cut is not interpolated)
+        bool cut = dot3(d, d) > 10.0f * 10.0f || dot3(ax + 6, pax + 6) < 0.9f || dot3(ax + 3, pax + 3) < 0.9f;
+        const uint32_t glow_mask = R3D_TEXTURED | R3D_ALPHA_TEST | R3D_LUMINOUS | R3D_TEX_ALPHA | R3D_SPECULAR;
+        const uint32_t glow = glow_mask & ~uint32_t(R3D_SPECULAR);
+        // The glow triangles of the world
+        std::vector<uint32_t> glows;
+        for (auto [first, count] : {std::pair{wv->opaque_first, wv->opaque_count}, std::pair{wv->trans_first, wv->trans_count}})
+            for (uint32_t i = first; i + 2 < first + count && i + 2 < out.vertices.size(); i += 3)
+                if ((out.vertices[i].flags & glow_mask) == glow || (!placed_.empty() && i < keys_.size() && placed_.count(uint32_t(keys_[i] >> 32))))
+                    glows.push_back(i);
+        // The scenery round them (the lamp each halo is at), followed from last
+        // frame by its own model: a halo moves as the scenery next to it does.
+        // (The camera tracked from the scenery is a median of estimates a
+        // little apart, a few centimetres to a decimetre off: by it alone the
+        // halos shook against their lamps.) In a grid of 3-unit cells, only
+        // those round a glow
+        const float CELL = 3.0f;
+        auto cell_key = [&](const float* p) {
+            int64_t x = int64_t(std::floor(p[0] / CELL)), y = int64_t(std::floor(p[1] / CELL)), z = int64_t(std::floor(p[2] / CELL));
+            return uint64_t(x * 73856093) ^ uint64_t(y * 19349663) ^ uint64_t(z * 83492791);
+        };
+        auto centre = [&](uint32_t t, float* c) {
+            for (int k = 0; k < 3; k++)
+                c[k] = (out.vertices[t].pos[k] + out.vertices[t + 1].pos[k] + out.vertices[t + 2].pos[k]) * (1.0f / 3.0f);
+        };
+        std::unordered_set<uint64_t> near_cells;
+        std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+        if (!cut && !glows.empty()) {
+            for (uint32_t t : glows) {
+                float c[3];
+                centre(t, c);
+                for (int dx = -1; dx <= 1; dx++)
+                    for (int dy = -1; dy <= 1; dy++)
+                        for (int dz = -1; dz <= 1; dz++) {
+                            float q[3] = {c[0] + dx * CELL, c[1] + dy * CELL, c[2] + dz * CELL};
+                            near_cells.insert(cell_key(q));
+                        }
+            }
+            for (uint32_t i = wv->opaque_first; i < wv->opaque_first + wv->opaque_count && i < out.vertices.size(); i++) {
+                const R3DVertex& x = out.vertices[i];
+                if ((x.flags & glow_mask) == glow) continue;
+                // (the other cars, by their shiny paint and glass, are kept to
+                // tell their exhaust flames; the people and the rest that turn
+                // their own way are not scenery)
+                bool car = (x.flags & R3D_CAR) || (x.flags & (R3D_ACTOR | R3D_SPECULAR)) == (R3D_ACTOR | R3D_SPECULAR);
+                if (!car && (x.flags & R3D_ACTOR)) continue;
+                if (!car && x.prev[0] == x.pos[0] && x.prev[1] == x.pos[1] && x.prev[2] == x.pos[2]) continue;   // (not followed)
+                uint64_t key = cell_key(x.pos);
+                if (near_cells.count(key)) grid[key].push_back(i);
+            }
+        }
+        for (uint32_t t : glows) {
+            // How the scenery nearest its middle moved (none within 3 units:
+            // as the camera did)
+            float c[3], move[3] = {0, 0, 0};
+            centre(t, c);
+            const R3DVertex* near = nullptr;
+            if (!grid.empty()) {
+                float best = CELL * CELL;
+                for (int dx = -1; dx <= 1; dx++)
+                    for (int dy = -1; dy <= 1; dy++)
+                        for (int dz = -1; dz <= 1; dz++) {
+                            float q[3] = {c[0] + dx * CELL, c[1] + dy * CELL, c[2] + dz * CELL};
+                            auto it = grid.find(cell_key(q));
+                            if (it == grid.end()) continue;
+                            for (uint32_t n : it->second) {
+                                const float* p = out.vertices[n].pos;
+                                float e[3] = {p[0] - c[0], p[1] - c[1], p[2] - c[2]};
+                                if (dot3(e, e) < best) best = dot3(e, e), near = &out.vertices[n];
+                            }
+                        }
+            }
+            // On a car (its exhaust's flames): left as paired, it moves with the car
+            if (near && ((near->flags & R3D_CAR) || (near->flags & (R3D_ACTOR | R3D_SPECULAR)) == (R3D_ACTOR | R3D_SPECULAR))) continue;
+            if (near)
+                for (int k = 0; k < 3; k++) move[k] = near->pos[k] - near->prev[k];
+            for (uint32_t i = t; i < t + 3; i++) {
+                R3DVertex& v = out.vertices[i];
+                float still[3];
+                if (cut) {
+                    memcpy(still, v.pos, sizeof(still));
+                } else if (near) {
+                    for (int k = 0; k < 3; k++) still[k] = v.pos[k] - move[k];
+                } else {
+                    // Its place in the world (world axis k, in view space,
+                    // is ax[3k..3k+2]), then in last frame's view
+                    float w[3];
+                    for (int k = 0; k < 3; k++) w[k] = cam[k] + dot3(ax + k * 3, v.pos) - pcam[k];
+                    for (int k = 0; k < 3; k++) still[k] = w[0] * pax[k] + w[1] * pax[3 + k] + w[2] * pax[6 + k];
+                }
+                float e[3] = {v.prev[0] - still[0], v.prev[1] - still[1], v.prev[2] - still[2]};
+                bool linked = v.prev[0] != v.pos[0] || v.prev[1] != v.pos[1] || v.prev[2] != v.pos[2];
+                // (by the scenery beside it always: a halo handed to another
+                // lamp head a metre or two away slid there too; by the camera
+                // alone, only when paired far off)
+                if (!near && linked && dot3(e, e) <= 3.0f * 3.0f) continue;
+                if (!linked && (still[0] != v.pos[0] || still[1] != v.pos[1] || still[2] != v.pos[2])) out.moving++;
+                memcpy(v.prev, still, sizeof(v.prev));
+            }
+        }
+    }
+    // The world's back faces (R3DScene::backs: left out of the picture by the
+    // back-face test, but the sun's rays still meet them, r3d_raytrace.cpp).
+    // A corner shared with a polygon facing the camera moves exactly as that
+    // one's does: moved on their own, the edges between both opened by a few
+    // centimetres between frames, and the sun shone through the seams (white
+    // lines that flickered between the chunks of a cliff's shadow). The other
+    // corners of the scenery, which stands still, go where the camera's move
+    // puts them last frame; those of cars and people keep this frame's place.
+    // But first each corner is followed from last frame by its key, as the
+    // polygons facing the camera are, whichever way it faced then: the
+    // camera's move is an estimate a few centimetres off, and a polygon that
+    // had just turned towards the camera was not followed at all (left
+    // where this frame has it, a frame's move ahead of its neighbours while
+    // the camera turned: the sun shone through the gap, white lines that
+    // flickered in the shadows, only with Smooth). SR2_BACK_LINKS=0: as before
+    static const bool back_links = !(getenv("SR2_BACK_LINKS") && atoi(getenv("SR2_BACK_LINKS")) == 0);
+    const size_t vcount = out.vertices.size();
+    std::vector<uint8_t> back_linked(out.backs.size(), 0);
+    for (size_t i = 0; i < out.backs.size(); i++) {
+        R3DVertex& v = out.backs[i];
+        memcpy(v.prev, v.pos, sizeof(v.prev));
+        if (!back_links || i >= back_keys_.size()) continue;
+        uint64_t key = back_keys_[i], poly = key & ~7ull;
+        uint32_t corner = uint32_t(key & 7);
+        if (corner == 0) index_.insert(poly, uint32_t(vcount + i));
+        auto spin = spinning.find(uint32_t(key >> 32));
+        if (spin != spinning.end()) {
+            for (int k = 0; k < 3; k++) v.prev[k] = v.pos[k] - spin->second[k];
+            back_linked[i] = 1;
+            continue;
+        }
+        uint32_t was = prev_index_.find(poly);
+        if (was == KeyIndex::EMPTY) continue;
+        size_t j = size_t(was) + corner;
+        if (j >= prev_positions_.size() || j >= prev_keys_.size() || prev_keys_[j] != key) continue;
+        const float* p = prev_positions_[j].data();
+        float dx = p[0] - v.pos[0], dy = p[1] - v.pos[1], dz = p[2] - v.pos[2];
+        float limit = 0.25f * std::max(1.0f, std::fabs(v.pos[2]));
+        if (dx * dx + dy * dy + dz * dz > limit * limit) continue;
+        memcpy(v.prev, p, sizeof(v.prev));
+        back_linked[i] = 1;
+    }
+    if (wv && prev_world_valid_) {
+        const float *ax = wv->world_axes, *cam = wv->camera, *pax = prev_world_axes_, *pcam = prev_world_camera_;
+        auto dot3 = [](const float* p, const float* q) { return p[0] * q[0] + p[1] * q[1] + p[2] * q[2]; };
+        float d[3] = {cam[0] - pcam[0], cam[1] - pcam[1], cam[2] - pcam[2]};
+        bool cut = dot3(d, d) > 10.0f * 10.0f || dot3(ax + 6, pax + 6) < 0.9f || dot3(ax + 3, pax + 3) < 0.9f;
+        size_t end = std::min<size_t>(size_t(wv->back_first) + wv->back_count, out.backs.size());
+        if (!cut && end > wv->back_first) {
+            auto bits = [](const float* p) {
+                uint32_t b[3];
+                memcpy(b, p, 12);
+                return (uint64_t(b[0]) * 0x9E3779B97F4A7C15ull) ^ (uint64_t(b[1]) * 0xC2B2AE3D27D4EB4Full) ^ (uint64_t(b[2]) * 0x165667B19E3779F9ull);
+            };
+            // (and a corner a hair from one facing the camera, of another
+            // model beside it, takes that one's move: on a 5 cm grid)
+            constexpr float CELL = 0.05f;
+            auto cell = [](int64_t x, int64_t y, int64_t z) {
+                return (uint64_t(x) * 0x9E3779B97F4A7C15ull) ^ (uint64_t(y) * 0xC2B2AE3D27D4EB4Full) ^ (uint64_t(z) * 0x165667B19E3779F9ull);
+            };
+            // (open-addressing tables kept from frame to frame: two
+            // std::unordered_map of some 20000 entries built every frame took
+            // 2 ms of the frame's preparation at the Mountain's start)
+            KeyIndex& front = back_front_;        // a corner's position -> a vertex facing the camera there
+            KeyIndex& near_front = back_near_;    // a grid cell -> one there
+            front.reset(size_t(wv->opaque_count) + wv->trans_count);
+            near_front.reset(size_t(wv->opaque_count) + wv->trans_count);
+            for (auto [first, count] : {std::pair{wv->opaque_first, wv->opaque_count}, std::pair{wv->trans_first, wv->trans_count}})
+                for (uint32_t i = first; i < first + count && i < out.vertices.size(); i++) {
+                    const float* q = out.vertices[i].pos;
+                    front.insert(bits(q), i);
+                    if (out.vertices[i].flags & (R3D_ACTOR | R3D_CAR)) continue;
+                    near_front.insert(cell(int64_t(std::floor(q[0] / CELL)), int64_t(std::floor(q[1] / CELL)), int64_t(std::floor(q[2] / CELL))), i);
+                }
+            for (size_t i = wv->back_first; i < end; i++) {
+                R3DVertex& v = out.backs[i];
+                if (back_linked[i]) continue;
+                uint32_t f = front.find(bits(v.pos));
+                if (f != KeyIndex::EMPTY && memcmp(out.vertices[f].pos, v.pos, 12) == 0) {
+                    memcpy(v.prev, out.vertices[f].prev, sizeof(v.prev));
+                    continue;
+                }
+                if (v.flags & (R3D_ACTOR | R3D_CAR)) continue;
+                int64_t c[3] = {int64_t(std::floor(v.pos[0] / CELL)), int64_t(std::floor(v.pos[1] / CELL)), int64_t(std::floor(v.pos[2] / CELL))};
+                const R3DVertex* best = nullptr;
+                float best_d = CELL * CELL;
+                for (int dx = -1; dx <= 1; dx++)
+                    for (int dy = -1; dy <= 1; dy++)
+                        for (int dz = -1; dz <= 1; dz++) {
+                            uint32_t n = near_front.find(cell(c[0] + dx, c[1] + dy, c[2] + dz));
+                            if (n == KeyIndex::EMPTY) continue;
+                            const R3DVertex& o = out.vertices[n];
+                            float e[3] = {o.pos[0] - v.pos[0], o.pos[1] - v.pos[1], o.pos[2] - v.pos[2]};
+                            float d = dot3(e, e);
+                            if (d < best_d) best_d = d, best = &o;
+                        }
+                if (best) {
+                    for (int k = 0; k < 3; k++) v.prev[k] = v.pos[k] - (best->pos[k] - best->prev[k]);
+                    continue;
+                }
+                float w[3];
+                for (int k = 0; k < 3; k++) w[k] = cam[k] + dot3(ax + k * 3, v.pos) - pcam[k];
+                for (int k = 0; k < 3; k++) v.prev[k] = w[0] * pax[k] + w[1] * pax[3 + k] + w[2] * pax[6 + k];
+            }
+        }
+    }
+    prev_world_valid_ = wv != nullptr;
+    if (wv) {
+        memcpy(prev_world_axes_, wv->world_axes, sizeof(prev_world_axes_));
+        memcpy(prev_world_camera_, wv->camera, sizeof(prev_world_camera_));
+    }
     std::swap(prev_index_, index_);
     // Only the positions are kept (a copy of every whole vertex was most of
     // the rest); the vectors keep their room
-    prev_positions_.resize(out.vertices.size());
+    prev_positions_.resize(out.vertices.size() + out.backs.size());
     for (size_t i = 0; i < out.vertices.size(); i++) memcpy(prev_positions_[i].data(), out.vertices[i].pos, 12);
+    for (size_t i = 0; i < out.backs.size(); i++) memcpy(prev_positions_[out.vertices.size() + i].data(), out.backs[i].pos, 12);
     prev_keys_.assign(keys_.begin(), keys_.end());
+    prev_keys_.resize(out.vertices.size(), 0);
+    if (back_links) prev_keys_.insert(prev_keys_.end(), back_keys_.begin(), back_keys_.end());
+    prev_keys_.resize(prev_positions_.size(), 0);
+    prev_front_count_ = out.vertices.size();
 }
 
 void R3DSceneBuilder::KeyIndex::reset(size_t count) {
@@ -824,7 +1309,7 @@ void R3DSceneBuilder::apply_texture_pack(R3DScene& out) {
     frame_slots_.clear();
     for (size_t i = 0; i + 2 < out.vertices.size(); i += 3) {
         R3DVertex* tri = &out.vertices[i];
-        if (!(tri[0].flags & R3D_TEXTURED)) continue;
+        if (!(tri[0].flags & R3D_TEXTURED) || (tri[0].flags & R3D_OWN_TEXTURE)) continue;
         auto it = frame_slots_.find(tri[0].tex);
         uint32_t slot = it != frame_slots_.end() ? it->second
                                                  : (frame_slots_[tri[0].tex] = pack_->lookup(tri[0].tex, *texture_ram_));
@@ -937,6 +1422,7 @@ void R3DSceneBuilder::viewport(uint32_t addr, int depth) {
         opaque_keys_.clear();
         trans_keys_.clear();
         backs_.clear();
+        backs_keys_.clear();
         viewport_key_ = addr;
         instances_.clear();
         node_ptr(vp(0x02), base, Attribs{}, 0);
@@ -956,6 +1442,7 @@ void R3DSceneBuilder::viewport(uint32_t addr, int depth) {
         v.back_first = uint32_t(out_->backs.size());
         v.back_count = uint32_t(backs_.size());
         out_->backs.insert(out_->backs.end(), backs_.begin(), backs_.end());
+        back_keys_.insert(back_keys_.end(), backs_keys_.begin(), backs_keys_.end());
         out_->viewports.push_back(v);
     }
 
@@ -1065,16 +1552,24 @@ void R3DSceneBuilder::node(uint32_t addr, const Mat& parent, Attribs a, int dept
         else if (fade < 1.0f / 32.0f) fade = 0;
         float parent_alpha = a.alpha;
         bool models = child & 0x01000000;
-        auto visit = [&](uint32_t e, float alpha) {
+        auto visit = [&](uint32_t e, float alpha, float shadow) {
             Attribs b = a;
             b.alpha = alpha;
+            b.shadow = a.shadow * shadow;
             if (models) model(e & 0xFFFFFF, m, b);
             else node(e & 0xFFFFFF, m, b, depth + 1);
         };
-        if (fade > 0) visit(entry[k], parent_alpha * fade);
-        if (fade < 1 && k != 3) visit(entry[k + 1], parent_alpha * (1 - fade));
+        // (cross-fading with the next model: the one more on screen casts the
+        // whole shadow; the last one, alone, fading out at the far end: as much as it is drawn)
+        bool partner = fade < 1 && k != 3;
+        if (fade > 0) visit(entry[k], parent_alpha * fade, partner ? (fade >= 0.5f ? 1.0f : 0.0f) : fade);
+        if (partner) visit(entry[k + 1], parent_alpha * (1 - fade), fade >= 0.5f ? 0.0f : 1.0f);
     } else {
-        if (!no_lod && !a.no_cull) a.alpha *= std::clamp(fac[3] * (lod_scale - del[3]), 0.0f, 1.0f);
+        if (!no_lod && !a.no_cull) {
+            float fade = std::clamp(fac[3] * (lod_scale - del[3]), 0.0f, 1.0f);
+            a.alpha *= fade;
+            a.shadow *= fade;
+        }
         node_ptr(child, m, a, depth + 1);
     }
 }
@@ -1090,6 +1585,8 @@ void R3DSceneBuilder::model(uint32_t addr, const Mat& m, const Attribs& a) {
     uint64_t instance = uint64_t(instance_key(addr)) << 32;
     uint32_t drawn = 0;
     const uint32_t start_addr = addr;
+    // One the port draws itself (own_texture)
+    const bool own = own_pictures_ && (addr & 0xFFFFFF) >= std::max<uint32_t>(own_from_, 0x100000);
     uint32_t opaque_from = uint32_t(opaque_.size()), trans_from = uint32_t(trans_.size()), back_from = uint32_t(backs_.size());
 
     for (int guard = 0; guard < 65536; guard++) {
@@ -1185,6 +1682,24 @@ void R3DSceneBuilder::model(uint32_t addr, const Mat& m, const Attribs& a) {
                 flags |= ((h[6] >> 5) & 3) << R3D_SHININESS_SHIFT;
                 if (((h[6] >> 24) & 0x7F) == 2) flags |= R3D_INVERT_RGB;
                 if (h[4] & 0x80) flags |= R3D_TRANSLATOR;
+                // Translucent only because the LOD fades it: still a caster of
+                // traced sun shadows (r3d_raytrace.cpp), as solid as a.shadow.
+                // (As it was, the shadow came all at once as the model finished
+                // fading in, some 100 m away: on the mountain the trees' and
+                // rocks' shadows popped in)
+                if (a.alpha < 1.0f && !poly_alpha && a.shadow > 0)
+                    flags |= R3D_LOD_FADE | uint32_t(std::lround(std::clamp(a.shadow, 0.0f, 1.0f) * 63.0f)) << R3D_LOD_SHADOW_SHIFT;
+                uint32_t own_slot = 0;
+                if (own && textured) {
+                    auto pic = own_textures_.find(tex);
+                    if (pic != own_textures_.end())
+                        own_slot = own_pictures_->own_picture(pic->second.file, pic->second.top, pic->second.bottom, pic->second.flip,
+                                                               pic->second.over);
+                    if (own_seen_.insert(tex).second)
+                        printf("[r3d] own model %06x: texture %08x %s\n", start_addr & 0xFFFFFF, tex,
+                               own_slot ? "-> own picture" : pic != own_textures_.end() ? "(own picture missing)" : "(the game's)");
+                    if (own_slot) flags |= R3D_OWN_TEXTURE;
+                }
                 float fog = float((h[6] >> 11) & 0x1F) / 16.0f;
                 float spec_coef = float(h[0] >> 26) / 63.0f;
 
@@ -1203,7 +1718,7 @@ void R3DSceneBuilder::model(uint32_t addr, const Mat& m, const Attribs& a) {
                     out[i].shade = v[i].shade;
                     out[i].fog = fog;
                     out[i].spec = spec_coef;
-                    out[i].replace = 0;
+                    out[i].replace = own_slot;
                 }
                 // Back-face test with the face normal (spec 5.4)
                 float fn[3];
@@ -1236,6 +1751,7 @@ void R3DSceneBuilder::model(uint32_t addr, const Mat& m, const Attribs& a) {
                     if (!translucent) {
                         backs_.insert(backs_.end(), out, out + 3);
                         if (nverts == 4) backs_.insert(backs_.end(), {out[0], out[2], out[3]});
+                        for (int c = 0; c < (nverts == 4 ? 6 : 3); c++) backs_keys_.push_back(poly_key | uint64_t(c));
                     }
                 } else {
                     for (int i = 0; i < nverts; i++)
@@ -1259,4 +1775,15 @@ void R3DSceneBuilder::model(uint32_t addr, const Mat& m, const Attribs& a) {
         in.back[0] = back_from, in.back[1] = uint32_t(backs_.size());
         instances_.push_back(in);
     }
+}
+
+void R3DScene::proj_at(size_t vi, float t, float out[16]) const {
+    static const bool now_only = getenv("SR2_PROJ_NOW") && atoi(getenv("SR2_PROJ_NOW")) == 1;
+    if (vi >= viewports.size()) return;
+    const R3DViewport& v = viewports[vi];
+    memcpy(out, v.proj, 64);
+    if (now_only || t == 1.0f || !v.has_prev_lens) return;
+    t = std::clamp(t, -1.0f, 1.0f);
+    static const int at[4] = {0, 5, 8, 9};
+    for (int k = 0; k < 4; k++) out[at[k]] = v.prev_lens[k] + (v.proj[at[k]] - v.prev_lens[k]) * t;
 }

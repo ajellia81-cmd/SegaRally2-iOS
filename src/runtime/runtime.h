@@ -16,12 +16,13 @@
 #include "eeprom.h"
 #include "inputs.h"
 #include "../audio/audio_out.h"
+#include "../common/clock.h"   // qpc_seconds()
 #include "../audio/sound_board.h"
 #include "../video/r3d_state.h"
 
 // ROMs, loaded by main() from g_data_dir
 extern std::vector<uint8_t> g_crom, g_banked, g_vrom;
-extern std::vector<uint8_t> g_drive_rom;   // force feedback board program (epr-21119), optional
+extern std::vector<uint8_t> g_drive_rom;   // force feedback board program (epr-20512), optional
 
 extern std::string g_data_dir;
 bool load_rom(const std::string& name, std::vector<uint8_t>& out, bool required);
@@ -41,8 +42,8 @@ extern AutoInput g_auto;
 
 // The game thread: runs the recompiled program on a 512 MB native stack
 DWORD WINAPI game_thread(LPVOID);
-double qpc_seconds();              // seconds from a fixed origin (QueryPerformanceCounter)
 void frame_log(const char* fmt, ...);   // LW_FRAMELOG (app.cpp); does nothing without it
+void console_prompt();             // before the process ends: the prompt of the terminal it was started from (app.cpp)
 extern LARGE_INTEGER g_qpf, g_start_time;
 extern bool g_realtime;            // pace the game to real time (off with LW_FAST)
 extern std::atomic<bool> g_boot_skip;   // the power-on screens run through with nothing on screen
@@ -59,6 +60,18 @@ extern std::atomic<bool> g_skip_attract, g_game_over_menu;
 // The game is in its attract (logos, title, demo, rankings, INSERT COIN):
 // app.cpp shows the author's credit over it
 extern std::atomic<bool> g_in_attract;
+// The game waits for START: its attract, or the credit / START screen before
+// SELECT GAME (EXPERIENCE ARCADE ORIGINAL: the pad's START is the cabinet's
+// START there, and the pause menu everywhere else; app_input.cpp)
+extern std::atomic<bool> g_wants_start;
+// SELECT CAR is up: the car under its cursor (0..7, the model index), else -1.
+// The keyboard's arrows step it one car a press there (app_input.cpp)
+extern std::atomic<int> g_car_select;
+// NAME ENTRY is up (until END): the arrows, the d-pad and the stick step
+// its wheel of letters one a press (app_input.cpp)
+extern std::atomic<bool> g_name_entry;
+// ARCADE ORIGINAL: its CREDIT setting changed; the program restarts once in the attract (runtime.cpp, rt_event)
+extern std::atomic<bool> g_restart_program;
 // Widescreen: how much wider than 4:3 the 3D view is (set by the window,
 // 1 = 4:3) and the factor the game's horizontal field of view was last
 // widened by (the scene builder takes it back out of the projection)

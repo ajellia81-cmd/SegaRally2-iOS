@@ -6,266 +6,43 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwctype>
 #include <ctime>
 #include <initializer_list>
-#include <thread>
 
 #include <shellapi.h>
-#include <winhttp.h>
 
 #include <wincodec.h>
 
+#include "ui_draw.h"
+#include "../common/clock.h"
+
 namespace {
 
-// Star Wars: the title's yellow (bright at the top, deeper below) with a dark
-// outline, cool blue-white letters, and lightsaber blue for the lines and the
-// glow behind the selected entry
+// The title's yellow (bright at the top, deeper below) with a dark outline and
+// cool blue-white letters; SABER (a name kept from Star Wars Trilogy) is the
+// accent of the lines and the glow behind the selected entry
 constexpr uint32_t GOLD_TOP = 0xFFF06A, GOLD_BOTTOM = 0xF5C400, EDGE = 0x020308;
 constexpr uint32_t PALE_TOP = 0xEAF2FF, PALE_BOTTOM = 0xAFC2DA, DIM = 0x56606E;
 constexpr uint32_t HINT = 0xC4CAD2, FOOT = 0x7A8088;   // Sega Rally 2: neutral greys (the mock-up)
 constexpr uint32_t SABER = 0xC8241E, PANEL = 0x040914;   // Sega Rally 2: the accent is the logo's red
-constexpr uint32_t WHITE_TOP = 0xFFFFFF, WHITE_BOTTOM = 0xD8E6F6;   // the selected entry of the side menu
 
-constexpr const wchar_t* COFFEE_URL = L"https://buymeacoffee.com/snicolast8u";
-constexpr const wchar_t* COFFEE_LABEL = L"BUY ME A COFFEE";   // an entry of MORE RECOMPS
-constexpr uint32_t COFFEE_INK = 0x0D0C22;   // their dark blue-black
-constexpr const wchar_t* COFFEE_HINT = L"Support the port: opens buymeacoffee.com in your browser";
 
-// UPDATE AVAILABLE: news.txt on the public repository's main branch (news.h)
-constexpr const wchar_t* NEWS_HOST = L"raw.githubusercontent.com";
-constexpr const wchar_t* NEWS_PATH = L"/snicolast/SegaRally2Native/main/news.txt";
-constexpr const wchar_t* GAME_URL = L"https://github.com/snicolast/SegaRally2Native";
+using ui_draw::chan, ui_draw::mix, ui_draw::over, ui_draw::read_file;
 
-// MORE RECOMPS: snicolast's other ports, in the order of the menu
-struct Recomp {
-    const wchar_t *title, *url, *about, *tagline;
-    const wchar_t* exe;          // its executable, in its folder
-    const wchar_t* folders[4];   // folders next to this port's where it is looked for
-    const wchar_t *backdrop, *logo;   // res/menu/more/
-    const char* name;            // in the console
-};
-constexpr Recomp RECOMPS[] = {
-    {L"THE LOST WORLD", L"https://github.com/snicolast/LostWorldNative",
-     L"The Lost World: Jurassic Park, the 1997 SEGA arcade game, remastered for PC like this one. ",
-     L"SEGA  \u00B7  1997  \u00B7  ARCADE LIGHT-GUN SHOOTER", L"LostWorld.exe",
-     {L"LostWorldNative", L"LostWorldNative-dev", L"LostWorld", L"The Lost World"},
-     L"more/lost_world_background.jpg", L"more/lost_world_logo.png", "The Lost World"},
-    {L"STAR WARS TRILOGY", L"https://github.com/snicolast/StarWarsTrilogyNative",
-     L"Star Wars Trilogy Arcade, the 1998 SEGA arcade game, remastered for PC like this one. ",
-     L"SEGA  \u00B7  1998  \u00B7  ARCADE RAIL SHOOTER", L"StarWarsTrilogy.exe",
-     {L"StarWarsTrilogyNative", L"StarWarsTrilogyNative-dev", L"StarWarsTrilogy", L"Star Wars Trilogy"},
-     L"more/star_wars_background.jpg", L"more/star_wars_logo.png", "Star Wars Trilogy"},
-};
-static_assert(sizeof(RECOMPS) / sizeof(RECOMPS[0]) == Frontend::RECOMP_COUNT);
-
-double now_seconds() {
-    static LARGE_INTEGER freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f; }();
-    LARGE_INTEGER t;
-    QueryPerformanceCounter(&t);
-    return double(t.QuadPart) / double(freq.QuadPart);
-}
-
-float chan(uint32_t rgb, int shift) { return float((rgb >> shift) & 0xFF) / 255.0f; }
-
-uint32_t mix(uint32_t a, uint32_t b, float t) {
-    uint32_t r = 0;
-    for (int s = 0; s <= 16; s += 8) {
-        float v = chan(a, s) + (chan(b, s) - chan(a, s)) * t;
-        r |= uint32_t(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f) << s;
-    }
-    return r;
-}
-
-std::vector<char> read_file(const std::string& path) {
-    std::vector<char> data;
-    if (FILE* f = fopen(path.c_str(), "rb")) {
-        fseek(f, 0, SEEK_END);
-        data.resize(size_t(ftell(f)));
-        fseek(f, 0, SEEK_SET);
-        if (fread(data.data(), 1, data.size(), f) != data.size()) data.clear();
-        fclose(f);
-    }
-    return data;
-}
-
-std::wstring widen(const std::string& s) {   // UTF-8
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), int(s.size()), nullptr, 0);
-    std::wstring w(size_t(std::max(n, 0)), L'\0');
-    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), int(s.size()), w.data(), n);
-    return w;
-}
-
-#ifndef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
-#define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4   // Windows 8.1 and later
-#endif
-
-// GET https://host/path into `body` (at most 256 KB); false on any failure.
-// A few seconds at most when there is no connection
-bool https_get(const wchar_t* host, const wchar_t* path, std::string& body) {
-    body.clear();
-    const wchar_t* agent = L"SegaRally2Native";
-    HINTERNET session = WinHttpOpen(agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) session = WinHttpOpen(agent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) return false;
-    WinHttpSetTimeouts(session, 4000, 4000, 4000, 4000);
-    HINTERNET connect = WinHttpConnect(session, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
-    HINTERNET request = connect ? WinHttpOpenRequest(connect, L"GET", path, nullptr, WINHTTP_NO_REFERER,
-                                                     WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
-                                : nullptr;
-    DWORD status = 0, size = sizeof(status);
-    bool ok = request && WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-              WinHttpReceiveResponse(request, nullptr) &&
-              WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
-                                  &status, &size, WINHTTP_NO_HEADER_INDEX) &&
-              status == 200;
-    while (ok) {
-        DWORD avail = 0, got = 0;
-        if (!WinHttpQueryDataAvailable(request, &avail)) ok = false;
-        if (!ok || avail == 0) break;
-        size_t at = body.size();
-        if (at + avail > 256 * 1024) ok = false;
-        else {
-            body.resize(at + avail);
-            ok = WinHttpReadData(request, body.data() + at, avail, &got) != FALSE;
-            body.resize(at + got);
-        }
-    }
-    for (HINTERNET h : {request, connect, session})
-        if (h) WinHttpCloseHandle(h);
-    if (!ok) body.clear();
-    return ok;
-}
-
-const wchar_t* const FACES[3] = {L"Saira ExtraCondensed ExCond", L"Barlow Condensed", L"Share Tech Mono"};
+// Frontend::Family: the font's family name (as Windows knows it) and weight
+const wchar_t* const FACES[6] = {L"Saira ExtraCondensed ExCond", L"Barlow Condensed", L"Share Tech Mono",
+                                 L"Barlow Condensed SemiBold", L"Barlow Condensed Medium", L"Barlow"};
+const int WEIGHTS[6] = {FW_BOLD, FW_BOLD, FW_NORMAL, FW_SEMIBOLD, FW_MEDIUM, FW_NORMAL};
 
 }  // namespace
-
-// ---- Settings file ----
-
-namespace {
-// What each QUALITY level sets (the other options are left as they are).
-// Measured on an RTX 5070 Ti at 1440p, the costly ones are the traced sun
-// shadows (in the 3D pass), the ambient occlusion and the anti-aliasing
-struct QualityLevel {
-    int ray_tracing;   // 0 off, 1 sun shadows, 2 also ambient occlusion
-    bool ao, shadows;
-    int bloom;
-    bool msaa;         // MSAA 4x, or off (DLAA, picked by hand, is left alone)
-};
-const QualityLevel QUALITY_LEVELS[4] = {
-    {0, false, false, 1, false},   // LOW: laptops and integrated graphics
-    {0, true, true, 1, true},      // MEDIUM: mid-range cards (RTX 3060, RX 6600): shadow map, no ray tracing
-    {1, true, true, 2, true},      // HIGH: ray traced sun shadows
-    {2, true, true, 2, true},      // ULTRA: everything (the defaults)
-};
-}  // namespace
-
-void FrontendSettings::set_quality(int q) {
-    if (q < LOW || q > ULTRA) return;
-    const QualityLevel& l = QUALITY_LEVELS[q];
-    ray_tracing = l.ray_tracing;
-    ao = l.ao;
-    shadows = l.shadows;
-    bloom = l.bloom;
-    if (aa != 1 && aa != 3) aa = l.msaa ? 0 : 2;
-}
-
-int FrontendSettings::quality() const {
-    for (int q = LOW; q <= ULTRA; q++) {
-        const QualityLevel& l = QUALITY_LEVELS[q];
-        bool aa_same = aa == 1 || aa == 3 || aa == (l.msaa ? 0 : 2);
-        if (ray_tracing == l.ray_tracing && ao == l.ao && shadows == l.shadows && bloom == l.bloom && aa_same) return q;
-    }
-    return CUSTOM;
-}
-
-void FrontendSettings::load(const char* path) {
-    FILE* f = fopen(path, "r");
-    if (!f) return;
-    char line[512];
-    while (fgets(line, sizeof(line), f)) {
-        std::string* path_key = strncmp(line, "lost_world_path", 15) == 0 ? &lost_world_path
-                              : strncmp(line, "star_wars_path", 14) == 0  ? &star_wars_path
-                                                                          : nullptr;
-        if (path_key) {   // a path: may have spaces
-            const char* v = strchr(line, '=');
-            std::string folder = v ? v + 1 : "";
-            while (!folder.empty() && strchr(" \t\r\n\"", folder.front())) folder.erase(0, 1);
-            while (!folder.empty() && strchr(" \t\r\n\"", folder.back())) folder.pop_back();
-            *path_key = folder;
-            continue;
-        }
-        char key[64], value[64];
-        if (sscanf(line, " %63[^= ] = %63s", key, value) != 2) continue;
-        std::string k = key, v = value;
-        bool on = v == "1" || v == "on" || v == "true";
-        if (k == "fullscreen") fullscreen = on;
-        else if (k == "volume") volume = std::clamp(atoi(value), 0, 10);
-        else if (k == "music") music = std::clamp(atoi(value), 0, 10);
-        else if (k == "speakers") speakers = v == "surround" ? 1 : v == "headphones" ? 2 : 0;
-        else if (k == "rear_boost") rear_boost = std::clamp(atoi(value) / 3 * 3, 0, 12);
-        else if (k == "sample_interpolation") cubic_samples = v != "linear";
-        else if (k == "aa") aa = v == "dlaa" ? 1 : v == "dlss" ? 3 : (v == "none" || v == "off") ? 2 : 0;
-        else if (k == "haze") haze = on;
-        else if (k == "bloom") bloom = v == "low" ? 1 : v == "medium" ? 2 : v == "high" ? 3 : on ? 2 : 0;
-        else if (k == "ao") ao = on;
-        else if (k == "sun") sun = on;
-        else if (k == "shadows") shadows = on;
-        else if (k == "ray_tracing") ray_tracing = v == "shadows" ? 1 : v == "off" || v == "0" ? 0 : 2;
-        else if (k == "soft_particles") soft = on;
-        else if (k == "hdr") hdr = on;
-        else if (k == "rt_reflections") reflections = on;
-        else if (k == "global_illumination") gi = v == "high" ? 2 : v == "off" || v == "0" ? 0 : 1;
-        else if (k == "dust") dust = v != "original" && v != "0";
-        else if (k == "sharpen") sharpen = on;
-        else if (k == "hd_text") hd_text = on;
-        else if (k == "motion") smooth = v != "original";
-        else if (k == "saturation") saturation = std::clamp(atoi(value), 0, 200);
-        else if (k == "gamma") gamma = std::clamp(int(atof(value) * 100 + 0.5), 50, 150);
-        else if (k == "vibration") vibration = v == "low" ? 1 : v == "medium" ? 2 : v == "high" ? 3 : 0;
-        else if (k == "splash_screens") splash = on;
-        else if (k == "menu_music") menu_music = on;
-        else if (k == "check_updates") check_updates = on;
-        else if (k == "news_seen") news_seen = std::max(0, atoi(value));
-    }
-    fclose(f);
-}
-
-std::string FrontendSettings::text() const {
-    std::string out;
-    char buf[2048];
-    static const char* const AA[4] = {"msaa", "dlaa", "none", "dlss"};
-    static const char* const BLOOM[4] = {"off", "low", "medium", "high"};   // also the vibration levels
-    static const char* const SPEAKERS[3] = {"stereo", "surround", "headphones"};
-    static const char* const RT_MODES[3] = {"off", "shadows", "ao"};
-    snprintf(buf, sizeof(buf), "fullscreen = %d\nvolume = %d\nmusic = %d\naa = %s\nhaze = %d\nbloom = %s\nao = %d\nsun = %d\nshadows = %d\nsoft_particles = %d\nhdr = %d\nsharpen = %d\nhd_text = %d\n"
-               "saturation = %d\ngamma = %.2f\nmotion = %s\nspeakers = %s\nrear_boost = %d\nsample_interpolation = %s\n"
-               "vibration = %s\nray_tracing = %s\n"
-               "splash_screens = %d\nmenu_music = %d\n",
-            fullscreen, volume, music, AA[aa], haze, BLOOM[bloom], ao, sun, shadows, soft, hdr, sharpen, hd_text, saturation,
-            gamma / 100.0, smooth ? "smooth" : "original", SPEAKERS[speakers], rear_boost, cubic_samples ? "cubic" : "linear",
-            BLOOM[vibration], RT_MODES[ray_tracing],
-            splash, menu_music);
-    out += buf;
-    snprintf(buf, sizeof(buf), "check_updates = %d\nnews_seen = %d\nrt_reflections = %d\nglobal_illumination = %s\ndust = %s\n", check_updates, news_seen, reflections, gi == 2 ? "high" : gi ? "low" : "off", dust ? "enhanced" : "original");
-    out += buf;
-    if (!lost_world_path.empty()) out += "lost_world_path = " + lost_world_path + "\n";
-    if (!star_wars_path.empty()) out += "star_wars_path = " + star_wars_path + "\n";
-    return out;
-}
-
-void FrontendSettings::save(const char* path) const {
-    FILE* f = fopen(path, "w");
-    if (!f) return;
-    fputs(text().c_str(), f);
-    fclose(f);
-}
 
 // ---- Setup ----
 
 bool Frontend::init(const std::string& font_dir) {
-    static const char* const FILES[3] = {"SairaExtraCondensed-Bold.ttf", "BarlowCondensed-Bold.ttf",
-                                         "ShareTechMono-Regular.ttf"};
+    static const char* const FILES[6] = {"SairaExtraCondensed-Bold.ttf", "BarlowCondensed-Bold.ttf",
+                                         "ShareTechMono-Regular.ttf", "BarlowCondensed-SemiBold.ttf",
+                                         "BarlowCondensed-Medium.ttf", "Barlow-Regular.ttf"};
     bool ok = true;
     for (const char* name : FILES) {
         font_data_.push_back(read_file(font_dir + "/" + name));
@@ -301,10 +78,6 @@ bool Frontend::init(const std::string& font_dir) {
     load(L"logo.png", logo_);
     load(L"snicolast.png", credit_);
     if (!load(L"background.png", backdrop_) && !load(L"background.jpg", backdrop_)) placeholder_backdrop();
-    for (int g = 0; g < RECOMP_COUNT; g++) {
-        load(RECOMPS[g].backdrop, recomps_[g].backdrop);
-        load(RECOMPS[g].logo, recomps_[g].logo);
-    }
     return ok;
 }
 
@@ -352,35 +125,52 @@ void Frontend::shutdown() {
 
 // ---- Menu contents and navigation ----
 
-const wchar_t* const Frontend::TAB_NAMES[Frontend::TAB_COUNT] = {L"DISPLAY", L"GRAPHICS", L"AUDIO", L"CONTROLS"};
+const wchar_t* const Frontend::TAB_NAMES[Frontend::TAB_COUNT] = {L"EXPERIENCE", L"DISPLAY", L"GRAPHICS", L"AUDIO", L"CONTROLS", L"WHEEL"};
 
-// Every settings option: its tab and, within the tab, the order shown. This is
-// the one place to put a new option (besides `all` in items()); an option
-// missing here is not shown. Left out in Sega Rally 2: SOFT PARTICLES
-// (only the spectators' camera flashes) and HD TEXT (always on).
-// Tabs past VISIBLE_OPTIONS rows scroll.
+// Every settings option: its tab, within the tab the order shown, and the
+// heading of each group of rows (on its first one). This is the one place to
+// put a new option (besides `all` in items()); an option missing here is not
+// shown. SOFT PARTICLES (settings.soft: only the spectators' camera flashes)
+// has no row in Sega Rally 2. A tab whose rows do not fit the page scrolls.
 const Frontend::OptionTab Frontend::OPTION_TABS[] = {
-    {OPT_QUALITY, DISPLAY_TAB}, {OPT_DISPLAY, DISPLAY_TAB}, {OPT_MOTION, DISPLAY_TAB}, {OPT_AA, DISPLAY_TAB},
-    {OPT_SAT, DISPLAY_TAB}, {OPT_GAMMA, DISPLAY_TAB}, {OPT_SHARPEN, DISPLAY_TAB}, {OPT_UPDATES, DISPLAY_TAB},
-    {OPT_SUN, LIGHTING_TAB}, {OPT_SHADOWS, LIGHTING_TAB}, {OPT_RT, LIGHTING_TAB}, {OPT_REFLECT, LIGHTING_TAB}, {OPT_GI, LIGHTING_TAB}, {OPT_HDR, LIGHTING_TAB},
-    {OPT_AO, LIGHTING_TAB}, {OPT_BLOOM, LIGHTING_TAB}, {OPT_HAZE, LIGHTING_TAB}, {OPT_DUST, LIGHTING_TAB},
-    {OPT_VOLUME, AUDIO_TAB}, {OPT_MUSIC, AUDIO_TAB}, {OPT_SPEAKERS, AUDIO_TAB}, {OPT_REAR, AUDIO_TAB}, {OPT_SAMPLES, AUDIO_TAB}, {OPT_MENU_MUSIC, AUDIO_TAB},
-    {OPT_VIBRATION, CONTROLS_TAB},
-};
+    {OPT_EXPERIENCE, EXPERIENCE_TAB, L"EDITION"}, {OPT_ARCADE_ASPECT, EXPERIENCE_TAB},
+    {OPT_TELEMETRY, EXPERIENCE_TAB, L"EXPERIMENTAL"}, {OPT_TELEMETRY_FORMAT, EXPERIENCE_TAB},
+    {OPT_DISPLAY, DISPLAY_TAB, L"SCREEN"}, {OPT_RESOLUTION, DISPLAY_TAB}, {OPT_ASPECT, DISPLAY_TAB}, {OPT_HUD_AREA, DISPLAY_TAB}, {OPT_SCALE, DISPLAY_TAB}, {OPT_MOTION, DISPLAY_TAB},
+    {OPT_VSYNC, DISPLAY_TAB}, {OPT_MAXFPS, DISPLAY_TAB}, {OPT_BGFPS, DISPLAY_TAB}, {OPT_AA, DISPLAY_TAB},
+    {OPT_SAT, DISPLAY_TAB, L"PICTURE"}, {OPT_GAMMA, DISPLAY_TAB}, {OPT_SHARPEN, DISPLAY_TAB},
+    {OPT_SUN, LIGHTING_TAB, L"LIGHTING"}, {OPT_SHADOWS, LIGHTING_TAB}, {OPT_CAR_PROBES, LIGHTING_TAB}, {OPT_CAR_SHADOWS, LIGHTING_TAB}, {OPT_HDR, LIGHTING_TAB}, {OPT_AO, LIGHTING_TAB},
+    {OPT_BLOOM, LIGHTING_TAB}, {OPT_HAZE, LIGHTING_TAB},
+    {OPT_RT, LIGHTING_TAB, L"RAY TRACING"}, {OPT_REFLECT, LIGHTING_TAB}, {OPT_GI, LIGHTING_TAB},
+    {OPT_OBJECTS, LIGHTING_TAB, L"WORLD"},
+    {OPT_DUST, LIGHTING_TAB, L"ARCADE ART"}, {OPT_HUD, LIGHTING_TAB}, {OPT_LIVERIES, LIGHTING_TAB},
+    {OPT_VOLUME, AUDIO_TAB, L"VOLUME"}, {OPT_MUSIC, AUDIO_TAB}, {OPT_MENU_MUSIC, AUDIO_TAB},
+    {OPT_SPEAKERS, AUDIO_TAB, L"SOUND"}, {OPT_REAR, AUDIO_TAB}, {OPT_SAMPLES, AUDIO_TAB},
+    {OPT_CONNECTED, CONTROLS_TAB, L"DEVICES"},
+    {OPT_BIND, CONTROLS_TAB, L"KEYS"},   // (its heading: bind_lines' group, KEYBOARD KEYS or GAMEPAD BUTTONS)
+    {OPT_VIBRATION, CONTROLS_TAB, L"GAMEPAD"}, {OPT_TRIGGERS, CONTROLS_TAB},
+    {OPT_WHEEL, WHEEL_TAB, L"CONTROLS"},   // (its headings: each wheel_lines row's group)
+};   // (DIFFICULTY: in PLAY > ARCADE CLASSIC's race set-up)
+
+// Under each section's name in the column at the left
+static const wchar_t* const TAB_ABOUT[] = {L"PC edition or the arcade as it was", L"Screen, smoothing, picture",
+                                           L"Lighting, ray tracing, arcade art", L"Volume, speakers, sound", L"Devices, keys and buttons, vibration",
+                                           L"Controls, force feedback, rotation"};
+
+const wchar_t* Frontend::group_of(Id id) {
+    for (const OptionTab& o : OPTION_TABS)
+        if (o.id == id) return o.group;
+    return nullptr;
+}
 
 const wchar_t* const Frontend::RECORD_TAB_NAMES[Frontend::RECORD_TAB_COUNT] = {L"ACHIEVEMENTS", L"STATS"};
-
-int Frontend::tab_of(Id id) {
-    for (const OptionTab& o : OPTION_TABS)
-        if (o.id == id) return o.tab;
-    return GAME_TAB;
-}
+static const wchar_t* const RECORD_TAB_ABOUT[] = {L"Unlocked and still to get", L"Totals and best laps"};
+static const wchar_t* const RECORD_GROUPS[] = {L"UNLOCKED", L"LOCKED", L"TOTALS", L"BEST LAPS"};
 
 void Frontend::set_tab(int t) {
     tab_ = (t + tab_count()) % tab_count();
     scroll_ = 0;
-    record_scroll_ = 0;
-    selected_ = std::min(selected_, int(items().size()) - 1);
+    // the settings page and the records: their first row (the column of sections is not a row)
+    selected_ = screen_ == Screen::Options || screen_ == Screen::Records ? 1 : std::min(selected_, int(items().size()) - 1);
     hovered_ = -1;
     dirty_ = true;
 }
@@ -392,8 +182,13 @@ struct DebugPick {
     int index;
     const wchar_t* name;
 };
-const DebugPick DEBUG_COURSES[] = {{0, L"DESERT"}, {1, L"MOUNTAIN"}, {3, L"SNOWY"}, {2, L"RIVIERA"}};
+// (4: FOREST, the unused fifth stage the ROM still has: SELECT COURSE's fifth card, game_hooks.cpp)
+const DebugPick DEBUG_COURSES[] = {{0, L"DESERT"}, {1, L"MOUNTAIN"}, {3, L"SNOWY"}, {2, L"RIVIERA"}, {4, L"FOREST (UNUSED)"}};
 // In SELECT CAR's order, then the two hidden ones (its table at 0xF1F00 has eight)
+// DIFFICULTY in the menu's order, easiest first: the game's number for each
+// (FrontendSettings::difficulty)
+const int DIFFICULTY_ORDER[5] = {3, 4, 0, 1, 2};
+const wchar_t* const DIFFICULTY_NAMES[5] = {L"NORMAL", L"HARD", L"VERY HARD", L"VERY EASY", L"EASY"};
 const DebugPick DEBUG_CARS[] = {{2, L"FORD ESCORT"},   {3, L"SUBARU IMPREZA"}, {1, L"TOYOTA COROLLA"},
                                 {4, L"MITSUBISHI LANCER"}, {0, L"PEUGEOT 306"}, {5, L"LANCIA STRATOS"},
                                 {7, L"LANCIA DELTA"},  {6, L"TOYOTA CELICA"}};
@@ -403,7 +198,8 @@ constexpr int DEBUG_CAR_COUNT = int(sizeof(DEBUG_CARS) / sizeof(DEBUG_CARS[0]));
 
 std::vector<Frontend::Item> Frontend::items() const {
     auto on_off = [](bool v) { return std::wstring(v ? L"ON" : L"OFF"); };
-    static const wchar_t* const AA[4] = {L"MSAA 4X", L"DLAA", L"OFF", L"DLSS QUALITY"};
+    static const wchar_t* const AA[8] = {L"MSAA 4X", L"DLAA", L"OFF", L"DLSS QUALITY", L"DLSS BALANCED",
+                                         L"DLSS PERFORMANCE", L"DLSS ULTRA PERFORMANCE", L"FXAA"};
     static const wchar_t* const BLOOM_LEVELS[4] = {L"OFF", L"LOW", L"MEDIUM", L"HIGH"};
     static const wchar_t* const SPEAKERS[3] = {L"STEREO", L"SURROUND 4.0", L"HEADPHONES"};
     static const wchar_t* const SPEAKER_HINTS[3] = {
@@ -413,9 +209,8 @@ std::vector<Frontend::Item> Frontend::items() const {
     switch (screen_) {
     case Screen::Main: {
         std::vector<Item> list = {{PLAY, L"PLAY", L"", L"The original arcade game"},
-                                  {RECORDS, L"RECORDS", L"", L"Achievements and statistics"},
                                   {OPTIONS, L"OPTIONS", L"", L"Display, sound and controls"},
-                                  {MORE_GAMES, L"MORE RECOMPS", L"", L"Other arcade games recompiled for PC by snicolast"},
+                                  {RECORDS, L"RECORDS", L"", L"Achievements and statistics"},
                                   {QUIT, L"QUIT", L"", L"Close the game"}};
         // DEBUG is for testing only: hidden unless SR2_DEBUG_MENU is set
         // (kShowDebugMenu true shows it always)
@@ -424,6 +219,10 @@ std::vector<Frontend::Item> Frontend::items() const {
         if (debug_menu) list.insert(list.begin() + 1, {DEBUG, L"DEBUG", L"", L"Straight to a race of any course with any car (for testing)"});
         return list;
     }
+    case Screen::Play:
+        return {{ARCADE, L"ARCADE CLASSIC", L"", L"The original arcade game"},
+                {GHOST, L"GHOST RACE", L"COMING SOON", L"Race against your own best lap (coming soon)", false},
+                {BACK, L"BACK", L"", L"Return to the main menu"}};
     case Screen::Debug: {
         const wchar_t* lr = pad_prompts ? L"LEFT / RIGHT" : L"LEFT / RIGHT or ENTER";
         return {{DEBUG_COURSE, L"COURSE", DEBUG_COURSES[debug_course_].name, std::wstring(lr) + L" changes the course of the practice race"},
@@ -434,53 +233,107 @@ std::vector<Frontend::Item> Frontend::items() const {
                 {DEBUG_GO, L"START RACE", L"", L"The game goes through its selects by itself, unseen, and the race starts"},
                 {BACK, L"BACK", L"", L"Return to the main menu"}};
     }
-    case Screen::More: {
-        std::vector<Item> list;
-        for (int g = 0; g < RECOMP_COUNT; g++) {
-            bool found = !recomps_[g].exe.empty();
-            list.push_back({Id(LOST_WORLD + g), RECOMPS[g].title, found ? L"INSTALLED" : L"FREE DOWNLOAD",
-                            std::wstring(RECOMPS[g].about) + (!found
-                                ? (pad_prompts ? L"Not found on this PC: A opens its page, where you can download it"
-                                               : L"Not found on this PC: ENTER opens its page, where you can download it")
-                                : (pad_prompts ? L"Found on this PC: A closes this game and starts it"
-                                               : L"Found on this PC: ENTER closes this game and starts it"))});
-        }
-        list.push_back({COFFEE, COFFEE_LABEL, L"", COFFEE_HINT});
-        list.push_back({BACK, L"BACK", L"", L"Return to the main menu"});
-        return list;
-    }
     case Screen::Pause:
+        if (arcade)   // ARCADE ORIGINAL: no main menu to go back to; its own entries last, as a group (draw_side_menu)
+            return {{RESUME, L"RESUME", L"", L"Back to the game"},
+                    {SETTINGS, L"SETTINGS", L"", L"Display, sound, controls and the experience"},
+                    {PAUSE_QUIT, L"QUIT GAME", L"", L"Close the game"},
+                    {PAUSE_CREDIT, L"CREDIT", settings.free_play ? L"FREE PLAY" : L"COIN",
+                     settings.free_play ? L"START begins a game, no coin needed" : L"A coin per game (5 or BACK); START adds one"},
+                    {PAUSE_RESTORE, L"RESTORE ORIGINAL", L"", L"The arcade's original settings (not the screen or the controls)"},
+                    {PC_EDITION, L"BACK TO PC EDITION", L"", L"The PC menu comes back on the next start"}};
         return {{RESUME, L"RESUME", L"", L"Back to the game"},
                 {SETTINGS, L"SETTINGS", L"", L"Display, sound and controls"},
                 {QUIT_TO_MENU, L"QUIT TO MAIN MENU", L"", L"Leave this game and go back to the main menu"}};
     case Screen::Options: {
-        std::wstring aa_hint = settings.aa != aa_at_launch
-                                   ? L"Edge smoothing.  Takes effect the next time the game starts"
-                                   : settings.aa == 3
-                                         ? L"NVIDIA DLSS: the 3D drawn at two thirds of the size and rebuilt sharp, much lighter on the graphics card"
-                                         : L"Edge smoothing (MSAA, NVIDIA DLAA or DLSS, or off).  Applies on the next start";
+        static const wchar_t* const AA_HINTS[8] = {
+            L"Classic edge smoothing",
+            L"NVIDIA DLAA: the cleanest edges, at full size",
+            L"No edge smoothing: the fastest, with jagged edges",
+            L"NVIDIA DLSS: draws the 3D smaller and sharpens it back; much faster, nearly as sharp",
+            L"NVIDIA DLSS: draws the 3D smaller still and sharpens it back; faster, slightly softer",
+            L"NVIDIA DLSS: draws the 3D at half size and sharpens it back; for 4K or slower cards",
+            L"NVIDIA DLSS: draws the 3D at a third of the size; the fastest, the softest",
+            L"Light edge smoothing over the finished picture: very cheap, for older graphics cards"};
+        std::wstring aa_hint = std::wstring(AA_HINTS[std::clamp(settings.aa, 0, 7)]) +
+                               (settings.aa != aa_at_launch ? L".  Applies after a restart (offered when you leave the settings)"
+                                                            : L".  Applies after a restart");
         wchar_t gamma_text[16];
         swprintf(gamma_text, 16, L"%.2f", settings.gamma / 100.0);
         static const wchar_t* const RT_MODES[3] = {L"OFF", L"SHADOWS", L"SHADOWS + AO"};
-        static const wchar_t* const QUALITY_NAMES[5] = {L"LOW", L"MEDIUM", L"HIGH", L"ULTRA", L"CUSTOM"};
-        static const wchar_t* const QUALITY_HINTS[5] = {
-            L"Laptops and integrated graphics: no shadows, ambient occlusion or MSAA, low bloom",
-            L"Mid-range cards (RTX 3060, RX 6600): no ray tracing, MSAA 4x, low bloom",
-            L"Fast cards: ray traced sun shadows and every effect",
-            L"Everything on: ray traced sun shadows and ambient occlusion",
-            L"Your own mix of the options.  Pick a level to set the costly ones at once"};
-        static const wchar_t* const GI_LEVELS[3] = {L"OFF", L"LOW", L"HIGH"};
-        static const wchar_t* const GI_HINTS[3] = {
+        static const wchar_t* const GI_HINTS[2] = {
             L"Only the sun's direct light and the light of the sky",
-            L"Sunlight bounces off the ground, the walls and the banks and tints the cars, the dust and what is next to them (with ray tracing on)",
-            L"The bounced light finer and from twice as far: rock faces and far banks too (heavier on the graphics card)"};
+            L"Sunlight bounces off the ground, the walls and the banks and tints the cars, the dust and what is next to them (with ray tracing on)"};
         static const wchar_t* const RT_HINTS[3] = {
             L"Shadows from a shadow map and occlusion from the depth, as without ray tracing",
             L"Sun shadows traced through the world: every car and tree, soft with distance",
             L"Also the ambient occlusion: corners and the ground under things, even off screen"};
-        std::wstring pads = gamepads.empty() ? L"No gamepad connected" : L"Connected: " + gamepads;
-        std::vector<Item> all = {{OPT_DISPLAY, L"DISPLAY", settings.fullscreen ? L"FULLSCREEN" : L"WINDOW",
-                 pad_prompts ? L"Window or full screen" : L"Window or full screen (also F11 or Alt+Enter)"},
+        // The pads and the wheel the game sees (app.cpp fills `gamepads`): the
+        // row's value, cut to fit, and the whole list as its hint
+        std::wstring connected = gamepads.empty() ? L"NONE" : gamepads;
+        if (connected.size() > 24) connected = connected.substr(0, 22) + L"...";
+        for (wchar_t& c : connected) c = wchar_t(towupper(c));   // as the other values
+        static const wchar_t* const MODES[3] = {L"WINDOW", L"BORDERLESS", L"FULLSCREEN"};
+        static const wchar_t* const MODE_HINTS[3] = {
+            L"A window you can move and resize",
+            L"Full screen at the desktop's resolution, the monitor left as it is: quick to switch to other windows",
+            L"Exclusive full screen: the monitor switches to the RESOLUTION below while the game runs"};
+        const int mode = std::clamp(settings.display_mode, 0, 2);
+        auto size_text = [](int w, int h) { return std::to_wstring(w) + L" x " + std::to_wstring(h); };
+        // the chosen mode (the window without one: its inside); BORDERLESS the desktop's
+        std::wstring res = mode == 1 ? size_text(desktop_w, desktop_h)
+                           : settings.res_w > 0 ? size_text(settings.res_w, settings.res_h)
+                           : mode == 0 ? size_text(client_w, client_h) : size_text(desktop_w, desktop_h);
+        std::wstring res_hints[3] = {
+            L"The size of the window's picture.  Enter: the list",
+            L"BORDERLESS always uses the desktop's resolution",
+            L"The mode the monitor switches to.  Enter: the list"};
+        if (mode == 0 && settings.res_w > 0 && (std::abs(client_w - settings.res_w) > 2 || std::abs(client_h - settings.res_h) > 2))
+            res_hints[0] = L"The size of the window's picture: shown at " + size_text(client_w, client_h) +
+                           L", the same shape, to fit on the desktop.  Enter: the list";
+        std::wstring scale_hint = L"The 3D drawn at this share of the picture's size: above 100% sharper and slower, below faster and softer";
+        scale_hint += settings.render_scale != scale_at_launch ? L".  Applies after a restart (offered when you leave the settings)"
+                                                               : L".  Applies after a restart";
+        static const wchar_t* const ASPECTS[5] = {L"AUTO", L"32:9", L"21:9", L"16:9", L"4:3"};
+        auto aspect_hint = [](int a) -> std::wstring {
+            return a == 0   ? L"Fills the window, up to 32:9"
+                   : a == 4 ? L"The original arcade picture: the cabinet monitor's slightly wide pixels, the HUD in its place"
+                            : std::wstring(L"The picture at most ") + (a == 1 ? L"32:9" : a == 2 ? L"21:9" : L"16:9") +
+                                  L" wide: black bars at the sides of a wider window";
+        };
+        const FrontendSettings& arc = arcade_side();
+        std::vector<Item> all = {
+                {OPT_EXPERIENCE, L"EXPERIENCE", settings.experience ? L"ARCADE ORIGINAL" : L"PC EDITION",
+                 std::wstring(settings.experience
+                                  ? L"The cabinet as it was: straight to the SEGA logo and the attract, START to play, the original HUD and cars; Esc pauses"
+                                  : L"The PC remaster: the main menu, records, redrawn HUD and liveries, ray tracing and smooth motion") +
+                     (settings.experience != (arcade ? 1 : 0) ? L".  Applies after a restart (offered when you leave the settings)" : L"")},
+                {OPT_ARCADE_ASPECT, L"ASPECT", ASPECTS[std::clamp(arc.aspect, 0, 4)],
+                 L"ARCADE ORIGINAL: " + aspect_hint(arc.aspect)},
+                {OPT_ASPECT, L"ASPECT", ASPECTS[std::clamp(settings.aspect, 0, 4)], aspect_hint(settings.aspect)},
+                {OPT_HUD_AREA, L"HUD POSITION", settings.aspect == 4 || settings.hud_43 ? L"4:3" : L"WIDE",
+                 settings.aspect == 4 ? std::wstring(L"With ASPECT 4:3 the HUD is always in its original place")
+                 : settings.hud_43    ? L"The HUD in its original 4:3 place in the middle, the picture still wide"
+                                      : L"The HUD's corners out towards the picture's sides (up to a 16:9 picture's)",
+                 settings.aspect != 4},
+                {OPT_DISPLAY, L"MODE", MODES[mode],
+                 std::wstring(MODE_HINTS[mode]) + (pad_prompts ? L"" : L" (F11 or Alt+Enter: window / full screen)")},
+                {OPT_RESOLUTION, L"RESOLUTION", res, res_hints[mode], mode != 1 && !resolutions.empty()},
+                {OPT_SCALE, L"RENDER SCALE", std::to_wstring(settings.render_scale) + L"%", scale_hint},
+                {OPT_VSYNC, L"VSYNC", settings.vsync == 2 ? L"ADAPTIVE" : settings.vsync ? L"ON" : L"OFF",
+                 settings.vsync == 2 ? L"In step with the refreshes while the game keeps up with them; when a picture is late it goes out at once (less stutter, it may tear then)"
+                 : settings.vsync    ? L"Pictures in step with the monitor's refreshes: no tearing"
+                                     : L"Less latency; the picture may tear without G-SYNC or FreeSync"},
+                {OPT_MAXFPS, L"MAX FPS",
+                 settings.max_fps < 0    ? std::wstring(L"UNLIMITED")
+                 : settings.max_fps == 0 ? L"MONITOR (" + std::to_wstring(refresh_hz) + L")"
+                                         : std::to_wstring(settings.max_fps),
+                 !settings.smooth ? std::wstring(L"With MOTION ORIGINAL the game's own 57.5 frames are shown: nothing to set")
+                 : settings.vsync ? std::wstring(L"Pictures a second at most; with VSYNC in whole refreshes (60 on a 120 Hz monitor: every other one).  Lower: less work for the GPU")
+                                  : std::wstring(L"Pictures a second at most (UNLIMITED: as many as the GPU can).  Any number can go in settings.ini, e.g. max_fps = 117 for G-SYNC"),
+                 settings.smooth},
+                {OPT_BGFPS, L"BACKGROUND FPS", on_off(settings.background_fps),
+                 L"On: 30 pictures a second at most while another window has the focus"},
                 {OPT_MOTION, L"MOTION", settings.smooth ? L"SMOOTH" : L"ORIGINAL",
                  L"Smooth: the 3D is also drawn between the game's 57.5 frames, at your monitor's refresh rate"},
                 {OPT_VOLUME, L"EFFECTS", std::to_wstring(settings.volume), L"Volume of the sound effects and voices"},
@@ -492,8 +345,7 @@ std::vector<Frontend::Item> Frontend::items() const {
                  L"Louder rear speakers, as the cabinet's seat speakers"},
                 {OPT_SAMPLES, L"SAMPLE QUALITY", settings.cubic_samples ? L"SMOOTH" : L"ORIGINAL",
                  L"Smooth interpolation of the instrument and voice samples, or the original chip's"},
-                {OPT_QUALITY, L"QUALITY", QUALITY_NAMES[settings.quality()], QUALITY_HINTS[settings.quality()]},
-                {OPT_AA, L"ANTI-ALIASING", AA[settings.aa], aa_hint},
+                {OPT_AA, L"ANTI-ALIASING", AA[std::clamp(settings.aa, 0, 7)], aa_hint},
                 {OPT_HAZE, L"DISTANCE HAZE", on_off(settings.haze),
                  L"Far scenery fades into the sky instead of appearing suddenly"},
                 {OPT_BLOOM, L"BLOOM", BLOOM_LEVELS[settings.bloom], L"Soft glow around the sun, lights and bright reflections"},
@@ -502,41 +354,73 @@ std::vector<Frontend::Item> Frontend::items() const {
                 {OPT_SUN, L"SUN", on_off(settings.sun), L"Stronger, warmer sunlight"},
                 {OPT_SHADOWS, L"SUN SHADOWS", on_off(settings.shadows),
                  L"Cars, trees and scenery cast shadows away from the sun"},
+                {OPT_CAR_PROBES, L"CAR LIGHT PROBES", on_off(settings.car_probes),
+                 L"The cars darken in the shade of trees and stands, and under roofs (with SUN SHADOWS on)"},
+                {OPT_CAR_SHADOWS, L"CAR SHADOWS", on_off(settings.car_shadows),
+                 L"The shadows of trees and scenery fall on the cars themselves (with SUN SHADOWS on)"},
                 {OPT_RT, L"RAY TRACING", !rt_available ? L"N/A" : RT_MODES[settings.ray_tracing],
-                 !rt_available ? L"Needs a graphics card with ray tracing (NVIDIA RTX, AMD RX 6000 or newer)"
+                 !rt_available ? L"Needs a graphics card with ray tracing (NVIDIA RTX 30, AMD RX 7000 or newer)"
                                : RT_HINTS[settings.ray_tracing],
                  rt_available},
-                {OPT_SOFT, L"SOFT PARTICLES", on_off(settings.soft),
-                 L"Dust, smoke and spray blend softly where they touch the ground and the cars"},
                 {OPT_HDR, L"HDR LIGHTING", on_off(settings.hdr),
                  L"Bright light keeps its detail instead of clipping to white; exposure adapts gently"},
                 {OPT_REFLECT, L"RT REFLECTIONS", !rt_available ? L"N/A" : on_off(settings.reflections),
-                 !rt_available ? L"Needs a graphics card with ray tracing (NVIDIA RTX, AMD RX 6000 or newer)"
+                 !rt_available ? L"Needs a graphics card with ray tracing (NVIDIA RTX 30, AMD RX 7000 or newer)"
                                : L"The scenery, the stands and the other cars mirrored on the cars' paint and glass (with ray tracing on)",
                  rt_available},
-                {OPT_GI, L"GLOBAL ILLUMINATION", !rt_available ? L"N/A" : GI_LEVELS[settings.gi],
-                 !rt_available ? L"Needs a graphics card with ray tracing (NVIDIA RTX, AMD RX 6000 or newer)"
-                               : GI_HINTS[settings.gi],
+                {OPT_GI, L"GLOBAL ILLUMINATION", !rt_available ? L"N/A" : on_off(settings.gi != 0),
+                 !rt_available ? L"Needs a graphics card with ray tracing (NVIDIA RTX 30, AMD RX 7000 or newer)"
+                               : GI_HINTS[settings.gi ? 1 : 0],
                  rt_available},
                 {OPT_DUST, L"DUST", settings.dust ? L"ENHANCED" : L"ORIGINAL",
                  settings.dust ? L"Clouds of dust that billow and hang over the road, and stones thrown up by the wheels"
                                : L"The arcade's own flat fans of dust behind the wheels"},
+                {OPT_OBJECTS, L"OBJECT DISTANCE", std::to_wstring(settings.object_distance) + L" M",
+                 settings.object_distance <= 100
+                     ? L"Spectators, cameramen, signs and cones appear 100 m ahead, as in the arcade"
+                     : L"How far ahead the spectators, cameramen, signs and cones appear (100 M = original)"},
                 {OPT_SAT, L"COLOR SATURATION", std::to_wstring(settings.saturation) + L"%",
                  L"How vivid the colours are (100% = original)"},
                 {OPT_GAMMA, L"GAMMA", gamma_text, L"Brightness of the mid-tones (1.00 = original)"},
                 {OPT_SHARPEN, L"SHARPEN", on_off(settings.sharpen),
                  L"Brings back texture detail after the edge smoothing, without halos"},
-                {OPT_UPDATES, L"CHECK FOR UPDATES", on_off(settings.check_updates),
-                 L"At launch, look on GitHub for a new version and show what is new in it"},
-                {OPT_TEXT, L"HD TEXT", on_off(settings.hd_text),
-                 L"Sharp fonts for menus, captions and times instead of the original pixels"},
+                {OPT_TELEMETRY, L"TELEMETRY", on_off(settings.telemetry),
+                 L"Enable telemetry for use with motion simulators and haptics"},
+                {OPT_TELEMETRY_FORMAT, L"TELEMETRY FORMAT",
+                 settings.telemetry_format == 1 ? L"OGS-TS" : L"DIRT RALLY",
+                 settings.telemetry_format == 1
+                     ? L"Open Game Standards Telemetry (speed, RPM, gear, pose, G-forces, crashes) for rigs and haptics that read it, by UDP multicast on port 40123"
+                     : L"Sends the car's speed, RPM, gear and G-forces to SimHub or motion rig software on this PC "
+                       L"(UDP port " + std::to_wstring(settings.telemetry_port) + L", DiRT Rally format). Not tested on a real rig yet"},
+                {OPT_HUD, L"HD HUD", on_off(settings.hd_hud),
+                 settings.hd_hud ? L"Redrawn HUD: sharp fonts, rev counters, gear box and co-driver signs"
+                                 : L"The arcade's original pixel HUD and screens"},
+                {OPT_LIVERIES, L"HD LIVERIES", on_off(settings.hd_liveries),
+                 settings.hd_liveries ? L"Repainted cars: sharp liveries, logos and race numbers"
+                                      : L"The arcade's original car paint"},
+                {OPT_CONNECTED, L"CONNECTED", connected,
+                 gamepads.empty() ? L"No gamepad or wheel found. Plug one in: it shows here as soon as the game sees it"
+                                  : L"Found: " + gamepads,
+                 false},
                 {OPT_VIBRATION, L"VIBRATION", BLOOM_LEVELS[settings.vibration],
-                 L"The gamepad rumbles with the steering wheel's force feedback: bumps, slides and crashes"}};
-        std::vector<Item> list = {{TABS, L"", L"", pad_prompts ? L"Left / Right here, or LB / RB, change the tab"
-                                                               : L"Left / Right here, Q / E or L1 / R1 change the tab"}};
+                 L"The gamepad rumbles with the steering wheel's force feedback: bumps, slides and crashes"},
+                {OPT_TRIGGERS, L"TRIGGER RUMBLE", settings.trigger_rumble ? std::to_wstring(settings.trigger_rumble) + L"%" : std::wstring(L"OFF"),
+                 L"Xbox One / Series pads: the brake trigger trembles as you slow down, the accelerator as the wheels spin, "
+                 L"both over bumps (a share of VIBRATION)"}};
+        for (size_t i = 0; i < bind_lines.size(); i++)   // OPTIONS > CONTROLS' keys, from bindings.h
+            all.push_back({OPT_BIND, bind_lines[i].label, bind_lines[i].value, bind_lines[i].hint, true, int(i)});
+        for (size_t i = 0; i < wheel_lines.size(); i++)   // OPTIONS > WHEEL, from wheel.h
+            all.push_back({OPT_WHEEL, wheel_lines[i].label, wheel_lines[i].value, wheel_lines[i].hint, true, int(i)});
+        std::vector<Item> list = {{TABS, L"", L"", pad_prompts ? L"LB / RB change the section"
+                                                               : L"Q / E or Tab change the section, or click one"}};
         for (const OptionTab& o : OPTION_TABS)   // the tab's options in their order, then any not listed
-            for (const Item& it : all)
+            for (const Item& it : all) {
+                // ARCADE ORIGINAL's ASPECT under EXPERIENCE only when it is chosen; while it runs
+                // DISPLAY's is the same setting, so only the one under EXPERIENCE
+                if (it.id == OPT_ARCADE_ASPECT && !settings.experience) continue;
+                if (it.id == OPT_ASPECT && arcade) continue;
                 if (it.id == o.id && o.tab == tab_) list.push_back(it);
+            }
         list.push_back(
             {BACK, L"BACK", L"", options_from_pause_ ? L"Return to the pause menu" : L"Return to the main menu"});
         return list;
@@ -545,9 +429,11 @@ std::vector<Frontend::Item> Frontend::items() const {
         int got = 0;
         for (int64_t t : records.unlocked) got += t != 0;
         std::wstring summary = std::to_wstring(got) + L" of " + std::to_wstring(achievement_table().size()) +
-                               (pad_prompts ? L" achievements unlocked.  Up / Down scrolls, LB / RB changes the tab"
-                                            : L" achievements unlocked.  Up / Down scrolls, Q / E changes the tab");
-        return {{TABS, L"", L"", summary}, {BACK, L"BACK", L"", L"Return to the main menu"}};
+                               L" achievements unlocked";
+        std::vector<Item> list = {{TABS, L"", L"", summary}};
+        for (const RecordRow& r : record_rows()) list.push_back({REC_ROW, r.label, r.value, r.detail, r.lit, r.group});
+        list.push_back({BACK, L"BACK", L"", L"Return to the main menu"});
+        return list;
     }
     default:
         return {};
@@ -558,7 +444,7 @@ void Frontend::open_splash() {
     if (video_.is_open() && settings.splash) {
         open(Screen::Splash);
         video_on_ = true;
-        splash_from_ = now_seconds();
+        splash_from_ = qpc_seconds();
         skip_from_ = -1;
         video_end_ = -1;
         video_level_ = 0;
@@ -573,12 +459,22 @@ void Frontend::open_splash() {
     }
     open(Screen::Splash);
     splash_on_ = 0;
-    splash_from_ = now_seconds();
+    splash_from_ = qpc_seconds();
     skip_from_ = -1;
     skip_next_ = false;
 }
 
+namespace {
+// Windjammers' timing: out one after the other, gently then faster; in
+// fast, slowing down all the way to the place. The main menu coming up
+// (after the splash, back from the game) a little slower, once the picture
+// is half in from black
+constexpr double SLIDE_OUT_GAP = 0.035, SLIDE_OUT = 0.25, SLIDE_IN_GAP = 0.06, SLIDE_IN = 0.4;
+constexpr double INTRO_GAP = 0.085, INTRO_IN = 0.55, INTRO_AFTER = 0.35, PAUSE_AFTER = 0.05;
+}  // namespace
+
 void Frontend::open(Screen s) {
+    const Screen was = screen_;
     if (screen_ == Screen::Splash && s != Screen::Splash) {   // not needed again
         splash_px_ = {}, splash_px_on_ = -1;
         video_.close();
@@ -587,11 +483,28 @@ void Frontend::open(Screen s) {
         splash_.clear();
     }
     screen_ = s;
+    if (s != Screen::Play) setup_open_ = false;   // (the race set-up belongs to PLAY's page)
+    if (s != Screen::Pause && (!restart_note_.empty() || restore_ask_)) restart_note_.clear(), restore_ask_ = restart_open_ = false;
     selected_ = 0;
     scroll_ = 0;
     hovered_ = -1;
     hit_.clear();
     dirty_ = true;
+    // The main menu coming up (not back from one of its own pages): its
+    // entries in from the right edge, as in Windjammers
+    if (s == Screen::Main && was != Screen::Options && was != Screen::Records && was != Screen::Debug &&
+        was != Screen::Play) {
+        slide_from_ = menu_clock() + INTRO_AFTER;
+        slide_out_ = false;
+        slide_intro_ = true;
+    }
+    // The pause coming up over the game (its look as the main menu's when the
+    // game can be blurred under it): its entries in from the right too
+    if (s == Screen::Pause && was != Screen::Options) {
+        slide_from_ = menu_clock() + PAUSE_AFTER;
+        slide_out_ = false;
+        slide_intro_ = true;
+    }
 }
 
 void Frontend::select(int index) {
@@ -599,15 +512,45 @@ void Frontend::select(int index) {
     selected_ = index;
 }
 
+// ANTI-ALIASING's values in their order: OFF, FXAA, MSAA, DLAA, DLSS QUALITY, BALANCED,
+// PERFORMANCE, ULTRA PERFORMANCE (DLAA and DLSS only on a card that can run them,
+// dlss_available; FXAA only on one that cannot: with DLSS there it would only be worse and slower)
+static const int AA_ORDER[8] = {2, 7, 0, 1, 3, 4, 5, 6};
+
 void Frontend::activate(const Item& it, int dir) {
     dirty_ = true;
     switch (it.id) {
-    case PLAY: push(Action::StartArcade); break;   // Sega Rally 2: no mode select, the arcade game
-    case OPTIONS: options_from_pause_ = false; tab_ = 0; open(Screen::Options); break;
-    case RECORDS: tab_ = 0; record_scroll_ = 0; open(Screen::Records); break;
+    case PLAY: slide_to(Screen::Play, 0); break;
+    case ARCADE:   // the race set-up first, then the arcade game as it was
+        setup_open_ = true;
+        setup_sel_ = 4;   // START RACE
+        break;
+    case PAUSE_CREDIT: settings.free_play = !settings.free_play; push(Action::SettingsChanged); break;
+    case PAUSE_QUIT: push(Action::Quit); break;
+    case PAUSE_RESTORE:   // RESTORE / CANCEL first (restart_choose)
+        restore_ask_ = restart_open_ = true;
+        restart_button_ = 0;
+        break;
+    case PC_EDITION:   // saved at once; RESTART NOW, or LATER (back to the pause)
+        settings.experience = 0;
+        push(Action::SettingsChanged);
+        restart_note_ = L"PC EDITION: the main menu comes back on the next start";
+        restart_open_ = true;
+        restart_button_ = 0;
+        break;
+    case OPT_EXPERIENCE:   // (each experience keeps what was changed in it; RESTORE ORIGINAL: the arcade's base values)
+        settings.experience ^= 1;
+        push(Action::SettingsChanged);
+        break;
+    case OPT_ASPECT: settings.aspect = (settings.aspect + dir + 5) % 5; push(Action::SettingsChanged); break;
+    case OPT_HUD_AREA: settings.hud_43 = !settings.hud_43; push(Action::SettingsChanged); break;
+    case OPT_ARCADE_ASPECT: arcade_side().aspect = (arcade_side().aspect + dir + 5) % 5; push(Action::SettingsChanged); break;
+    case GHOST: break;                               // coming soon
+    case OPTIONS: options_from_pause_ = false; tab_ = 0; open(Screen::Options); selected_ = 1; break;
+    case RECORDS: tab_ = 0; open(Screen::Records); selected_ = 1; break;
+    case REC_ROW: break;   // a record: nothing to change
     case QUIT: push(Action::Quit); break;
     case QUIT_TO_MENU: push(Action::QuitToMenu); break;
-    case MORE_GAMES: find_recomps(); more_game_ = 0; open(Screen::More); break;
     case DEBUG: open(Screen::Debug); break;
     case DEBUG_COURSE: debug_course_ = (debug_course_ + dir + DEBUG_COURSE_COUNT) % DEBUG_COURSE_COUNT; break;
     case DEBUG_CAR: debug_car_ = (debug_car_ + dir + DEBUG_CAR_COUNT) % DEBUG_CAR_COUNT; break;
@@ -617,21 +560,52 @@ void Frontend::activate(const Item& it, int dir) {
         debug_choice = DEBUG_COURSES[debug_course_].index | DEBUG_CARS[debug_car_].index << 4 | debug_gears_ << 8;
         push(Action::StartDebug);
         break;
-    case LOST_WORLD: case STAR_WARS: {
-        int g = it.id - LOST_WORLD;
-        if (recomps_[g].exe.empty()) open_recomp_page(g);
-        else play_recomp(g);
-        break;
-    }
-    case COFFEE: open_coffee(); break;
     case BACK: back(); break;
     case RESUME: push(Action::Resume); break;
-    case SETTINGS: options_from_pause_ = true; tab_ = 0; open(Screen::Options); break;
-    case OPT_DISPLAY: push(Action::ToggleFullscreen); break;
-    case OPT_QUALITY: {
-        int q = settings.quality();
-        settings.set_quality(q == FrontendSettings::CUSTOM ? (dir > 0 ? FrontendSettings::LOW : FrontendSettings::ULTRA)
-                                                           : (q + dir + 4) % 4);
+    case SETTINGS:
+        options_from_pause_ = true;
+        tab_ = 0;
+        slide_to(Screen::Options, 1);   // the pause's entries out to the right, then the page
+        break;
+    case OPT_DISPLAY:   // applied at once (app.cpp)
+        settings.display_mode = (settings.display_mode + dir + 3) % 3;
+        settings.fullscreen = settings.display_mode != 0;
+        push(Action::DisplayChanged);
+        break;
+    case OPT_RESOLUTION: {
+        if (settings.display_mode == 1 || resolutions.empty()) break;
+        int n = int(resolutions.size()), i = (resolution_index() + dir + n) % n;   // the next mode of the monitor's list
+        settings.res_w = resolutions[size_t(i)].first;   // applied at once
+        settings.res_h = resolutions[size_t(i)].second;
+        push(Action::DisplayChanged);
+        break;
+    }
+    case OPT_SCALE: {
+        static const int STEPS[] = {50, 67, 75, 85, 100, 125, 150, 175, 200};
+        int n = int(std::size(STEPS)), i = 4;
+        for (int k = 0; k < n; k++)
+            if (STEPS[k] <= settings.render_scale) i = k;
+        settings.render_scale = STEPS[(i + dir + n) % n];
+        push(Action::SettingsChanged);
+        break;
+    }
+    case OPT_VSYNC: {   // ON, ADAPTIVE, OFF
+        static const int ORDER[3] = {1, 2, 0};
+        int i = settings.vsync == 2 ? 1 : settings.vsync ? 0 : 2;
+        settings.vsync = ORDER[(i + dir + 3) % 3];
+        push(Action::SettingsChanged);
+        break;
+    }
+    case OPT_BGFPS: settings.background_fps = !settings.background_fps; push(Action::SettingsChanged); break;
+    case OPT_MAXFPS: {
+        if (!settings.smooth) break;
+        static const int STEPS[] = {0, 30, 60, 90, 120, 144, 165, 240, -1};   // MONITOR first, UNLIMITED last
+        int n = int(std::size(STEPS)), i = -1;
+        for (int k = 0; k < n; k++)
+            if (STEPS[k] == settings.max_fps) i = k;
+        if (i < 0)   // a number set in settings.ini: the step above or below it
+            for (i = 1; i < n - 1 && STEPS[i] < settings.max_fps; i++) {}
+        settings.max_fps = STEPS[(i + dir + n) % n];
         push(Action::SettingsChanged);
         break;
     }
@@ -643,17 +617,22 @@ void Frontend::activate(const Item& it, int dir) {
         settings.music = dir > 0 && settings.music == 10 && wrap_ ? 0 : std::clamp(settings.music + dir, 0, 10);
         push(Action::SettingsChanged);
         break;
-    case OPT_UPDATES: settings.check_updates = !settings.check_updates; push(Action::SettingsChanged); break;
+    case OPT_TELEMETRY: settings.telemetry = !settings.telemetry; push(Action::SettingsChanged); break;
+    case OPT_TELEMETRY_FORMAT: settings.telemetry_format = (settings.telemetry_format + 1) % 2; push(Action::SettingsChanged); break;
     case OPT_MENU_MUSIC: settings.menu_music = !settings.menu_music; push(Action::SettingsChanged); break;
     case OPT_SPEAKERS: settings.speakers = (settings.speakers + dir + 3) % 3; push(Action::SettingsChanged); break;
     case OPT_REAR: settings.rear_boost = (settings.rear_boost + 3 * dir + 15) % 15; push(Action::SettingsChanged); break;
     case OPT_SAMPLES: settings.cubic_samples = !settings.cubic_samples; push(Action::SettingsChanged); break;
-    case OPT_AA: {   // MSAA, DLAA, DLSS QUALITY, OFF
-        static const int ORDER[4] = {0, 1, 3, 2};
+    case OPT_AA: {   // (AA_ORDER)
         int at = 0;
-        for (int i = 0; i < 4; i++)
-            if (ORDER[i] == settings.aa) at = i;
-        settings.aa = ORDER[(at + dir + 4) % 4];
+        for (int i = 0; i < 8; i++)
+            if (AA_ORDER[i] == settings.aa) at = i;
+        for (int n = 0; n < 8; n++) {
+            at = (at + dir + 8) % 8;
+            bool nvidia_only = AA_ORDER[at] == 1 || (AA_ORDER[at] >= 3 && AA_ORDER[at] <= 6);
+            if (dlss_available ? AA_ORDER[at] != 7 : !nvidia_only) break;
+        }
+        settings.aa = AA_ORDER[at];
         push(Action::SettingsChanged);
         break;
     }
@@ -670,20 +649,34 @@ void Frontend::activate(const Item& it, int dir) {
         break;
     case OPT_SUN: settings.sun = !settings.sun; push(Action::SettingsChanged); break;
     case OPT_SHADOWS: settings.shadows = !settings.shadows; push(Action::SettingsChanged); break;
+    case OPT_CAR_PROBES: settings.car_probes = !settings.car_probes; push(Action::SettingsChanged); break;
+    case OPT_CAR_SHADOWS: settings.car_shadows = !settings.car_shadows; push(Action::SettingsChanged); break;
     case OPT_RT:
         settings.ray_tracing = (settings.ray_tracing + dir + 3) % 3;
         if (settings.ray_tracing == 2) settings.ao = true;
         push(Action::SettingsChanged);
         break;
-    case OPT_SOFT: settings.soft = !settings.soft; push(Action::SettingsChanged); break;
     case OPT_HDR: settings.hdr = !settings.hdr; push(Action::SettingsChanged); break;
     case OPT_REFLECT: settings.reflections = !settings.reflections; push(Action::SettingsChanged); break;
-    case OPT_GI: settings.gi = (settings.gi + dir + 3) % 3; push(Action::SettingsChanged); break;
+    case OPT_GI: settings.gi = settings.gi ? 0 : 1; push(Action::SettingsChanged); break;
     case OPT_DUST: settings.dust = !settings.dust; push(Action::SettingsChanged); break;
+    case OPT_OBJECTS:   // 100..250 m in steps of 50; past either end it starts again from the other
+        settings.object_distance = 100 + (settings.object_distance - 100 + 50 * dir + 200) % 200;
+        push(Action::SettingsChanged);
+        break;
     case OPT_SHARPEN: settings.sharpen = !settings.sharpen; push(Action::SettingsChanged); break;
-    case OPT_TEXT: settings.hd_text = !settings.hd_text; push(Action::SettingsChanged); break;
+    case OPT_HUD: settings.hd_hud = !settings.hd_hud; push(Action::SettingsChanged); break;
+    case OPT_LIVERIES: settings.hd_liveries = !settings.hd_liveries; push(Action::SettingsChanged); break;
     case OPT_MOTION: settings.smooth = !settings.smooth; push(Action::SettingsChanged); break;
+    case OPT_CONNECTED: break;   // shows what is plugged in, nothing to change
+    case OPT_WHEEL: wheel_row = it.index; wheel_dir = dir; push(Action::WheelRow); break;
+    case OPT_BIND: bind_row = it.index; push(Action::BindRow); break;
     case OPT_VIBRATION: settings.vibration = (settings.vibration + dir + 4) % 4; push(Action::SettingsChanged); break;
+    case OPT_TRIGGERS:   // 0..100 % in steps of 10; a click past the top starts again from OFF
+        settings.trigger_rumble = dir > 0 && settings.trigger_rumble >= 100 && wrap_
+                                      ? 0 : std::clamp(settings.trigger_rumble + 10 * dir, 0, 100);
+        push(Action::SettingsChanged);
+        break;
     case OPT_SAT:   // 0..200 % in steps of 10; a click past the top starts again from the bottom
         settings.saturation = dir > 0 && settings.saturation >= 200 && wrap_
                                   ? 0 : std::clamp(settings.saturation + 10 * dir, 0, 200);
@@ -705,14 +698,30 @@ int Frontend::index_of(Id id) const {
 }
 
 void Frontend::back() {
+    if (screen_ == Screen::Options && wheel_prompt.on) {   // a wheel control listening, WHEEL SETUP: Esc stops it, nothing else
+        push(Action::WheelCancel);
+        dirty_ = true;
+        return;
+    }
     switch (screen_) {
     case Screen::Options:
+        if (!restart_open_ && !restart_list().empty()) {   // RESTART NOW? first (LATER: back as here)
+            restart_open_ = true;
+            restart_button_ = 0;
+            dirty_ = true;
+            return;
+        }
+        restart_open_ = false;
         open(options_from_pause_ ? Screen::Pause : Screen::Main);
         selected_ = options_from_pause_ ? 1 : index_of(OPTIONS);   // where the options were opened from
+        if (options_from_pause_) {   // the pause's entries in from the right again
+            slide_from_ = menu_clock();
+            slide_out_ = slide_intro_ = false;
+        }
         break;
     case Screen::Records: open(Screen::Main); selected_ = index_of(RECORDS); break;
-    case Screen::More: open(Screen::Main); selected_ = index_of(MORE_GAMES); break;
     case Screen::Debug: open(Screen::Main); selected_ = index_of(DEBUG); break;
+    case Screen::Play: slide_to(Screen::Main, 0); break;   // PLAY chosen
     case Screen::Pause: push(Action::Resume); break;
     case Screen::Main: selected_ = index_of(QUIT); dirty_ = true; break;
     default: break;
@@ -726,19 +735,62 @@ bool Frontend::key(int vk) {
         return true;
     }
     if (starting) return true;   // nothing to choose while the game starts
-    if (news_open_ && screen_ == Screen::Main) return news_key(vk);
+    if (slide_from_ >= 0) finish_slide();   // the entries moving: in place at once, and the key does its job
+    if (drop_open_) return drop_key(vk);
+    if (setup_open_ && screen_ == Screen::Play) return setup_key(vk);
+    if (restart_open_) {
+        switch (vk) {
+        case VK_LEFT: case 'A': case VK_RIGHT: case 'D': case VK_TAB: restart_button_ ^= 1; dirty_ = true; break;
+        case VK_RETURN: case VK_SPACE: restart_choose(restart_button_); break;
+        case VK_ESCAPE: case VK_BACK: restart_choose(1); break;   // LATER
+        }
+        return true;
+    }
+    if (screen_ == Screen::Options && wheel_prompt.on && bind_keys) {   // CONTROLS waits for a key: any but Esc
+        if (vk == VK_ESCAPE) back();
+        else {
+            bind_vk = vk;
+            push(Action::BindKey);
+        }
+        return true;
+    }
+    if (screen_ == Screen::Options && wheel_prompt.on) {   // the WHEEL tab's window: its choices, Esc stops it
+        int nc = int(wheel_prompt.choices.size());
+        switch (vk) {
+        case VK_LEFT: case 'A': if (nc) wheel_choice = (wheel_choice + nc - 1) % nc; dirty_ = true; break;
+        case VK_RIGHT: case 'D': case VK_TAB: if (nc) wheel_choice = (wheel_choice + 1) % nc; dirty_ = true; break;
+        case VK_RETURN: case VK_SPACE: push(Action::WheelChoose); break;
+        case VK_ESCAPE: case VK_BACK: back(); break;
+        }
+        return true;
+    }
     auto list = items();
     int n = int(list.size());
-    bool option_row = selected_ < n && (list[selected_].id >= OPT_DISPLAY || list[selected_].id == DEBUG_COURSE ||
+    if (screen_ == Screen::Options && (vk == VK_RETURN || vk == VK_SPACE) && selected_ > 0 && selected_ < n &&
+        list[selected_].id > OPT_QUALITY && list[selected_].enabled && open_drop(list[selected_].id))   // its list
+        return true;
+    bool option_row = selected_ < n && (list[selected_].id >= OPT_QUALITY || list[selected_].id == DEBUG_COURSE ||
                                         list[selected_].id == DEBUG_CAR || list[selected_].id == DEBUG_GEARS ||
-                                        list[selected_].id == DEBUG_TIME);
+                                        list[selected_].id == DEBUG_TIME || list[selected_].id == PAUSE_CREDIT);
     bool tabs_row = selected_ < n && list[selected_].id == TABS;
-    if (screen_ == Screen::Records) switch (vk) {   // two tabs and a list to scroll
+    if (screen_ == Screen::Options && (vk == VK_DELETE || vk == 'G') && selected_ < n && list[selected_].id == OPT_WHEEL) {
+        wheel_row = list[selected_].index;   // a wheel control: not set any more (Delete, the pad's Y)
+        push(Action::WheelClear);
+        return true;
+    }
+    if (screen_ == Screen::Options && (vk == VK_DELETE || vk == 'G') && selected_ < n && list[selected_].id == OPT_BIND) {
+        bind_row = list[selected_].index;   // a key or button of the car's: none any more
+        push(Action::BindClear);
+        return true;
+    }
+    if (screen_ == Screen::Records) switch (vk) {   // sections and rows as on the settings page; nothing to change
         case 'Q': case VK_PRIOR: case VK_LEFT: case 'A': set_tab(tab_ - 1); return true;
-        case 'E': case VK_NEXT: case VK_RIGHT: case 'D': case VK_TAB: set_tab(tab_ + 1); return true;
-        case VK_UP: case 'W': scroll_records(-1); return true;
-        case VK_DOWN: case 'S': scroll_records(+1); return true;
-        case VK_RETURN: case VK_SPACE: case VK_ESCAPE: case VK_BACK: back(); return true;
+        case 'E': case VK_NEXT: case VK_RIGHT: case 'D': set_tab(tab_ + 1); return true;
+        case VK_TAB: set_tab(tab_ + ((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1)); return true;
+        case VK_UP: case 'W': if (n > 1) select(selected_ <= 1 ? n - 1 : selected_ - 1); return true;
+        case VK_DOWN: case 'S': if (n > 1) select(selected_ >= n - 1 ? 1 : selected_ + 1); return true;
+        case VK_RETURN: case VK_SPACE: if (selected_ == n - 1) back(); return true;
+        case VK_ESCAPE: case VK_BACK: back(); return true;
         default: return false;
         }
     if (screen_ == Screen::Options) switch (vk) {   // tab keys
@@ -746,10 +798,10 @@ bool Frontend::key(int vk) {
         case 'E': case VK_NEXT: set_tab(tab_ + 1); return true;
         case VK_TAB: set_tab(tab_ + ((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1)); return true;
         }
-    if (screen_ == Screen::More && vk == 'G' && selected_ < RECOMP_COUNT) {   // its page, also when it is installed
-        open_recomp_page(more_game_);
-        return true;
-    }
+    if (screen_ == Screen::Options && n > 1) switch (vk) {   // the rows: the column of sections is not one of them
+        case VK_UP: case 'W': select(selected_ <= 1 ? n - 1 : selected_ - 1); return true;
+        case VK_DOWN: case 'S': select(selected_ >= n - 1 ? 1 : selected_ + 1); return true;
+        }
     switch (vk) {
     case VK_UP: case 'W': select((selected_ + n - 1) % n); return true;
     case VK_DOWN: case 'S': select((selected_ + 1) % n); return true;
@@ -770,247 +822,13 @@ bool Frontend::key(int vk) {
     return false;
 }
 
-void Frontend::open_coffee() {   // in the default browser
-    ShellExecuteW(nullptr, L"open", COFFEE_URL, nullptr, nullptr, SW_SHOWNORMAL);
-}
-
-// Each one's exe: where the settings say, else in a folder next to this
-// port's (from the working folder, then from the exe's)
-void Frontend::find_recomps() {
-    wchar_t module[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, module, MAX_PATH);
-    std::wstring exe_dir = module;
-    exe_dir = exe_dir.substr(0, exe_dir.find_last_of(L"\\/") + 1);
-    for (int g = 0; g < RECOMP_COUNT; g++) {
-        const Recomp& r = RECOMPS[g];
-        recomps_[g].exe.clear();
-        std::vector<std::wstring> tries;
-        const std::string& p = g == 0 ? settings.lost_world_path : settings.star_wars_path;
-        if (!p.empty()) {
-            int n = MultiByteToWideChar(CP_UTF8, 0, p.c_str(), -1, nullptr, 0);
-            std::wstring wp(n > 0 ? n - 1 : 0, L'\0');
-            if (n > 1) MultiByteToWideChar(CP_UTF8, 0, p.c_str(), -1, wp.data(), n);
-            bool exe = wp.size() > 4 && _wcsicmp(wp.c_str() + wp.size() - 4, L".exe") == 0;
-            tries.push_back(exe ? wp : wp + L"\\" + r.exe);
-        }
-        for (const std::wstring& base : {std::wstring(), exe_dir})
-            for (const wchar_t* folder : r.folders)
-                tries.push_back(base + L"..\\" + folder + L"\\" + r.exe);
-        for (const std::wstring& t : tries) {
-            wchar_t full[MAX_PATH];
-            if (!GetFullPathNameW(t.c_str(), MAX_PATH, full, nullptr)) continue;
-            DWORD a = GetFileAttributesW(full);
-            if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY)) {
-                recomps_[g].exe = full;
-                printf("[menu] %s: %ls\n", r.name, full);
-                break;
-            }
-        }
-    }
-}
-
-void Frontend::open_recomp_page(int g) {   // in the default browser
-    ShellExecuteW(nullptr, L"open", RECOMPS[g].url, nullptr, nullptr, SW_SHOWNORMAL);
-}
-
-// Started from its own folder (it finds its ROM, res/ and save/ there); this
-// game closes so the two do not fight over the GPU and the sound
-void Frontend::play_recomp(int g) {
-    std::wstring& exe = recomps_[g].exe;
-    std::wstring dir = exe.substr(0, exe.find_last_of(L"\\/"));
-    if (INT_PTR(ShellExecuteW(nullptr, L"open", exe.c_str(), nullptr, dir.c_str(), SW_SHOWNORMAL)) > 32) {
-        push(Action::Quit);
-        return;
-    }
-    printf("[menu] could not start %ls\n", exe.c_str());
-    exe.clear();   // shown as not installed: ENTER opens the page
-    dirty_ = true;
-}
-
-// ---- UPDATE AVAILABLE ----
-
-void Frontend::check_for_news() {
-    if (!settings.check_updates || news_download_) return;
-    auto d = std::make_shared<NewsDownload>();
-    news_download_ = d;
-    if (const char* file = getenv("SR2_NEWS_FILE")) {   // testing aid: this file in place of GitHub's news.txt
-        std::vector<char> text = read_file(file);
-        d->text.assign(text.begin(), text.end());
-        d->state = text.empty() ? 2 : 1;
-        return;
-    }
-    std::thread([d] {   // on its own: the game may close before it ends
-        std::string text;
-        bool ok = https_get(NEWS_HOST, NEWS_PATH, text);
-        {
-            std::lock_guard<std::mutex> lock(d->mutex);
-            d->text = std::move(text);
-        }
-        d->state = ok ? 1 : 2;
-    }).detach();
-}
-
-void Frontend::take_news() {
-    if (!news_download_) return;
-    int state = news_download_->state.load();
-    if (state == 0 || state == 3) return;   // still downloading, or done with
-    news_download_->state = 3;
-    if (state != 1) {
-        printf("[menu] news: could not reach GitHub (no update check)\n");
-        return;
-    }
-    std::string text;
-    {
-        std::lock_guard<std::mutex> lock(news_download_->mutex);
-        text = news_download_->text;
-    }
-    std::vector<NewsEntry> remote = parse_news(text);
-    std::vector<char> here = read_file("news.txt");   // what this version already has
-    int local = news_latest(parse_news(std::string(here.begin(), here.end())));
-    news_latest_ = news_latest(remote);
-    // A new entry since the last LATER brings the window up; it then lists
-    // everything this version is missing, the entries put off before too
-    if (news_latest_ > std::max(local, settings.news_seen)) news_ = news_after(remote, local);
-    printf("[menu] news: newest %d on GitHub, %d here, %d seen: %zu new\n", news_latest_, local, settings.news_seen,
-           news_.size());
-}
-
-bool Frontend::news_key(int vk) {
-    switch (vk) {
-    case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN: case VK_TAB:
-    case 'A': case 'D': case 'W': case 'S':
-        news_button_ ^= 1;
-        dirty_ = true;
-        return true;
-    case VK_RETURN: case VK_SPACE: news_choose(news_button_); return true;
-    case VK_ESCAPE: case VK_BACK: news_choose(1); return true;   // LATER
-    }
-    return true;   // nothing else while it is open
-}
-
-void Frontend::news_choose(int button) {
-    news_open_ = false;
-    dirty_ = true;
-    if (button == 0) {
-        start_update();
-    } else {   // not again until a newer entry
-        settings.news_seen = std::max(settings.news_seen, news_latest_);
-        push(Action::SettingsChanged);   // saves it
-    }
-    news_.clear();
-}
-
-// update.bat -FromGame from the game's folder in its own window: it waits for
-// the game to close, updates, rebuilds and starts it again. Without
-// update.bat (an old folder) the GitHub page opens instead
-void Frontend::start_update() {
-    wchar_t module[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, module, MAX_PATH);
-    std::wstring dir = module;
-    dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
-    std::wstring bat = dir + L"update.bat";
-    DWORD a = GetFileAttributesW(bat.c_str());
-    if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY) &&
-        INT_PTR(ShellExecuteW(nullptr, L"open", bat.c_str(), L"-FromGame", dir.c_str(), SW_SHOWNORMAL)) > 32) {
-        printf("[menu] update: started %ls, closing the game\n", bat.c_str());
-        push(Action::Quit);
-        return;
-    }
-    printf("[menu] update: could not start %ls, opening the GitHub page\n", bat.c_str());
-    ShellExecuteW(nullptr, L"open", GAME_URL, nullptr, nullptr, SW_SHOWNORMAL);
-}
-
-// A card over the darkened main menu: UPDATE AVAILABLE, the entries of
-// news.txt (as many lines as fit nicely), the two buttons and what UPDATE NOW does
-void Frontend::draw_news() {
-    auto U = [&](float v) { return int(v * u_ + 0.5f); };
-    int w = w_, h = h_, cx = w / 2;
-    fill(0, 0, w, h, 0x000000, 0.62f);
-    int half = std::min(U(600), w / 2 - U(16));
-    int left = cx - half + U(60), text_w = 2 * half - U(120);
-    int text_px = U(27), indent = U(30);
-
-    enum Kind { HEAD, BULLET, MORE, PLAIN, GAP };
-    struct Line { std::wstring s; Kind kind; };
-    std::vector<Line> lines;
-    for (const NewsEntry& e : news_) {
-        if (!lines.empty()) lines.push_back({L"", GAP});
-        if (!e.title.empty()) lines.push_back({widen(e.title), HEAD});
-        for (const std::string& raw : e.lines) {
-            std::wstring t = widen(raw);
-            bool bullet = t.size() >= 2 && (t[0] == L'-' || t[0] == L'*') && t[1] == L' ';
-            if (bullet) t.erase(0, 2);
-            auto wrapped = wrap(ITEM, text_px, t, text_w - (bullet ? indent : 0));
-            for (size_t i = 0; i < wrapped.size(); i++)
-                lines.push_back({wrapped[i], !bullet ? PLAIN : i == 0 ? BULLET : MORE});
-        }
-    }
-    const size_t MAX_LINES = 14;
-    bool cut = lines.size() > MAX_LINES;
-    if (cut) lines.resize(MAX_LINES - 1);
-    auto line_h = [&](Kind k) { return k == GAP ? U(16) : U(36); };
-    int content = cut ? U(36) : 0;
-    for (const Line& l : lines) content += line_h(l.kind);
-
-    int bh = U(66);
-    int card_h = U(178) + content + U(34) + bh + U(26) + U(30) + U(34);
-    int top = std::max(U(16), (h - card_h) / 2), bottom = top + card_h;
-    fill(cx - half, top, cx + half, bottom, PANEL, 0.95f);
-    saber(cx, top, half);
-    saber(cx, bottom, half);
-    text(TITLE, U(70), L"UPDATE AVAILABLE", cx, top + U(30), 1, {GOLD_TOP, GOLD_BOTTOM, EDGE, U(4), 1, U(4)});
-    text(MONO, U(22), L"WHAT'S NEW", cx, top + U(124), 1, {0x9ED8FF, 0x6AB8F0});
-
-    int y = top + U(178);
-    for (const Line& l : lines) {
-        switch (l.kind) {
-        case HEAD: text(MONO, U(22), l.s, left, y + U(6), 0, {0x9ED8FF, 0x6AB8F0}); break;
-        case BULLET: {
-            int d = std::max(3, U(7));
-            fill(left + U(6), y + U(17) - d / 2, left + U(6) + d, y + U(17) - d / 2 + d, GOLD_BOTTOM, 1);
-            text(ITEM, text_px, l.s, left + indent, y, 0, {PALE_TOP, PALE_BOTTOM});
-            break;
-        }
-        case MORE: text(ITEM, text_px, l.s, left + indent, y, 0, {PALE_TOP, PALE_BOTTOM}); break;
-        case PLAIN: text(ITEM, text_px, l.s, left, y, 0, {PALE_TOP, PALE_BOTTOM}); break;
-        case GAP: break;
-        }
-        y += line_h(l.kind);
-    }
-    if (cut) {
-        text(ITEM, U(24), L"...and more: news.txt on the game's GitHub page", left, y + U(2), 0, {HINT, HINT});
-        y += U(36);
-    }
-
-    // The buttons side by side, the chosen one lit
-    static const wchar_t* const LABELS[2] = {L"UPDATE NOW", L"LATER"};
-    int bw = std::min(U(340), half - U(40)), gap = U(40), by = y + U(34);
-    for (int b = 0; b < 2; b++) {
-        int x0 = b == 0 ? cx - gap / 2 - bw : cx + gap / 2;
-        news_buttons_[b] = {x0, by, x0 + bw, by + bh};
-        bool sel = b == news_button_;
-        fill(x0, by, x0 + bw, by + bh, sel ? SABER : 0x000000, sel ? 0.34f : 0.45f);
-        frame(x0, by, x0 + bw, by + bh, std::max(1, U(sel ? 3.0f : 1.5f)), sel ? 0xEAF6FF : SABER, sel ? 1.0f : 0.55f);
-        const Style st = sel ? Style{GOLD_TOP, GOLD_BOTTOM, EDGE, U(2), 1, U(2)} : Style{PALE_TOP, PALE_BOTTOM, EDGE, U(2), 0.95f};
-        text(TITLE, U(40), LABELS[b], x0 + bw / 2, by + bh / 2 - U(22), 1, st);
-    }
-    const wchar_t* about = news_button_ == 0
-                               ? L"Closes the game, downloads the new version, builds it again (update.bat) and starts it"
-                               : L"Back to the menu.  This news will not show again; update.bat updates any time";
-    text(ITEM, U(22), about, cx, by + bh + U(26), 1, {HINT, HINT});
-}
-
 void Frontend::mouse_move(int x, int y) {
     if (screen_ == Screen::Splash) return;
     mouse_x_ = x;
     mouse_y_ = y;
-    if (news_open_ && screen_ == Screen::Main) {   // only its two buttons
-        int hot = -1;
-        for (int b = 0; b < 2; b++)
-            if (PtInRect(&news_buttons_[b], POINT{x, y})) hot = b;
-        if (hot != news_hot_ || (hot >= 0 && hot != news_button_)) dirty_ = true;
-        news_hot_ = hot;
-        if (hot >= 0) news_button_ = hot;
+    if (setup_open_ && screen_ == Screen::Play) {   // the race set-up's rows and buttons
+        for (int r = 0; r < 6; r++)
+            if (PtInRect(&setup_rects_[r], POINT{x, y}) && r != setup_sel_) setup_sel_ = r, dirty_ = true;
         return;
     }
     int hit = -1;
@@ -1023,19 +841,40 @@ void Frontend::mouse_move(int x, int y) {
 }
 
 void Frontend::click(int x, int y) {
+    if (slide_from_ >= 0) finish_slide();
     if (screen_ == Screen::Splash) {
         skip_splash();
         return;
     }
     if (starting) return;
     POINT p{x, y};
-    if (news_open_ && screen_ == Screen::Main) {
+    if (restart_open_) {
         for (int b = 0; b < 2; b++)
-            if (PtInRect(&news_buttons_[b], p)) news_choose(b);
+            if (PtInRect(&restart_buttons_[b], p)) restart_choose(b);
         return;
     }
-    if (screen_ == Screen::Records && (PtInRect(&more_up_, p) || PtInRect(&more_down_, p))) {
-        scroll_records(PtInRect(&more_up_, p) ? -1 : 1);
+    if (screen_ == Screen::Options && wheel_prompt.on) {   // the WHEEL tab's window: only its choices
+        for (size_t i = 0; i < prompt_choices_.size(); i++)
+            if (PtInRect(&prompt_choices_[i], p)) {
+                wheel_choice = int(i);
+                push(Action::WheelChoose);
+            }
+        return;
+    }
+    if (setup_open_ && screen_ == Screen::Play) {
+        for (int r = 0; r < 6; r++)
+            if (PtInRect(&setup_rects_[r], p)) {
+                setup_sel_ = r;
+                setup_choose(r);
+            }
+        return;
+    }
+    if (drop_open_) {   // a value, or away from the list: closed
+        for (int k = 0; k < int(drop_rects_.size()); k++)
+            if (PtInRect(&drop_rects_[k], p)) { drop_pick(drop_top_ + k); return; }
+        drop_open_ = false;
+        drop_.clear();
+        dirty_ = true;
         return;
     }
     if (PtInRect(&more_up_, p) || PtInRect(&more_down_, p)) {   // the scroll arrows of a long settings tab
@@ -1047,33 +886,54 @@ void Frontend::click(int x, int y) {
     mouse_move(x, y);
     auto list = items();
     if (hovered_ < 0 || hovered_ >= int(list.size()) || !list[hovered_].enabled) return;
-    if (list[hovered_].id == TABS) {   // the tab under the pointer
+    if (list[hovered_].id == TABS) {   // the tab under the pointer (the settings page: the section)
         for (int t = 0; t < int(tab_rects_.size()); t++)
-            if (x >= tab_rects_[t].left && x < tab_rects_[t].right) set_tab(t);
+            if (screen_ == Screen::Options || screen_ == Screen::Records ? PtInRect(&tab_rects_[t], p) != FALSE
+                                           : x >= tab_rects_[t].left && x < tab_rects_[t].right)
+                set_tab(t);
         return;
     }
-    // Option rows: a click on the value side goes down left of the middle of the
-    // value and up right of it (the arrows); on the label it steps up and wraps around
-    int dir = +1;
-    if (hovered_ < int(values_.size()) && values_[hovered_].left >= 0 && x >= values_[hovered_].left)
-        dir = x < values_[hovered_].middle ? -1 : +1;
-    else wrap_ = true;
-    activate(list[hovered_], dir);
+    // Option rows: the arrows step down and up; anywhere else the list of values
+    // opens (a row without one steps up and wraps around)
+    int dir = 0;
+    if (hovered_ < int(values_.size()) && values_[hovered_].left >= 0) {
+        const ValueArea& v = values_[size_t(hovered_)];
+        if (x >= v.left && x < v.value) dir = -1;
+        else if (x >= v.right) dir = +1;
+    }
+    if (dir == 0 && screen_ == Screen::Options && list[hovered_].id > OPT_QUALITY) {
+        select(hovered_);
+        if (open_drop(list[hovered_].id)) return;
+    }
+    wrap_ = dir == 0;
+    activate(list[hovered_], dir == 0 ? +1 : dir);
     wrap_ = false;
 }
 
 void Frontend::wheel(int x, int y, int delta) {
-    if (starting || screen_ == Screen::Splash || (news_open_ && screen_ == Screen::Main)) return;
-    mouse_move(x, y);
-    if (screen_ == Screen::Records) {
-        scroll_records(delta > 0 ? -1 : 1);
+    if (starting || screen_ == Screen::Splash) return;
+    if (screen_ == Screen::Options && wheel_prompt.on) return;
+    if (setup_open_ && screen_ == Screen::Play) {   // over an option: change it
+        if (setup_sel_ < 4) setup_change(setup_sel_, delta > 0 ? +1 : -1);
         return;
     }
+    if (restart_open_) return;
+    if (drop_open_) {
+        drop_key(delta > 0 ? VK_UP : VK_DOWN);
+        return;
+    }
+    mouse_move(x, y);
     auto list = items();
     bool on_value = hovered_ >= 0 && hovered_ < int(values_.size()) && values_[hovered_].left >= 0 &&
                     x >= values_[hovered_].left;
-    bool scrolls = screen_ == Screen::Options && int(list.size()) - 2 > VISIBLE_OPTIONS;
-    if (hovered_ >= 0 && hovered_ < int(list.size()) && list[hovered_].id >= OPT_DISPLAY && (on_value || !scrolls)) {
+    bool scrolls = (screen_ == Screen::Options || screen_ == Screen::Records) && options_scroll_;
+    // CONTROLS' keys (but DEVICE): the wheel would start listening for a key; it moves the choice instead
+    bool key_row = hovered_ >= 0 && hovered_ < int(list.size()) && list[hovered_].id == OPT_BIND && list[hovered_].index > 0;
+    if (key_row && !scrolls) {
+        select(std::clamp(selected_ + (delta > 0 ? -1 : 1), 1, int(list.size()) - 2));
+        return;
+    }
+    if (!key_row && hovered_ >= 0 && hovered_ < int(list.size()) && list[hovered_].id >= OPT_QUALITY && (on_value || !scrolls)) {
         int keep = hovered_;   // over a value: change it
         hovered_ = -1;   // no wrap-around from the wheel
         activate(list[keep], delta > 0 ? +1 : -1);
@@ -1138,7 +998,7 @@ std::vector<Frontend::RecordRow> Frontend::record_rows() const {
         });
         for (int i : order) {
             const AchievementInfo& a = table[size_t(i)];
-            RecordRow r{a.name, a.text, L"", when(i) != 0};
+            RecordRow r{a.name, a.text, L"", when(i) != 0, when(i) != 0 ? 0 : 1};
             if (r.lit) {
                 time_t t = time_t(when(i));
                 wchar_t b[32];
@@ -1156,8 +1016,9 @@ std::vector<Frontend::RecordRow> Frontend::record_rows() const {
         }
         return rows;
     }
+    int group = 2;   // TOTALS, then BEST LAPS
     auto row = [&](const std::wstring& label, const std::wstring& value, const std::wstring& detail = L"") {
-        rows.push_back({label, detail, value, true});
+        rows.push_back({label, detail, value, true, group});
     };
     row(L"GAMES PLAYED", grouped(s.games));
     row(L"TIME PLAYED", hours(s.play_frames));
@@ -1167,6 +1028,7 @@ std::vector<Frontend::RecordRow> Frontend::record_rows() const {
         s.championships ? L"Best position " + ordinal(s.best_champ_position) + L",  best total time " +
                               race_time(s.best_champ_time)
                         : L"Not finished yet");
+    group = 3;
     for (int i = 0; i < STAT_COURSES; i++) {   // the best lap of either mode on the right
         const Stats::Course& c = s.course[i];
         int64_t lap = c.best_lap[0] && (!c.best_lap[1] || c.best_lap[0] < c.best_lap[1]) ? c.best_lap[0] : c.best_lap[1];
@@ -1176,57 +1038,369 @@ std::vector<Frontend::RecordRow> Frontend::record_rows() const {
                 detail += std::wstring(detail.empty() ? L"Best time: " : L",  ") + (m ? L"practice " : L"championship ") +
                           race_time(c.best_time[m]);
         if (detail.empty()) detail = L"Not finished yet";
-        row(std::wstring(STAT_COURSE_NAMES[i]) + L"  BEST LAP", race_time(lap), detail);
+        row(STAT_COURSE_NAMES[i], race_time(lap), detail);   // (under the BEST LAPS heading)
     }
     return rows;
 }
 
-void Frontend::scroll_records(int by) {
-    int n = int(record_rows().size());
-    int k = std::clamp(record_scroll_ + by, 0, std::max(0, n - VISIBLE_RECORDS));
-    if (k != record_scroll_) dirty_ = true;
-    record_scroll_ = k;
+// ---- RESTART NOW? ----
+
+std::wstring Frontend::restart_list() const {
+    static const wchar_t* const AA_NAMES[8] = {L"MSAA 4X", L"DLAA", L"OFF", L"DLSS QUALITY", L"DLSS BALANCED",
+                                               L"DLSS PERFORMANCE", L"DLSS ULTRA PERFORMANCE", L"FXAA"};
+    std::wstring list;
+    if (settings.render_scale != scale_at_launch) list = L"RENDER SCALE " + std::to_wstring(settings.render_scale) + L"%";
+    if (settings.aa != aa_at_launch)
+        list += (list.empty() ? L"" : L" and ") + std::wstring(L"ANTI-ALIASING ") + AA_NAMES[std::clamp(settings.aa, 0, 7)];
+    if (settings.experience != (arcade ? 1 : 0))
+        list += (list.empty() ? L"" : L" and ") + std::wstring(L"EXPERIENCE ") +
+                (settings.experience ? L"ARCADE ORIGINAL" : L"PC EDITION");
+    return list;
 }
 
-// The rows of the open records tab between x0 and x1, from y0 down
-void Frontend::draw_records(int x0, int x1, int y0, int row_h) {
+void Frontend::restart_choose(int button) {
+    dirty_ = true;
+    if (restore_ask_) {   // RESTORE ORIGINAL: RESTORE, or CANCEL (back to the pause)
+        restore_ask_ = restart_open_ = false;
+        if (button != 0) return;
+        settings.arcade_base();   // (not the screen, the speakers, the controls)
+        push(Action::SettingsChanged);
+        if (!restart_list().empty()) {   // e.g. ANTI-ALIASING back to OFF: RESTART NOW / LATER
+            restart_open_ = true;
+            restart_button_ = 0;
+        }
+        return;
+    }
+    if (button == 0) {   // RESTART NOW: app.cpp saves, closes and starts the game again
+        restart_open_ = false;
+        push(Action::Restart);
+        return;
+    }
+    if (!restart_note_.empty() || screen_ == Screen::Pause) {   // BACK TO PC EDITION or a restore, LATER: the pause again (saved already)
+        restart_open_ = false;
+        restart_note_.clear();
+        return;
+    }
+    back();   // LATER: on, as BACK (the prompt is not asked again)
+}
+
+void Frontend::draw_restart() {
     auto U = [&](float v) { return int(v * u_ + 0.5f); };
-    auto rows = record_rows();
-    record_scroll_ = std::clamp(record_scroll_, 0, std::max(0, int(rows.size()) - VISIBLE_RECORDS));
-    const Style lit{PALE_TOP, PALE_BOTTOM, 0x080806, U(2), 0.95f};
-    const Style dark{DIM, DIM, 0x080806, U(2), 0.9f};
-    const Style value{0xF4D27A, 0xE0A848, 0x080806, U(2), 0.95f};
-    int label_px = U(32), detail_px = U(19);
-    for (int k = 0; k < VISIBLE_RECORDS && record_scroll_ + k < int(rows.size()); k++) {
-        const RecordRow& r = rows[size_t(record_scroll_ + k)];
-        int y = y0 + k * row_h;
-        if (k % 2 == 0) fill(x0 - U(20), y - U(4), x1 + U(20), y + row_h - U(4), 0xFFFFFF, 0.03f);
-        text(ITEM, label_px, r.label, x0, y, 0, r.lit ? lit : dark);
-        if (!r.detail.empty())
-            text(MONO, detail_px, r.detail, x0, y + label_px + U(4), 0, {r.lit ? HINT : DIM, r.lit ? HINT : DIM});
-        text(ITEM, label_px, r.value, x1, y + U(6), 2, r.lit ? value : dark);
+    constexpr uint32_t PAGE_TEXT = 0xEEF3FA, PAGE_LINE = 0x3A4458;   // (as the settings page's, below)
+    const int w = w_, h = h_;
+    fill(0, 0, w, h, 0x000000, 0.55f);
+    int pw = std::min(U(900), w - U(80)), ph = U(over_game() ? 360.0f : 320.0f);
+    int x0 = (w - pw) / 2, y0 = (h - ph) / 2, x1 = x0 + pw, y1 = y0 + ph, cx = w / 2;
+    fill(x0, y0, x1, y1, PANEL, 1);
+    frame(x0, y0, x1, y1, std::max(1, U(1)), PAGE_LINE, 1);
+    fill(x0, y0, x1, y0 + std::max(2, U(4)), SABER, 1);
+    text(TITLE, U(52), restore_ask_ ? L"RESTORE ORIGINAL?" : L"RESTART THE GAME?", cx, y0 + U(30), 1, {0xFFFFFF, 0xE2EAF4, 0, 0, 1, U(3)});
+    int y = y0 + U(104);
+    std::wstring why = restore_ask_ ? std::wstring(L"The arcade's original sound, anti-aliasing, graphics, HUD, cars, MOTION, ASPECT and CREDIT. The screen, the speakers and the controls stay as they are")
+                       : !restart_note_.empty() ? restart_note_
+                       : restart_list() + (restart_list().find(L" and ") != std::wstring::npos ? L" need a restart" : L" needs a restart");
+    for (const std::wstring& line : wrap(BODY, U(26), why, pw - U(80))) {
+        text(BODY, U(26), line, cx, y, 1, {GOLD_TOP, GOLD_BOTTOM});
+        y += U(36);
     }
-    if (record_scroll_ > 0) {   // more above / below: arrows that also scroll on a click
-        triangle(x1 + U(36), y0 + U(10), U(20), -2, GOLD_BOTTOM, 1);
-        more_up_ = {x1 + U(10), y0 - U(16), x1 + U(64), y0 + U(36)};
+    if (over_game() && !restore_ask_) {
+        text(BODY, U(22), L"The race in progress will be lost.  LATER keeps it", cx, y + U(4), 1, {0xFF9A8E, 0xFF9A8E});
+        y += U(34);
     }
-    if (record_scroll_ + VISIBLE_RECORDS < int(rows.size())) {
-        int yb = y0 + VISIBLE_RECORDS * row_h - U(20);
-        triangle(x1 + U(36), yb, U(20), 2, GOLD_BOTTOM, 1);
-        more_down_ = {x1 + U(10), yb - U(26), x1 + U(64), yb + U(26)};
+    const wchar_t* names[2] = {restore_ask_ ? L"RESTORE" : L"RESTART NOW", restore_ask_ ? L"CANCEL" : L"LATER"};
+    int bw = U(280), bh = U(64), gap = U(40), bx = cx - bw - gap / 2, by = y1 - U(36) - bh;
+    for (int b = 0; b < 2; b++) {
+        int x = bx + b * (bw + gap);
+        bool sel = b == restart_button_;
+        if (sel) ribbon(x, by, x + bw, by + bh, bh * 30 / 100, 0.85f, 0.6f, U(8), U(6), 1);
+        else frame(x, by, x + bw, by + bh, std::max(1, U(1)), PAGE_LINE, 1);
+        text(TITLE, U(38), names[b], x + bw / 2, by + bh / 2 - U(38) * 75 / 100, 1,
+             sel ? Style{GOLD_TOP, GOLD_BOTTOM, 0, 0, 1, U(2)} : Style{PAGE_TEXT, PAGE_TEXT, 0, 0, 1, U(2)});
+        restart_buttons_[b] = {x, by, x + bw, by + bh};
     }
+}
+
+// ---- PLAY > ARCADE CLASSIC: the race set-up ----
+
+namespace {
+const wchar_t* const SETUP_LABELS[4] = {L"DIFFICULTY", L"GAME MODE", L"DEFAULT VIEW", L"SPEED"};
+}  // namespace
+
+void Frontend::setup_change(int row, int dir) {
+    FrontendSettings& s = settings;
+    switch (row) {
+    case 0: {
+        int at = 0;
+        for (int i = 0; i < 5; i++)
+            if (DIFFICULTY_ORDER[i] == s.difficulty) at = i;
+        s.difficulty = DIFFICULTY_ORDER[(at + dir + 5) % 5];
+        break;
+    }
+    case 1: s.game_mode ^= 1; break;
+    case 2: s.default_view ^= 1; break;
+    case 3: s.speed_kmh ^= 1; break;
+    default: return;
+    }
+    dirty_ = true;
+    push(Action::SettingsChanged);   // remembered (save/settings.ini) and handed to the game
+}
+
+void Frontend::setup_choose(int row) {
+    dirty_ = true;
+    if (row < 4) setup_change(row, +1);
+    else if (row == 4) {   // START RACE: the arcade game, with these
+        setup_open_ = false;
+        push(Action::StartArcade);
+    } else setup_open_ = false;   // BACK: PLAY's page
+}
+
+bool Frontend::setup_key(int vk) {
+    switch (vk) {
+    case VK_UP: case 'W': setup_sel_ = setup_sel_ >= 4 ? 3 : (setup_sel_ + 4) % 5; break;   // (from the first: START RACE)
+    case VK_DOWN: case 'S': setup_sel_ = setup_sel_ >= 4 ? 0 : setup_sel_ + 1; break;
+    case VK_LEFT: case 'A':
+        if (setup_sel_ < 4) setup_change(setup_sel_, -1);
+        else setup_sel_ = 4;
+        break;
+    case VK_RIGHT: case 'D':
+        if (setup_sel_ < 4) setup_change(setup_sel_, +1);
+        else setup_sel_ = 5;
+        break;
+    case VK_TAB: if (setup_sel_ >= 4) setup_sel_ ^= 1; break;
+    case VK_RETURN: case VK_SPACE: setup_choose(setup_sel_); break;
+    case VK_ESCAPE: case VK_BACK: setup_open_ = false; break;
+    default: return true;
+    }
+    dirty_ = true;
+    return true;
+}
+
+void Frontend::draw_setup() {
+    auto U = [&](float v) { return int(v * u_ + 0.5f); };
+    constexpr uint32_t PAGE_TEXT = 0xEEF3FA, PAGE_DIM = 0x8A98AC, PAGE_LINE = 0x3A4458;   // (as the settings page's)
+    const FrontendSettings& s = settings;
+    const wchar_t* values[4] = {DIFFICULTY_NAMES[std::clamp(s.difficulty, 0, 4)], s.game_mode ? L"SPECIAL" : L"NORMAL",
+                                s.default_view ? L"BEHIND" : L"DRIVER", s.speed_kmh ? L"KM/H" : L"MPH"};
+    const wchar_t* hints[4] = {
+        L"The time you get at the start and at each checkpoint",
+        s.game_mode ? L"The cabinet's SPECIAL game: 3 laps per stage instead of 1 (Riviera 5), 10 in practice"
+                    : L"The arcade's normal game: 1 lap per stage (Riviera 2), 3 in practice",
+        s.default_view ? L"The race starts with the camera behind the car (VIEW CHANGE switches it)"
+                       : L"The race starts in the driver's view (VIEW CHANGE switches it)",
+        s.speed_kmh ? L"The speedometer in kilometres per hour" : L"The speedometer in miles per hour"};
+    const int w = w_, h = h_;
+    fill(0, 0, w, h, 0x000000, 0.6f);
+    const int row_h = U(66), pw = std::min(U(820), w - U(80));
+    const int ph = U(150) + 4 * row_h + U(60) + U(64) + U(48);
+    const int x0 = (w - pw) / 2, y0 = std::max(U(20), (h - ph) / 2), x1 = x0 + pw, y1 = y0 + ph, cx = w / 2;
+    fill(x0, y0, x1, y1, PANEL, 0.97f);
+    frame(x0, y0, x1, y1, std::max(1, U(1)), PAGE_LINE, 1);
+    fill(x0, y0, x1, y0 + std::max(2, U(4)), SABER, 1);
+    text(TITLE, U(52), L"ARCADE CLASSIC", cx, y0 + U(26), 1, {0xFFFFFF, 0xE2EAF4, 0, 0, 1, U(3)});
+    text(ROW_MEDIUM, U(24), L"RACE OPTIONS", cx, y0 + U(94), 1, {PAGE_DIM, PAGE_DIM});
+    int y = y0 + U(140);
+    const int lx = x0 + U(56), vx = x1 - U(56);
+    for (int r = 0; r < 4; r++) {
+        bool sel = r == setup_sel_;
+        if (sel) ribbon(x0 + U(24), y, x1 - U(24), y + row_h, row_h * 30 / 100, 0.55f, 0.25f, U(8), U(6), 1);
+        else fill(x0 + U(40), y + row_h - 1, x1 - U(40), y + row_h, PAGE_LINE, 0.6f);
+        text(ROW, U(32), SETUP_LABELS[r], lx, y + row_h / 2 - U(21), 0,
+             sel ? Style{GOLD_TOP, GOLD_BOTTOM, 0, 0, 1, U(2)} : Style{PAGE_TEXT, PAGE_TEXT, 0, 0, 1, U(2)});
+        int ay = y + row_h / 2;
+        triangle(vx, ay, U(16), +1, sel ? 0xFFE08A : 0x8A98AC, 0.9f);
+        int vw = text(ROW, U(32), values[r], vx - U(22), ay - U(21), 2, {GOLD_TOP, GOLD_BOTTOM, 0, 0, 1, U(2)});
+        triangle(vx - U(44) - vw, ay, U(16), -1, sel ? 0xFFE08A : 0x8A98AC, 0.9f);
+        setup_rects_[r] = {x0 + U(24), y, x1 - U(24), y + row_h};
+        y += row_h;
+    }
+    // what the chosen option does (the buttons: what they do)
+    const wchar_t* about = setup_sel_ < 4 ? hints[setup_sel_]
+                           : setup_sel_ == 4 ? L"The arcade game with these options (remembered for the next time)"
+                                             : L"Back to PLAY";
+    text(BODY, U(22), about, cx, y + U(18), 1, {HINT, HINT});
+    const wchar_t* names[2] = {L"START RACE", L"BACK"};
+    int bw = U(280), bh = U(64), gap = U(40), bx = cx - bw - gap / 2, by = y1 - U(36) - bh;
+    for (int b = 0; b < 2; b++) {
+        int x = bx + b * (bw + gap);
+        bool sel = setup_sel_ == 4 + b;
+        if (sel) ribbon(x, by, x + bw, by + bh, bh * 30 / 100, 0.85f, 0.6f, U(8), U(6), 1);
+        else frame(x, by, x + bw, by + bh, std::max(1, U(1)), PAGE_LINE, 1);
+        text(TITLE, U(38), names[b], x + bw / 2, by + bh / 2 - U(38) * 75 / 100, 1,
+             sel ? Style{GOLD_TOP, GOLD_BOTTOM, 0, 0, 1, U(2)} : Style{PAGE_TEXT, PAGE_TEXT, 0, 0, 1, U(2)});
+        setup_rects_[4 + b] = {x, by, x + bw, by + bh};
+    }
+}
+
+// ---- A setting's list of values ----
+
+int Frontend::resolution_index() const {
+    int n = int(resolutions.size());
+    int cw = settings.res_w > 0 ? settings.res_w : settings.display_mode == 0 ? client_w : desktop_w;
+    int ch = settings.res_w > 0 ? settings.res_h : settings.display_mode == 0 ? client_h : desktop_h;
+    int best = 0;
+    for (int k = 1; k < n; k++)
+        if (std::abs(resolutions[size_t(k)].first - cw) + std::abs(resolutions[size_t(k)].second - ch) <
+            std::abs(resolutions[size_t(best)].first - cw) + std::abs(resolutions[size_t(best)].second - ch))
+            best = k;
+    return best;
+}
+
+bool Frontend::first_value(Id id) {
+    FrontendSettings& s = settings;
+    switch (id) {
+    case OPT_EXPERIENCE: s.experience = 0; break;
+    case OPT_ARCADE_ASPECT: arcade_side().aspect = 0; break;
+    case OPT_TELEMETRY: s.telemetry = true; break;
+    case OPT_TELEMETRY_FORMAT: s.telemetry_format = 0; break;
+    case OPT_DISPLAY: s.display_mode = 0; s.fullscreen = false; break;
+    case OPT_ASPECT: s.aspect = 0; break;
+    case OPT_HUD_AREA: s.hud_43 = false; break;
+    case OPT_SCALE: s.render_scale = 50; break;
+    case OPT_MOTION: s.smooth = true; break;
+    case OPT_VSYNC: s.vsync = 1; break;   // ON, ADAPTIVE, OFF
+    case OPT_MAXFPS: s.max_fps = 0; break;
+    case OPT_BGFPS: s.background_fps = true; break;
+    case OPT_VOLUME: s.volume = 0; break;
+    case OPT_MUSIC: s.music = 0; break;
+    case OPT_MENU_MUSIC: s.menu_music = true; break;
+    case OPT_SPEAKERS: s.speakers = 0; break;
+    case OPT_REAR: s.rear_boost = 0; break;
+    case OPT_SAMPLES: s.cubic_samples = true; break;
+    case OPT_AA: s.aa = AA_ORDER[0]; break;
+    case OPT_HAZE: s.haze = true; break;
+    case OPT_BLOOM: s.bloom = 0; break;
+    case OPT_AO: s.ao = true; break;
+    case OPT_SUN: s.sun = true; break;
+    case OPT_SHADOWS: s.shadows = true; break;
+    case OPT_CAR_PROBES: s.car_probes = true; break;
+    case OPT_CAR_SHADOWS: s.car_shadows = true; break;
+    case OPT_RT: s.ray_tracing = 0; break;
+    case OPT_HDR: s.hdr = true; break;
+    case OPT_REFLECT: s.reflections = true; break;
+    case OPT_GI: s.gi = 1; break;
+    case OPT_DUST: s.dust = true; break;
+    case OPT_OBJECTS: s.object_distance = 100; break;
+    case OPT_SAT: s.saturation = 0; break;
+    case OPT_GAMMA: s.gamma = 50; break;
+    case OPT_SHARPEN: s.sharpen = true; break;
+    case OPT_HUD: s.hd_hud = true; break;
+    case OPT_LIVERIES: s.hd_liveries = true; break;
+    case OPT_VIBRATION: s.vibration = 0; break;
+    case OPT_TRIGGERS: s.trigger_rumble = 0; break;
+    default: return false;
+    }
+    return true;
+}
+
+bool Frontend::open_drop(Id id) {
+    auto value_of = [&] {   // the row's value as its row shows it
+        for (const Item& it : items())
+            if (it.id == id) return it.value;
+        return std::wstring();
+    };
+    drop_.clear();
+    drop_in_use_ = -1;
+    if (id == OPT_RESOLUTION) {
+        if (settings.display_mode == 1 || resolutions.empty()) return false;
+        int n = int(resolutions.size());
+        for (int k = 0; k < n; k++) {   // largest first
+            const auto& r = resolutions[size_t(n - 1 - k)];
+            DropEntry e{std::to_wstring(r.first) + L" x " + std::to_wstring(r.second), settings, other};
+            e.s.res_w = r.first;
+            e.s.res_h = r.second;
+            drop_.push_back(e);
+        }
+        drop_in_use_ = n - 1 - resolution_index();
+        drop_action_ = Action::DisplayChanged;
+    } else {   // stepped up from its first value until a value comes again
+        const FrontendSettings keep = settings, keep_other = other;
+        const std::wstring now = value_of();
+        std::vector<Action> pushed;
+        pushed.swap(actions_);
+        if (first_value(id))
+            for (int k = 0; k < 64; k++) {
+                std::wstring v = value_of();
+                if (v.empty() || std::any_of(drop_.begin(), drop_.end(), [&](const DropEntry& e) { return e.label == v; })) break;
+                if (v == now) drop_in_use_ = int(drop_.size());
+                drop_.push_back({v, settings, other});
+                activate(Item{id}, +1);
+            }
+        drop_action_ = actions_.empty() ? Action::SettingsChanged : actions_.back();
+        actions_.swap(pushed);
+        settings = keep;
+        other = keep_other;
+    }
+    if (drop_.size() < 2) {
+        drop_.clear();
+        return false;
+    }
+    drop_id_ = id;
+    drop_sel_ = std::max(drop_in_use_, 0);
+    drop_top_ = 0;
+    drop_open_ = dirty_ = true;
+    return true;
+}
+
+void Frontend::drop_pick(int i) {   // applied at once
+    drop_open_ = false;
+    dirty_ = true;
+    if (i >= 0 && i < int(drop_.size()) && i != drop_in_use_) {
+        settings = drop_[size_t(i)].s;
+        other = drop_[size_t(i)].other;
+        push(drop_action_);
+    }
+    drop_.clear();
+}
+
+bool Frontend::drop_key(int vk) {
+    int n = int(drop_.size());
+    switch (vk) {
+    case VK_UP: case 'W': drop_sel_ = (drop_sel_ + n - 1) % n; break;
+    case VK_DOWN: case 'S': drop_sel_ = (drop_sel_ + 1) % n; break;
+    case VK_PRIOR: drop_sel_ = std::max(0, drop_sel_ - 8); break;
+    case VK_NEXT: drop_sel_ = std::min(n - 1, drop_sel_ + 8); break;
+    case VK_RETURN: case VK_SPACE: drop_pick(drop_sel_); return true;
+    case VK_ESCAPE: case VK_BACK: drop_open_ = false; drop_.clear(); break;
+    default: return true;
+    }
+    dirty_ = true;
+    return true;
+}
+
+// Over the description panel: the row's name, its values, the one in use marked
+void Frontend::draw_drop() {
+    auto U = [&](float v) { return int(v * u_ + 0.5f); };
+    constexpr uint32_t PAGE_TEXT = 0xEEF3FA, PAGE_LINE = 0x3A4458, GROUP_RED = 0xD8564A;   // (as the settings page's, below)
+    RECT pr = panel_rect_;
+    if (pr.right <= pr.left) return;
+    int n = int(drop_.size()), row = U(44), head = U(64);
+    int x0 = pr.left, x1 = pr.right, y0 = pr.top;
+    int shown = std::max(1, std::min(n, int((pr.bottom - y0 - head - U(16)) / row)));
+    if (drop_sel_ < drop_top_) drop_top_ = drop_sel_;
+    if (drop_sel_ >= drop_top_ + shown) drop_top_ = drop_sel_ - shown + 1;
+    int y1 = y0 + head + shown * row + U(16);
+    fill(x0, y0, x1, pr.bottom, PANEL, 1);   // (the whole panel: its description must not show through)
+    frame(x0, y0, x1, y1, std::max(1, U(1)), PAGE_LINE, 1);
+    fill(x0, y0, x1, y0 + std::max(2, U(4)), SABER, 1);
+    std::wstring title;
+    for (const Item& it : items())
+        if (it.id == drop_id_) title = it.label;
+    text(ROW_MEDIUM, U(22), title, x0 + U(28), y0 + U(22), 0, {GROUP_RED, GROUP_RED});
+    drop_rects_.clear();
+    for (int k = 0; k < shown && drop_top_ + k < n; k++) {
+        int i = drop_top_ + k, y = y0 + head + k * row;
+        bool sel = i == drop_sel_, in_use = i == drop_in_use_;
+        if (sel) ribbon(x0 + U(24), y, x1 - U(12), y + row, row * 40 / 100, 0.45f, 0.75f, U(6), U(5), 1);
+        text(ROW, U(30), drop_[size_t(i)].label, x0 + U(52), y + row / 2 - U(30) * 75 / 100, 0,
+             sel ? Style{GOLD_TOP, GOLD_BOTTOM, 0, 0, 1, U(2)} : Style{PAGE_TEXT, PAGE_TEXT, 0, 0, 1, U(2)});
+        if (in_use) text(ROW_MEDIUM, U(18), L"IN USE", x1 - U(28), y + row / 2 - U(10), 2, {GROUP_RED, GROUP_RED});
+        drop_rects_.push_back({x0, y, x1, y + row});
+    }
+    if (drop_top_ > 0) triangle((x0 + x1) / 2, y0 + head - U(10), U(16), -2, GOLD_BOTTOM, 1);
+    if (drop_top_ + shown < n) triangle((x0 + x1) / 2, y1 - U(8), U(16), 2, GOLD_BOTTOM, 1);
 }
 
 // ---- Drawing primitives (premultiplied BGRA canvas) ----
-
-// Integer "over" on premultiplied BGRA (it runs for every pixel of panels and text)
-static inline uint32_t over(uint32_t d, uint32_t rgb, int a) {   // a: 0..256
-    int k = 256 - a;
-    uint32_t rb = (((rgb & 0xFF00FFu) * a + (d & 0xFF00FFu) * k) >> 8) & 0xFF00FFu;
-    uint32_t g = (((rgb & 0x00FF00u) * a + (d & 0x00FF00u) * k) >> 8) & 0x00FF00u;
-    uint32_t da = ((255u * a + (d >> 24) * k) >> 8);
-    return rb | g | (da << 24);
-}
 
 void Frontend::blend(int x, int y, uint32_t rgb, float a) {
     if (x < 0 || y < 0 || x >= w_ || y >= h_ || a <= 0) return;
@@ -1240,15 +1414,6 @@ void Frontend::fill(int x0, int y0, int x1, int y1, uint32_t rgb, float alpha) {
     for (int y = y0; y < y1; y++) {
         uint32_t* row = px_ + size_t(y) * w_;
         for (int x = x0; x < x1; x++) row[x] = over(row[x], rgb, a);
-    }
-}
-
-// Horizontal band that fades out towards both ends
-void Frontend::band(int cx, int y0, int y1, int half_w, uint32_t rgb, float alpha) {
-    for (int x = std::max(cx - half_w, 0); x < std::min(cx + half_w, w_); x++) {
-        float t = 1 - std::abs(float(x - cx)) / float(half_w);
-        float a = alpha * std::min(1.0f, t * 2.5f);
-        for (int y = std::max(y0, 0); y < std::min(y1, h_); y++) blend(x, y, rgb, a);
     }
 }
 
@@ -1274,7 +1439,7 @@ HFONT Frontend::font(Family f, int px) {
     auto key = std::make_pair(int(f), px);
     auto it = fonts_.find(key);
     if (it != fonts_.end()) return it->second;
-    HFONT h = CreateFontW(-px, 0, 0, 0, f == MONO ? FW_NORMAL : FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    HFONT h = CreateFontW(-px, 0, 0, 0, WEIGHTS[f], FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                           OUT_TT_ONLY_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, FACES[f]);
     fonts_[key] = h;
     return h;
@@ -1284,41 +1449,19 @@ const Frontend::Mask& Frontend::mask(Family f, int px, const std::wstring& s, in
     std::wstring key = std::to_wstring(int(f)) + L"|" + std::to_wstring(px) + L"|" + std::to_wstring(edge_px) + L"|" + s;
     auto it = masks_.find(key);
     if (it != masks_.end()) return it->second;
-    if (masks_.size() > 400) masks_.clear();   // window resized many times
+    if (masks_.size() > 800) masks_.clear();   // window resized many times
     Mask& m = masks_[key];
-    SelectObject(dc_, font(f, px));
-    const std::wstring& t = s;
-    SIZE sz{};
-    GetTextExtentPoint32W(dc_, t.c_str(), int(t.size()), &sz);
-    TEXTMETRICW tm{};
-    GetTextMetricsW(dc_, &tm);
     m.pad = edge_px + 2 + px / 6;   // room for the outline and overhanging letters
-    m.text_w = sz.cx;
-    m.text_h = sz.cy;
-    m.w = sz.cx + 2 * m.pad;
-    m.h = sz.cy + 2 * m.pad;
+    ui_draw::TextRaster t = ui_draw::rasterise_text(dc_, font(f, px), s, m.pad);
+    const TEXTMETRICW& tm = t.tm;
+    m.text_w = t.text_w;
+    m.text_h = t.text_h;
+    m.w = t.w;
+    m.h = t.h;
     m.grad0 = m.pad + tm.tmInternalLeading + (tm.tmAscent - tm.tmInternalLeading) / 8;
     m.grad1 = m.pad + tm.tmAscent;
-    BITMAPINFO bi{};
-    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-    bi.bmiHeader.biWidth = m.w;
-    bi.bmiHeader.biHeight = -m.h;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    void* bits = nullptr;
-    HBITMAP bmp = CreateDIBSection(dc_, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!bmp) return m;
-    HGDIOBJ old = SelectObject(dc_, bmp);
-    memset(bits, 0, size_t(m.w) * m.h * 4);
-    SetBkMode(dc_, TRANSPARENT);
-    SetTextColor(dc_, RGB(255, 255, 255));
-    TextOutW(dc_, m.pad, m.pad, t.c_str(), int(t.size()));
-    GdiFlush();
-    m.a.resize(size_t(m.w) * m.h);
-    const uint8_t* p = static_cast<const uint8_t*>(bits);
-    for (size_t i = 0; i < m.a.size(); i++) m.a[i] = p[i * 4 + 1];
-    SelectObject(dc_, old);
-    DeleteObject(bmp);
+    if (t.a.empty()) return m;
+    m.a = std::move(t.a);
     if (edge_px > 0) {   // outline: the letters grown by a round brush
         m.e.assign(m.a.size(), 0);
         float r = float(edge_px);
@@ -1368,22 +1511,16 @@ int Frontend::text(Family f, int px, const std::wstring& s, int x, int y, int al
     return m.text_w;
 }
 
-// A glowing line in the accent colour: a white-hot core in a soft glow,
-// fading out towards both ends
-void Frontend::saber(int cx, int y, int half_w) {
-    int glow = std::max(4, int(16 * u_)), core = std::max(1, int(1.6f * u_ + 0.5f));
-    for (int x = std::max(cx - half_w, 0); x < std::min(cx + half_w, w_); x++) {
-        float t = 1 - std::abs(float(x - cx)) / float(half_w);
-        float a = std::min(1.0f, t * 3.0f);
-        for (int dy = -glow; dy <= glow; dy++) {
-            float d = std::abs(float(dy)) / float(glow);
-            blend(x, y + dy, SABER, a * 0.55f * std::exp(-d * d * 5.0f));
-            if (std::abs(dy) <= core) blend(x, y + dy, 0xEAF6FF, a);
-        }
+// ---- Shapes and pictures ----
+
+void Frontend::ribbon(int x0, int y0, int x1, int y1, int slant, float a0, float a1, int gap, int sw, float alpha) {
+    int h = std::max(1, y1 - y0);
+    for (int y = y0; y < y1; y++) {
+        int s = (y1 - 1 - y) * slant / h;
+        hgrad(x0 + s, y, x1 + s, y + 1, SABER, a0 * alpha, a1 * alpha);
+        if (sw > 0) fill(x0 + s - gap - sw, y, x0 + s - gap, y + 1, SABER, 0.9f * alpha);
     }
 }
-
-// ---- Shapes and pictures ----
 
 void Frontend::hgrad(int x0, int y0, int x1, int y1, uint32_t rgb, float a0, float a1) {
     if (x1 <= x0) return;
@@ -1474,6 +1611,93 @@ void Frontend::sprite(const Picture& p, int x0, int y0, int w, int h) {
         }
 }
 
+const Frontend::WheelArt& Frontend::wheel_art() {
+    if (wheel_art_.loaded) return wheel_art_;
+    wheel_art_.loaded = true;
+    auto load = [&](const wchar_t* name, Pictures& out) {
+        Picture p;
+        if (!load_image(std::wstring(L"res/wheel/") + name, p.px, p.w, p.h)) return;
+        out.mip.push_back(std::move(p));
+        while (out.mip.back().w >= 32 && out.mip.back().h >= 32) {   // halvings, alpha-weighted
+            const Picture& a = out.mip.back();
+            Picture h;
+            h.w = a.w / 2;
+            h.h = a.h / 2;
+            h.px.resize(size_t(h.w) * h.h);
+            for (int y = 0; y < h.h; y++)
+                for (int x = 0; x < h.w; x++) {
+                    float rgb[3] = {0, 0, 0}, al = 0;
+                    for (int k = 0; k < 4; k++) {
+                        uint32_t c = a.px[size_t(2 * y + k / 2) * a.w + 2 * x + k % 2];
+                        float ca = chan(c, 24);
+                        for (int m = 0; m < 3; m++) rgb[m] += chan(c, 16 - 8 * m) * ca;
+                        al += ca;
+                    }
+                    uint32_t c = uint32_t(al / 4 * 255.0f + 0.5f) << 24;
+                    if (al > 0)
+                        for (int m = 0; m < 3; m++) c |= uint32_t(std::clamp(rgb[m] / al, 0.0f, 1.0f) * 255.0f + 0.5f) << (16 - 8 * m);
+                    h.px[size_t(y) * h.w + x] = c;
+                }
+            out.mip.push_back(std::move(h));
+        }
+    };
+    load(L"wheel.png", wheel_art_.wheel);
+    load(L"gas.png", wheel_art_.gas);
+    load(L"brake.png", wheel_art_.brake);
+    load(L"handbrake.png", wheel_art_.handbrake);
+    load(L"handbrake_base.png", wheel_art_.handbrake_base);
+    printf("[menu] wheel pictures: %s\n", wheel_art_.wheel.ok() && wheel_art_.gas.ok() && wheel_art_.brake.ok() &&
+                                               wheel_art_.handbrake.ok() && wheel_art_.handbrake_base.ok()
+                                           ? "res/wheel/"
+                                           : "some missing, drawn instead");
+    return wheel_art_;
+}
+
+void Frontend::sprite_turned(const Pictures& pics, float cx, float cy, float w, float h, float pu, float pv, float deg,
+                             float alpha, uint32_t tint, float tint_v, float tint_amount) {
+    if (!pics.ok() || w < 1 || h < 1 || alpha <= 0) return;
+    size_t lv = 0;   // the smallest halving still at least the size drawn
+    while (lv + 1 < pics.mip.size() && pics.mip[lv + 1].w >= w && pics.mip[lv + 1].h >= h) lv++;
+    const Picture& p = pics.mip[lv];
+    const float a = deg * 3.14159265f / 180.0f, cs = std::cos(a), sn = std::sin(a);
+    // The box it covers: its corners turned about (cx, cy)
+    float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
+    for (int k = 0; k < 4; k++) {
+        float lx = ((k & 1) - pu) * w, ly = ((k >> 1) - pv) * h;
+        float X = cx + lx * cs - ly * sn, Y = cy + lx * sn + ly * cs;
+        minx = std::min(minx, X), maxx = std::max(maxx, X), miny = std::min(miny, Y), maxy = std::max(maxy, Y);
+    }
+    const float tr = chan(tint, 16), tg = chan(tint, 8), tb = chan(tint, 0);
+    for (int y = std::max(0, int(miny)); y < std::min(h_, int(maxy) + 2); y++)
+        for (int x = std::max(0, int(minx)); x < std::min(w_, int(maxx) + 2); x++) {
+            float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+            float fu = (dx * cs + dy * sn) / w + pu, fv = (-dx * sn + dy * cs) / h + pv;   // 0..1 of the picture
+            if (fu < 0 || fu >= 1 || fv < 0 || fv >= 1) continue;
+            float u = std::clamp(fu * p.w - 0.5f, 0.0f, p.w - 1.001f), v = std::clamp(fv * p.h - 0.5f, 0.0f, p.h - 1.001f);
+            int iu = int(u), iv = int(v);
+            float ku = u - iu, kv = v - iv;
+            const uint32_t* q = &p.px[size_t(iv) * p.w + iu];
+            const uint32_t c4[4] = {q[0], q[1], q[p.w], q[p.w + 1]};
+            const float wt[4] = {(1 - ku) * (1 - kv), ku * (1 - kv), (1 - ku) * kv, ku * kv};
+            float rgb[3] = {0, 0, 0}, al = 0;   // (weighted by alpha: no dark fringes)
+            for (int k = 0; k < 4; k++) {
+                float ca = chan(c4[k], 24) * wt[k];
+                for (int m = 0; m < 3; m++) rgb[m] += chan(c4[k], 16 - 8 * m) * ca;
+                al += ca;
+            }
+            if (al <= 0.002f) continue;
+            for (float& c : rgb) c /= al;
+            if (tint_amount > 0 && fv >= tint_v) {   // towards the colour, keeping its shading
+                float l = 0.3f * rgb[0] + 0.59f * rgb[1] + 0.11f * rgb[2], k = 0.35f + 0.9f * l;
+                const float t[3] = {tr, tg, tb};
+                for (int m = 0; m < 3; m++) rgb[m] += (std::min(1.0f, t[m] * k) - rgb[m]) * tint_amount;
+            }
+            uint32_t c = 0;
+            for (int m = 0; m < 3; m++) c |= uint32_t(std::clamp(rgb[m], 0.0f, 1.0f) * 255.0f + 0.5f) << (16 - 8 * m);
+            blend(x, y, c, al * alpha);
+        }
+}
+
 const Frontend::Picture& Frontend::pad_icon(const std::wstring& button) {
     auto it = pad_icons_.find(button);
     if (it != pad_icons_.end()) return it->second;
@@ -1549,68 +1773,91 @@ std::vector<std::wstring> Frontend::wrap(Family f, int px, const std::wstring& s
 
 // The logo, LOGO_H of the window high from LOGO_TOP, centred LOGO_FROM_RIGHT
 // (1080p pixels) from the right edge: above the menu's column
-constexpr float LOGO_TOP = 0.07f, LOGO_H = 0.28f, LOGO_FROM_RIGHT = 420;   // Sega Rally 2: as in the mock-up
+constexpr float LOGO_TOP = 0.09f, LOGO_H = 0.28f, LOGO_FROM_RIGHT = 420;   // the logo and the entries as one block
+constexpr float LOGO_PICTURE_X = 350;   // logo.png's centre from the right edge (as Lost World's)
+constexpr float LOGO_W = 400;           // logo.png at most this wide (layout units), the tagline under it
 
-// The background picture covering the window, darker towards the right where
-// the menu goes and at the bottom, with the logo; blurred for the options
-void Frontend::backdrop_background() {
-    uint32_t* keep = px_;
-    bg_.assign(size_t(w_) * h_, 0xFF000000u);
-    px_ = bg_.data();
-    picture(backdrop_, 0, 0, w_, h_, 0.0f);   // narrower windows lose its right side: the ship stays whole
-    // The blur: the picture averaged down by 16 in each direction, smoothed a
-    // few times and stretched back
+// A picture blurred: averaged down by 16 in each direction and smoothed a
+// few times (stretched back up by whoever draws it)
+static void blur16(const uint32_t* src, int w, int h, std::vector<uint32_t>& out, int& bw, int& bh) {
     const int F = 16;
-    Picture blur;
-    blur.w = std::max(4, w_ / F);
-    blur.h = std::max(4, h_ / F);
-    std::vector<float> acc(size_t(blur.w) * blur.h * 3, 0.0f);
-    for (int y = 0; y < blur.h * F && y < h_; y++)
-        for (int x = 0; x < blur.w * F && x < w_; x++) {
-            uint32_t c = bg_[size_t(y) * w_ + x];
-            float* d = &acc[(size_t(y / F) * blur.w + x / F) * 3];
+    bw = std::max(4, w / F);
+    bh = std::max(4, h / F);
+    std::vector<float> acc(size_t(bw) * bh * 3, 0.0f);
+    for (int y = 0; y < bh * F && y < h; y++)
+        for (int x = 0; x < bw * F && x < w; x++) {
+            uint32_t c = src[size_t(y) * w + x];
+            float* d = &acc[(size_t(y / F) * bw + x / F) * 3];
             for (int m = 0; m < 3; m++) d[m] += chan(c, 16 - 8 * m) / (F * F);
         }
     for (int pass = 0; pass < 3; pass++) {   // 3x3 box, three times
-        std::vector<float> src = acc;
-        for (int y = 0; y < blur.h; y++)
-            for (int x = 0; x < blur.w; x++)
+        std::vector<float> from = acc;
+        for (int y = 0; y < bh; y++)
+            for (int x = 0; x < bw; x++)
                 for (int m = 0; m < 3; m++) {
                     float sum = 0;
                     for (int dy = -1; dy <= 1; dy++)
                         for (int dx = -1; dx <= 1; dx++) {
-                            int xx = std::clamp(x + dx, 0, blur.w - 1), yy = std::clamp(y + dy, 0, blur.h - 1);
-                            sum += src[(size_t(yy) * blur.w + xx) * 3 + m];
+                            int xx = std::clamp(x + dx, 0, bw - 1), yy = std::clamp(y + dy, 0, bh - 1);
+                            sum += from[(size_t(yy) * bw + xx) * 3 + m];
                         }
-                    acc[(size_t(y) * blur.w + x) * 3 + m] = sum / 9;
+                    acc[(size_t(y) * bw + x) * 3 + m] = sum / 9;
                 }
     }
-    blur.px.resize(size_t(blur.w) * blur.h);
-    for (size_t i = 0; i < blur.px.size(); i++) {
-        uint32_t out = 0xFF000000u;
+    out.resize(size_t(bw) * bh);
+    for (size_t i = 0; i < out.size(); i++) {
+        uint32_t c = 0xFF000000u;
         for (int m = 0; m < 3; m++)
-            out |= uint32_t(std::clamp(acc[i * 3 + m], 0.0f, 1.0f) * 255.0f + 0.5f) << (16 - 8 * m);
-        blur.px[i] = out;
+            c |= uint32_t(std::clamp(acc[i * 3 + m], 0.0f, 1.0f) * 255.0f + 0.5f) << (16 - 8 * m);
+        out[i] = c;
     }
-    bg_blur_.assign(size_t(w_) * h_, 0xFF000000u);
+}
+
+// The background picture covering the window, darker towards the right where
+// the menu goes and at the bottom, with the logo; blurred for the options.
+// With the backdrop moving on the GPU (motion_), the picture is left out:
+// only the shading and the logo over transparency
+void Frontend::backdrop_background() {
+    uint32_t* keep = px_;
+    const uint32_t base = motion_ ? 0u : 0xFF000000u;
+    bg_.assign(size_t(w_) * h_, base);
+    bg_blur_.assign(size_t(w_) * h_, base);
+    if (!motion_) {
+        px_ = bg_.data();
+        picture(backdrop_, 0, 0, w_, h_, 0.0f);   // narrower windows lose its right side: the ship stays whole
+        Picture blur;
+        blur16(bg_.data(), w_, h_, blur.px, blur.w, blur.h);
+        px_ = bg_blur_.data();
+        picture(blur, 0, 0, w_, h_);
+    }
     px_ = bg_blur_.data();
-    picture(blur, 0, 0, w_, h_);
     fill(0, 0, w_, h_, 0x000000, 0.3f);
     px_ = bg_.data();
     shade_backdrop();
-    // MORE RECOMPS: each game's art in place of the picture, its logo on the left
-    for (int g = 0; g < RECOMP_COUNT; g++) {
-        RecompArt& a = recomps_[g];
-        a.bg.clear();
-        if (a.backdrop.w <= 0) continue;
-        a.bg.assign(size_t(w_) * h_, 0xFF000000u);
-        px_ = a.bg.data();
-        picture(a.backdrop, 0, 0, w_, h_, 0.25f);
-        shade_backdrop();
-        RECT r = recomp_logo_rect(g);
-        if (a.logo.w > 0 && r.right > r.left) sprite(a.logo, r.left, r.top, r.right - r.left, r.bottom - r.top);
-    }
     px_ = keep;
+}
+
+void Frontend::set_motion(bool on) {
+    if (motion_ == on) return;
+    motion_ = on;
+    bg_.clear();   // drawn again, with or without the picture
+    bg_blur_.clear();
+    dirty_ = true;
+}
+
+int Frontend::motion_backdrop() const {
+    if (!motion_ || !active() || splash() || over_game()) return -1;
+    if (screen_ == Screen::Options || screen_ == Screen::Records) return 1;
+    return 0;
+}
+
+void Frontend::backdrop_pixels(int slot, const uint32_t*& px, int& w, int& h) {
+    if (slot == 1 && backdrop_blur_.px.empty() && backdrop_.w > 0)
+        blur16(backdrop_.px.data(), backdrop_.w, backdrop_.h, backdrop_blur_.px, backdrop_blur_.w, backdrop_blur_.h);
+    const Picture& p = slot == 1 ? backdrop_blur_ : backdrop_;
+    px = p.px.empty() ? nullptr : p.px.data();
+    w = p.w;
+    h = p.h;
 }
 
 // No background picture yet (Sega Rally 2): a drawn one, so the menus keep
@@ -1663,8 +1910,30 @@ void Frontend::shade_backdrop() {
     hgrad(int(w_ * 0.66f), 0, w_, h_, 0x02040A, 0.0f, 0.5f);
     vgrad(0, int(h_ * 0.72f), w_, h_, 0x000000, 0.0f, 0.6f);
     if (logo_.w > 0) {
-        int lh = int(LOGO_H * h_), lw = lh * logo_.w / logo_.h;
-        sprite(logo_, int(w_ - LOGO_FROM_RIGHT * u_) - lw / 2, int(LOGO_TOP * h_), lw, lh);
+        // The logo picture, LOGO_W wide at most, and under it a thin amber
+        // rule and what this is, in three lines of amber typewriter capitals;
+        // all of it centred in the logo's band (Lost World's 'plate')
+        auto U = [&](float v) { return int(v * u_ + 0.5f); };
+        static const wchar_t* const TAGLINE[] = {L"AN UNOFFICIAL, FAN-MADE RECOMPILATION", L"OF THE 1998 ARCADE GAME",
+                                                 L"SEGA RALLY 2"};
+        constexpr uint32_t RULE = 0xFFA032, TAG_TEXT = 0xF0C890;   // Lost World's amber
+        const int lines = int(std::size(TAGLINE));
+        const int tag_px = U(20), tag_line = U(28), gap = U(14), rule_gap = U(14);
+        const int below = gap + rule_gap + lines * tag_line;
+        const int band0 = int(LOGO_TOP * h_), band1 = int((LOGO_TOP + LOGO_H) * h_);
+        int lw = U(LOGO_W), lh = lw * logo_.h / logo_.w;
+        const int max_h = band1 - band0 - below;   // a tall logo: as high as fits
+        if (lh > max_h && max_h > 0) lh = max_h, lw = lh * logo_.w / logo_.h;
+        const int cx = int(w_ - LOGO_PICTURE_X * u_);
+        int top = band0 + std::max(0, (band1 - band0 - (lh + below)) / 2);
+        sprite(logo_, cx - lw / 2, top, lw, lh);
+        int ty = top + lh + gap, rule_w = U(330);
+        fill(cx - rule_w / 2, ty, cx + rule_w / 2, ty + std::max(1, U(1.5f)), RULE, 0.7f);
+        ty += rule_gap;
+        for (const wchar_t* line : TAGLINE) {
+            text(MONO, tag_px, line, cx, ty, 1, {TAG_TEXT, TAG_TEXT, 0, 0, 1, std::max(1, U(2))});
+            ty += tag_line;
+        }
     } else {   // no logo picture yet: the title in letters, where the logo goes
         auto U = [&](float v) { return int(v * u_ + 0.5f); };
         int cx = int(w_ - LOGO_FROM_RIGHT * u_), top = int(LOGO_TOP * h_) + U(40);
@@ -1674,32 +1943,85 @@ void Frontend::shade_backdrop() {
     }
 }
 
-// Centred in the room left of the menu's column, at most 560 (1080p) wide;
-// empty when the window is too narrow for it
-RECT Frontend::recomp_logo_rect(int g) const {
-    const Picture& logo = recomps_[g].logo;
-    if (logo.w <= 0) return RECT{};
-    auto U = [&](float v) { return int(v * u_ + 0.5f); };
-    int room = w_ - U(110) - U(720) - U(40);
-    int lw = std::min(U(560), room - U(120));
-    if (lw < U(220)) return RECT{};
-    int lh = lw * logo.h / logo.w;
-    int x = (room - lw) / 2, y = int(0.28f * h_);
-    return RECT{x, y, x + lw, y + lh};
+double Frontend::menu_clock() const {
+    static const double fps = getenv("SR2_MENU_FPS") ? atof(getenv("SR2_MENU_FPS")) : 0;
+    return fps > 0 ? double(menu_frames_) / fps : qpc_seconds();
+}
+
+void Frontend::slide_to(Screen s, int sel) {
+    if (slide_from_ >= 0) return;
+    slide_from_ = menu_clock();
+    slide_out_ = true;
+    slide_to_ = s;
+    slide_sel_ = sel;
+    dirty_ = true;
+}
+
+void Frontend::glide(Glide& g, long key, int y, int h, int& gy, int& gh) {
+    constexpr double GLIDE = 0.13;
+    double now = menu_clock();
+    auto at = [&](float& cy, float& ch) {
+        float k = g.t0 < 0 ? 1.0f : float(std::clamp((now - g.t0) / GLIDE, 0.0, 1.0));
+        float e = 1 - (1 - k) * (1 - k) * (1 - k);
+        cy = g.from + (g.to - g.from) * e;
+        ch = g.from_h + (g.to_h - g.from_h) * e;
+        return k;
+    };
+    if (g.key != key) {
+        g = Glide{float(y), float(y), float(h), float(h), -1, key};
+    } else if (float(y) != g.to || float(h) != g.to_h) {   // a new target: from where it is now (a fast repeat retargets)
+        float cy, ch;
+        at(cy, ch);
+        g.from = cy, g.from_h = ch, g.to = float(y), g.to_h = float(h), g.t0 = now;
+    }
+    float cy, ch;
+    if (at(cy, ch) >= 1) g.t0 = -1;
+    else gliding_ = true;
+    gy = int(std::lround(cy)), gh = int(std::lround(ch));
+}
+
+void Frontend::finish_slide() {
+    if (slide_from_ < 0) return;
+    if (slide_out_) {
+        open(slide_to_);
+        selected_ = slide_sel_;
+    }
+    slide_from_ = -1;
+    slide_out_ = slide_intro_ = false;
+    dirty_ = true;
+}
+
+int Frontend::slide_offset(int i) const {
+    if (slide_from_ < 0) return 0;
+    double t = menu_clock() - slide_from_;
+    float in;
+    if (slide_out_) {
+        float x = float(std::clamp((t - SLIDE_OUT_GAP * i) / SLIDE_OUT, 0.0, 1.0));
+        in = 1 - x * x * x;
+    } else {
+        double gap = slide_intro_ ? INTRO_GAP : SLIDE_IN_GAP, len = slide_intro_ ? INTRO_IN : SLIDE_IN;
+        float x = 1 - float(std::clamp((t - gap * i) / len, 0.0, 1.0));
+        in = 1 - x * x * x * x * x;
+    }
+    return int((1 - in) * 820 * u_);   // the stripe and the longest entry off the right edge
 }
 
 // Main, Play, Extra and Debug on the backdrop: the entries in a
 // column at the right under the logo, the description under them; the
-// donation link and the records at the top left, the credits at the bottom
+// records at the top left, the credits at the bottom
 void Frontend::draw_side_menu(const std::vector<Item>& list) {
     auto U = [&](float v) { return int(v * u_ + 0.5f); };
     int w = w_, h = h_;
     int margin = U(110), col_w = U(720);
     int tx = w - margin, band0 = w - margin - col_w, band1 = w;
     int y0 = int((LOGO_TOP + LOGO_H) * h_) + U(36);
-    const wchar_t* sub = screen_ == Screen::More ? L"MORE RECOMPS BY SNICOLAST" : screen_ == Screen::Debug ? L"DEBUG:  PRACTICE RACE" : nullptr;
+    if (screen_ == Screen::Pause) {   // what this is, over the entries
+        text(TITLE, U(64), L"PAUSED", tx, y0 - U(6), 2, {GOLD_TOP, GOLD_BOTTOM, EDGE, U(3), 1, U(4)});
+        y0 += U(84);
+    }
+    const wchar_t* sub = screen_ == Screen::Debug ? L"DEBUG:  PRACTICE RACE" : nullptr;
     if (sub) {
-        text(MONO, U(24), sub, tx, y0, 2, screen_ == Screen::Debug ? Style{0xFF8A7A, 0xD8402E} : Style{0x9ED8FF, 0x6AB8F0});
+        text(MONO, U(24), sub, tx, y0, 2, Style{0xFF8A7A, 0xD8402E});
         y0 += U(50);
     }
     if (screen_ == Screen::Main) {   // how far the player has got, at the top left
@@ -1722,69 +2044,91 @@ void Frontend::draw_side_menu(const std::vector<Item>& list) {
         }
     }
 
-    if (screen_ == Screen::More && !recomps_[more_game_].bg.empty()) {   // under its logo (on the backdrop)
-        RECT r = recomp_logo_rect(more_game_);
-        if (r.right > r.left)
-            text(MONO, U(22), RECOMPS[more_game_].tagline, (r.left + r.right) / 2, r.bottom + U(26), 1,
-                 {0xE8D8B0, 0xC8B080, EDGE, U(2)});
-    }
-
     // The entries share what is left of the height, the description under them
     int n = int(list.size());
     int spacing = std::clamp((h - U(310) - y0) / std::max(1, n), U(44), U(76));   // room for the description under the chosen one
     int item_px = std::min(U(58), spacing * 72 / 100);
     int y = y0;
+    const bool on_main = screen_ == Screen::Main || screen_ == Screen::Play || screen_ == Screen::Pause;
+    // ARCADE ORIGINAL's pause: its own entries (CREDIT, RESTORE ORIGINAL, BACK TO PC EDITION)
+    // smaller, under a thin rule and the group's name
+    auto minor = [&](int i) {
+        return arcade && screen_ == Screen::Pause &&
+               (list[i].id == PAUSE_CREDIT || list[i].id == PAUSE_RESTORE || list[i].id == PC_EDITION);
+    };
+    auto row_base = [&](int i) {   // the main menu: PLAY big, the others smaller under it
+        return minor(i) ? U(50) : on_main && list[i].id == PLAY ? U(104) : on_main ? U(62) : spacing;
+    };
+    auto heading_base = [&](int i) { return minor(i) && (i == 0 || !minor(i - 1)) ? U(58) : 0; };
+    // A short window (720p, 4:3): the entries, their headings and the chosen one's description
+    // closer together, down to 70%, so the column ends above the footer
+    float fit = 1;
+    {
+        int need = U(18);
+        for (int i = 0; i < n; i++) need += row_base(i) + heading_base(i);
+        if (selected_ >= 0 && selected_ < n)
+            need += U(14) + U(32) * int(wrap(ITEM, U(24), list[selected_].hint, col_w - U(20)).size());
+        int room = h - U(140) - y0;
+        if (need > room && need > 0) fit = std::max(0.7f, float(room) / float(need));
+    }
+    auto row_sp = [&](int i) { return int(float(row_base(i)) * fit); };
+    auto heading_before = [&](int i) { return int(float(heading_base(i)) * fit); };
+    const int hint_line = int(float(U(32)) * fit);
+    if (selected_ >= 0 && selected_ < n) {   // the chosen one's ribbon, gliding there from the last one
+        const Item& it = list[selected_];
+        int ty = y0 + heading_before(selected_);
+        for (int i = 0; i < selected_; i++) ty += row_sp(i) + heading_before(i);
+        int gy, gsp;
+        glide(glide_menu_, long(screen_) * 100003 + h_, ty, row_sp(selected_), gy, gsp);
+        const int off = slide_offset(selected_), ix = tx + off;
+        float a = it.enabled ? 0.85f : 0.3f;
+        int slant = gsp * 45 / 100, x0 = on_main ? ix - U(470) : band0 + U(120) + off;   // clear of the car
+        for (int yy = gy; yy < gy + gsp; yy++) {
+            int xs = x0 + (gy + gsp - yy) * slant / std::max(1, gsp);
+            fill(xs, yy, w, yy + 1, SABER, a * 0.55f);
+            hgrad(xs, yy, w, yy + 1, SABER, 0.0f, a * 0.45f);
+            fill(xs - U(30), yy, xs - U(18), yy + 1, SABER, a * 0.9f);
+        }
+        int edge = std::max(3, U(7));
+        fill(w - edge + off, gy, w + off, gy + gsp, 0xFF6A5A, it.enabled ? 1.0f : 0.5f);
+    }
     for (int i = 0; i < n; i++) {
         const Item& it = list[i];
+        const int off = slide_offset(i), ix = tx + off;   // (sliding: further right)
         bool sel = i == selected_;
-        if (sel) {   // a red band from the right edge, brighter along it
-            float a = it.enabled ? 0.85f : 0.3f;
-            hgrad(band0, y, band1, y + spacing, SABER, 0.0f, a);
-            int edge = std::max(3, U(7));
-            fill(w - edge, y, w, y + spacing, 0xFF6A5A, it.enabled ? 1.0f : 0.5f);
+        if (int hb = heading_before(i)) {   // the group's thin rule and name, as the settings page's headings
+            int lw = text(ROW_MEDIUM, U(21), L"ARCADE ORIGINAL", ix, y + hb / 2 - U(9), 2, {0xD8564A, 0xD8564A});
+            fill(ix - U(430), y + hb / 2 + U(4), ix - lw - U(16), y + hb / 2 + U(4) + std::max(1, U(1)), 0x3A4458, 1);
+            y += hb;
         }
+        const bool hero = on_main && it.id == PLAY;
+        const int sp = row_sp(i);
+        const int px = std::min(minor(i) ? U(36) : hero ? U(92) : on_main ? U(46) : item_px, sp * 80 / 100);
         bool debug_row = it.id >= DEBUG && it.id <= DEBUG_GO;   // DEBUG and its rows in red: not part of the game
         const Style st = !it.enabled ? Style{DIM, DIM, EDGE, U(2), 0.9f, U(3)}
                          : sel       ? Style{GOLD_TOP, GOLD_BOTTOM, EDGE, U(2), 1, U(3)}
                          : debug_row ? Style{0xFF8A7A, 0xD8402E, EDGE, U(2), 0.95f, U(3)}
+                         : minor(i)  ? Style{0xB4C0D0, 0x8C98AA, EDGE, U(2), 0.9f, U(3)}
                                      : Style{PALE_TOP, PALE_BOTTOM, EDGE, U(2), 0.95f, U(3)};
-        int ty = y + spacing / 2 - item_px * 55 / 100;
-        int tw = 0;
-        if (it.id == COFFEE) {   // the donation link: Buy Me a Coffee's yellow button and its cup, at the right
-            int ch = std::min(U(56), spacing - U(14)), cup = ch / 2;
-            int x1 = tx, x0 = x1 - (U(24) + cup + U(12) + measure(ITEM, U(21), COFFEE_LABEL) + U(28));
-            int cy0 = y + (spacing - ch) / 2;
-            if (sel)   // chosen: a ring round it, and brighter
-                pill(x0 - U(5), cy0 - U(5), x1 + U(5), cy0 + ch + U(5), SABER, 1);
-            pill(x0, cy0, x1, cy0 + ch, sel ? 0xFFE94D : 0xFFDD00, sel ? 1.0f : 0.9f);
-            // A takeaway cup: the lid, the body narrowing to the bottom, a yellow sleeve round its middle
-            int cx = x0 + U(24) + cup / 2, cy = cy0 + (ch - cup) / 2;
-            pill(cx - cup / 2, cy, cx + cup / 2, cy + cup * 22 / 100, COFFEE_INK, 1);
-            for (int yy = cy + cup * 26 / 100; yy < cy + cup; yy++) {
-                int half = cup * 42 / 100 - (yy - cy) * 12 / 100, edge = std::max(1, U(2));
-                fill(cx - half, yy, cx + half, yy + 1, COFFEE_INK, 1);
-                if (yy >= cy + cup * 48 / 100 && yy < cy + cup * 72 / 100)
-                    fill(cx - half + edge, yy, cx + half - edge, yy + 1, 0xFFDD00, 1);
-            }
-            text(ITEM, U(21), COFFEE_LABEL, x0 + U(24) + cup + U(12), cy0 + ch / 2 - U(13), 0, {COFFEE_INK, COFFEE_INK});
-        } else {
-            tw = text(TITLE, item_px, it.label, tx, ty, 2, st);
-        }
-        if (!it.value.empty() && screen_ == Screen::Debug) {   // DEBUG's choices: between arrows, left of the name
-            int vx = tx - tw - U(40), vy = y + spacing / 2;
+        int ty = y + sp / 2 - px * 75 / 100;   // the capitals centred in the row (TITLE: they start 0.42 down, 0.67 high)
+        int tw = text(TITLE, px, it.label, ix, ty, 2, st);
+        if (sel && on_main && it.enabled && !gliding_)   // a chevron before the chosen one, once the ribbon is there
+            triangle(ix - tw - U(28), y + sp / 2, U(22), +1, 0xFFE08A, 0.95f);
+        if (!it.value.empty() && (screen_ == Screen::Debug || it.id == PAUSE_CREDIT)) {   // choices: between arrows, left of the name
+            int vx = ix - tw - U(40), vy = y + sp / 2;
             triangle(vx, vy, U(18), +1, sel ? 0xFFE08A : 0xB0B8C8, 0.9f);
             int vw = text(ITEM, U(30), it.value, vx - U(22), vy - U(19), 2, {GOLD_TOP, GOLD_BOTTOM, EDGE, U(2)});
             triangle(vx - U(44) - vw, vy, U(18), -1, sel ? 0xFFE08A : 0xB0B8C8, 0.9f);
         } else if (!it.value.empty())   // e.g. COMING SOON
-            text(MONO, U(20), it.value, tx - tw - U(28), y + spacing / 2 - U(12), 2, {0x7FB0D8, 0x6090B8});
-        hit_.push_back({band0, y, band1, y + spacing});
-        values_.push_back({-1, 0});
-        y += spacing;
+            text(MONO, U(20), it.value, ix - tw - U(sel && on_main ? 40.0f : 28.0f), y + sp / 2 - U(12), 2, {0x7FB0D8, 0x6090B8});
+        hit_.push_back({band0, y, band1, y + sp});
+        values_.push_back({-1, 0, 0});
+        y += sp;
         if (sel) {   // its description right under it, the entries below move down
             y += U(4);
             for (const std::wstring& line : wrap(ITEM, U(24), it.hint, col_w - U(20))) {
-                text(ITEM, U(24), line, tx, y, 2, {HINT, HINT});
-                y += U(32);
+                text(ITEM, U(24), line, ix, y, 2, {HINT, HINT});
+                y += hint_line;
             }
             y += U(10);
         }
@@ -1804,10 +2148,6 @@ void Frontend::draw_side_menu(const std::vector<Item>& list) {
     // The keys at the right, each in a keycap (or the gamepad's button), ending at the right edge
     struct Key { const wchar_t *pad, *key, *what; };
     std::vector<Key> keys = {{L"A", L"ENTER", L"SELECT"}};
-    if (screen_ == Screen::More && selected_ < n && selected_ < RECOMP_COUNT) {
-        if (recomps_[selected_].exe.empty()) keys = {{L"A", L"ENTER", L"OPEN PAGE"}};
-        else keys = {{L"A", L"ENTER", L"PLAY"}, {L"Y", L"G", L"GITHUB PAGE"}};
-    }
     if (screen_ != Screen::Main) keys.push_back({L"B", L"ESC", L"BACK"});
     int kh = U(36), ky = fy + U(12) - kh / 2, x = w - U(70) + U(40);
     for (const Key& k : keys) x -= prompt_width(kh, k.pad, k.key, k.what);
@@ -1827,22 +2167,22 @@ constexpr double MENU_IN = 0.8;        // the main menu fading in after them
 
 void Frontend::skip_splash() {
     if (video_on_) {   // faded out with its sound, unless it is going anyway
-        if (skip_from_ < 0 && video_end_ < 0) skip_level_ = video_level_, skip_from_ = now_seconds();
+        if (skip_from_ < 0 && video_end_ < 0) skip_level_ = video_level_, skip_from_ = qpc_seconds();
         return;
     }
     if (skip_from_ >= 0) {   // already going: the next one goes too
         skip_next_ = true;
         return;
     }
-    double t = now_seconds() - splash_from_;
+    double t = qpc_seconds() - splash_from_;
     if (t >= SPLASH_GAP + SPLASH_IN + SPLASH_HOLD) return;   // fading out anyway
     skip_level_ = float(std::clamp((t - SPLASH_GAP) / SPLASH_IN, 0.0, 1.0));
-    skip_from_ = now_seconds();
+    skip_from_ = qpc_seconds();
 }
 
 bool Frontend::draw_splash(std::vector<uint32_t>& out) {
     if (video_on_) return draw_splash_video(out);
-    double now = now_seconds();
+    double now = qpc_seconds();
     float level = 0;   // brightness: 0 black .. 1 the picture
     for (;;) {
         double t = now - splash_from_;
@@ -1893,7 +2233,7 @@ bool Frontend::draw_splash(std::vector<uint32_t>& out) {
 // sound), its last picture faded out. Hurried: picture and sound fade out
 // together. As big as fits the window, its own background colour around it
 bool Frontend::draw_splash_video(std::vector<uint32_t>& out) {
-    double now = now_seconds(), t = now - splash_from_;
+    double now = qpc_seconds(), t = now - splash_from_;
     if (video_.failed() || (t > 5 && video_.position() <= 0)) return false;   // it will not play: to the menu
     if (video_end_ < 0 && video_.ended()) video_end_ = now;
     float level = float(std::clamp(t / SPLASH_IN, 0.0, 1.0));
@@ -1939,22 +2279,714 @@ bool Frontend::draw_splash_video(std::vector<uint32_t>& out) {
     return true;
 }
 
+// ---- The settings page ----
+
+namespace {
+constexpr uint32_t PAGE_TEXT = 0xEEF3FA, PAGE_DIM = 0x8A98AC, PAGE_FAINT = 0x56627A, PAGE_LINE = 0x3A4458;
+constexpr uint32_t GROUP_RED = 0xD8564A, VALUE = 0xE8D278, TAG = 0x26324A, TAG_TEXT = 0xAFC6E6;
+
+std::wstring title_case(const wchar_t* s) {   // DISPLAY -> Display
+    std::wstring t = s;
+    for (size_t i = 1; i < t.size(); i++)
+        if (t[i - 1] != L' ') t[i] = wchar_t(towlower(t[i]));
+    return t;
+}
+}  // namespace
+
+const std::wstring& Frontend::wheel_group(int i) const {
+    static const std::wstring none;
+    return i >= 0 && i < int(wheel_lines.size()) ? wheel_lines[size_t(i)].group : none;
+}
+
+float Frontend::wheel_fill(int i) const { return i >= 0 && i < int(wheel_lines.size()) ? wheel_lines[size_t(i)].fill : -1.0f; }
+
+void Frontend::set_bind_lines(const std::vector<WheelLine>& lines) {
+    // The keyboard's rows and the gamepads' are not as many (the keyboard steers
+    // with two of them): the row chosen stays chosen, by its name, when they change
+    bool keep = showing_controls() && lines.size() != bind_lines.size();
+    std::wstring label;
+    Id id = TABS;
+    if (keep) {
+        std::vector<Item> list = items();
+        if (selected_ >= 0 && selected_ < int(list.size())) label = list[size_t(selected_)].label, id = list[size_t(selected_)].id;
+    }
+    bind_lines = lines;
+    dirty_ = true;
+    if (!keep || id == TABS || id == BACK) return;
+    std::vector<Item> list = items();
+    int first_bind = -1;
+    for (int i = 0; i < int(list.size()); i++) {
+        if (list[size_t(i)].id == id && list[size_t(i)].label == label) {
+            selected_ = i;
+            return;
+        }
+        if (first_bind < 0 && list[size_t(i)].id == OPT_BIND) first_bind = i;
+    }
+    if (id == OPT_BIND && first_bind >= 0) selected_ = first_bind;   // (STEER LEFT / RIGHT: the gamepad's first)
+}
+
+const Frontend::WheelLine* Frontend::line_of(const Item& it) const {
+    const std::vector<WheelLine>* v = it.id == OPT_WHEEL ? &wheel_lines : it.id == OPT_BIND ? &bind_lines : nullptr;
+    return v && it.index >= 0 && it.index < int(v->size()) ? &(*v)[size_t(it.index)] : nullptr;
+}
+
+// ---- Smooth shapes for the WHEEL tab, a pixel at a time over their box ----
+
+namespace {
+template <class Cover, class Put>
+void shape_px(int x0, int y0, int x1, int y1, int w, int h, Cover&& cover, Put&& put) {
+    for (int py = std::max(y0, 0); py < std::min(y1, h); py++)
+        for (int px = std::max(x0, 0); px < std::min(x1, w); px++) {
+            float c = cover(float(px) + 0.5f, float(py) + 0.5f);
+            if (c > 0) put(px, py, c);
+        }
+}
+}  // namespace
+
+void Frontend::aa_ring(float cx, float cy, float r0, float r1, uint32_t rgb, float alpha) {
+    shape_px(int(cx - r1) - 1, int(cy - r1) - 1, int(cx + r1) + 2, int(cy + r1) + 2, w_, h_,
+             [&](float px, float py) {
+                 float d = std::hypot(px - cx, py - cy);
+                 return std::clamp(d - r0 + 0.5f, 0.0f, 1.0f) * std::clamp(r1 - d + 0.5f, 0.0f, 1.0f);
+             },
+             [&](int x, int y, float c) { blend(x, y, rgb, c * alpha); });
+}
+
+void Frontend::aa_line(float ax, float ay, float bx, float by, float half, uint32_t rgb, float alpha) {
+    float vx = bx - ax, vy = by - ay, len2 = std::max(vx * vx + vy * vy, 1e-4f);
+    shape_px(int(std::min(ax, bx) - half) - 1, int(std::min(ay, by) - half) - 1, int(std::max(ax, bx) + half) + 2,
+             int(std::max(ay, by) + half) + 2, w_, h_,
+             [&](float px, float py) {
+                 float t = std::clamp(((px - ax) * vx + (py - ay) * vy) / len2, 0.0f, 1.0f);
+                 return std::clamp(half - std::hypot(px - ax - t * vx, py - ay - t * vy) + 0.5f, 0.0f, 1.0f);
+             },
+             [&](int x, int y, float c) { blend(x, y, rgb, c * alpha); });
+}
+
+void Frontend::aa_arc(float cx, float cy, float r, float half, float a0, float a1, uint32_t rgb, float alpha) {
+    if (a1 <= a0) return;
+    const float two_pi = 6.2831853f;
+    shape_px(int(cx - r - half) - 1, int(cy - r - half) - 1, int(cx + r + half) + 2, int(cy + r + half) + 2, w_, h_,
+             [&](float px, float py) {
+                 float d = std::hypot(px - cx, py - cy);
+                 float c = std::clamp(half - std::fabs(d - r) + 0.5f, 0.0f, 1.0f);
+                 if (c <= 0) return 0.0f;
+                 float a = std::atan2(px - cx, cy - py);   // 0 up, clockwise
+                 while (a < a0) a += two_pi;
+                 while (a > a0 + two_pi) a -= two_pi;
+                 return a <= a1 ? c : 0.0f;
+             },
+             [&](int x, int y, float c) { blend(x, y, rgb, c * alpha); });
+}
+
+// A steering wheel: rim, three spokes, the hub and the red mark at the top, turned deg (right +)
+void Frontend::draw_wheel_icon(float cx, float cy, float r, float deg, float dim) {
+    if (const WheelArt& art = wheel_art(); art.wheel.ok()) {   // res/wheel/wheel.png: its rim's outside 228 of its 256
+        float d = r * 2.0f * 256.0f / 228.0f;
+        sprite_turned(art.wheel, cx, cy, d, d, 0.5f, 0.5f, deg, dim);
+        return;
+    }
+    const float a = deg * 3.14159265f / 180.0f, rim = r * 0.13f;
+    auto at = [&](float ang, float rad, float& ox, float& oy) {   // ang 0 = up, clockwise
+        ox = cx + std::sin(ang + a) * rad;
+        oy = cy - std::cos(ang + a) * rad;
+    };
+    aa_ring(cx, cy, r - rim, r, 0xE8EEF6, 0.95f * dim);
+    for (float sp : {1.5707964f, -1.5707964f, 3.14159265f}) {   // right, left, bottom
+        float ox, oy;
+        at(sp, r - rim * 0.5f, ox, oy);
+        aa_line(cx, cy, ox, oy, r * (sp > 3 ? 0.07f : 0.09f), 0xC8D2E0, 0.9f * dim);
+    }
+    aa_ring(cx, cy, -1.0f, r * 0.27f, 0x1A2230, 1);
+    aa_ring(cx, cy, r * 0.22f, r * 0.27f, 0xC8D2E0, 0.9f * dim);
+    float ax, ay, bx, by;
+    at(0, r - rim + r * 0.06f, ax, ay);   // (the round ends inside the rim)
+    at(0, r - r * 0.06f, bx, by);
+    aa_line(ax, ay, bx, by, r * 0.06f, SABER, dim);
+}
+
+// The WHEEL tab's panel, at its bottom: the wheel turning as the real one
+// does (the arcade's 270 degrees of lock, so with WHEEL ROTATION right it
+// matches the wheel in your hands) and the pedals filling as they go down.
+// Returns its top
+int Frontend::draw_wheel_live(int x, int inner, int y_bottom) {
+    auto U = [&](float v) { return int(v * u_ + 0.5f); };
+    const WheelLive& lv = wheel_live;
+    const float dim = lv.on ? 1.0f : 0.35f;
+    const WheelArt& art = wheel_art();
+    const bool pics = art.gas.ok() && art.brake.ok() && art.handbrake.ok() && art.handbrake_base.ok();
+    const int bar_w = U(34), col = pics ? U(74) : U(60), pedals_w = 2 * col + bar_w;   // (col: from one pedal to the next)
+    const int label_h = U(30);
+    const int r = std::max(U(40), std::min(U(112), (inner - pedals_w - U(48)) / 2));
+    const int y_top = y_bottom - 2 * r - label_h;
+    const int gap = U(56), x_left = x + std::max(0, (inner - (2 * r + gap + pedals_w)) / 2);   // the two together, centred
+    const int cx = x_left + r, cy = y_top + r;
+    const float deg = std::clamp(lv.steer, -1.0f, 1.0f) * 135.0f;
+    draw_wheel_icon(float(cx), float(cy), float(r), deg, dim);
+    if (lv.gear >= 0)   // an H shifter's gear in the hub
+        text(TITLE, U(30), lv.gear == 0 ? L"N" : std::to_wstring(lv.gear), cx, cy - U(17), 1, {0xFFFFFF, 0xE2EAF4});
+    int ideg = int(std::lround(std::fabs(deg)));
+    std::wstring turn = !lv.on ? L"NO WHEEL" : ideg == 0 ? L"0°" : (deg < 0 ? L"L " : L"R ") + std::to_wstring(ideg) + L"°";
+    text(ROW_MEDIUM, U(20), turn, cx, y_bottom - U(22), 1, {lv.on ? 0xD6DEEAu : PAGE_FAINT, lv.on ? 0xD6DEEAu : PAGE_FAINT});
+    // The pedals as in a car, brake and accelerator, then the hand brake, at the right
+    const int px0 = std::min(x + inner - pedals_w, x_left + 2 * r + gap), ptop = y_top + U(24), pbot = y_bottom - label_h;
+    struct Pedal { const wchar_t* name; float v; uint32_t c; };
+    const Pedal pedals[3] = {{L"BRAKE", lv.brake, SABER}, {L"GAS", lv.gas, 0x4CC264}, {L"HAND", lv.handbrake, 0xF5C400}};
+    if (pics) {
+        const float ph = float(pbot - ptop - U(4)), pw = ph / 2;   // (their plates fit the columns)
+        for (int i = 0; i < 3; i++) {
+            const float v = std::clamp(pedals[i].v, 0.0f, 1.0f), mx = float(px0 + i * col + bar_w / 2);
+            const float top = float(pbot) - ph - U(2);
+            if (i == 2) {   // the lever over about its pivot (outwards, clear of the pedals), its shaft yellow when pulled (not the grip, 0..0.43)
+                sprite_turned(art.handbrake_base, mx, top + ph / 2, pw, ph, 0.5f, 0.5f, 0, dim);
+                sprite_turned(art.handbrake, mx, top + ph * 0.875f, pw, ph, 0.5f, 0.875f, 22.0f * v, dim, pedals[i].c, 0.43f,
+                              v > 0.5f ? 0.45f : 0.0f);
+            } else {   // down a little, the plate filling with its colour (gas.png's plate 110..382 of 400, brake.png's 200..372)
+                const float p0 = i == 0 ? 0.5f : 0.275f, p1 = i == 0 ? 0.93f : 0.955f;
+                sprite_turned(i == 0 ? art.brake : art.gas, mx, top + ph / 2 + v * U(10), pw, ph, 0.5f, 0.5f, 0, dim,
+                              pedals[i].c, v > 0.005f ? p1 - (p1 - p0) * v : 2.0f, 0.6f);
+            }
+            int pct = int(std::lround(v * 100));
+            text(MONO, U(16), std::to_wstring(pct), int(mx), ptop - U(22), 1, {0xD6DEEA, 0xD6DEEA});
+            text(ROW_MEDIUM, U(18), pedals[i].name, int(mx), y_bottom - U(22), 1, {PAGE_DIM, PAGE_DIM});
+        }
+        return y_top - U(24);
+    }
+    for (int i = 0; i < 3; i++) {
+        int bx0 = px0 + i * col, bx1 = bx0 + bar_w;
+        int fy = pbot - int(float(pbot - ptop) * std::clamp(pedals[i].v, 0.0f, 1.0f) + 0.5f);
+        fill(bx0, ptop, bx1, pbot, 0x2A3240, dim);
+        fill(bx0, fy, bx1, pbot, pedals[i].c, dim);
+        frame(bx0, ptop, bx1, pbot, std::max(1, U(1)), 0x8A98AC, 0.8f * dim);
+        int pct = int(std::lround(std::clamp(pedals[i].v, 0.0f, 1.0f) * 100));
+        text(MONO, U(16), std::to_wstring(pct), (bx0 + bx1) / 2, ptop - U(22), 1, {0xD6DEEA, 0xD6DEEA});
+        text(ROW_MEDIUM, U(18), pedals[i].name, (bx0 + bx1) / 2, y_bottom - U(22), 1, {PAGE_DIM, PAGE_DIM});
+    }
+    return y_top - U(24);   // (the numbers over the pedals)
+}
+
+// A control listening, or WHEEL SETUP: a window over the page, with a
+// picture of what to do (moving), what moves now, and the choices
+void Frontend::draw_wheel_prompt() {
+    auto U = [&](float v) { return int(v * u_ + 0.5f); };
+    auto Uf = [&](float v) { return v * u_; };
+    const WheelPromptView& p = wheel_prompt;
+    const double t = menu_clock();
+    const bool setup = p.kicker == L"WHEEL SETUP";
+    const bool done = !p.done.empty();
+    const bool listening = !done && p.icon >= 1 && p.icon <= 6;   // (TURN_RIGHT .. GEAR: something to move)
+    fill(0, 0, w_, h_, 0x000000, 0.72f);
+    const int cw = std::min(w_ - 2 * U(60), U(1180)), ch = std::min(h_ - 2 * U(50), U(640));
+    const int x0 = (w_ - cw) / 2, y0 = (h_ - ch) / 2, x1 = x0 + cw, y1 = y0 + ch, pad = U(44);
+    fill(x0, y0, x1, y1, PANEL, 0.97f);
+    frame(x0, y0, x1, y1, std::max(1, U(1)), PAGE_LINE, 1);
+    fill(x0, y0, x1, y0 + std::max(3, U(6)), SABER, 1);
+    if (done && p.done_age >= 0)   // just taken: a green flash, fading
+        fill(x0, y0 + std::max(3, U(6)), x1, y1, 0x2E9E4A, std::clamp(0.3f - p.done_age * 0.45f, 0.0f, 0.3f));
+
+    // Where this is: the kicker, the setup's steps as segments, the title
+    int y = y0 + U(30);
+    std::wstring kick = p.kicker;
+    if (p.steps > 0) kick += L"   ·   STEP " + std::to_wstring(p.step) + L" OF " + std::to_wstring(p.steps);
+    text(ROW_MEDIUM, U(22), kick, x0 + pad, y, 0, {GROUP_RED, GROUP_RED});
+    if (p.steps > 0) {
+        int sw = U(30), sg = U(6), sx = x1 - pad - p.steps * sw - (p.steps - 1) * sg;
+        for (int i = 0; i < p.steps; i++) {
+            uint32_t c = i < p.step - 1 ? SABER : i == p.step - 1 ? GOLD_BOTTOM : 0x2A3240;
+            fill(sx + i * (sw + sg), y + U(9), sx + i * (sw + sg) + sw, y + U(15), c, 1);
+        }
+    }
+    y += U(36);
+    text(TITLE, U(64), p.title, x0 + pad, y, 0, {0xFFFFFF, 0xE2EAF4, 0, 0, 1, U(3)});
+
+    // The picture, at the left
+    const int foot_h = U(96);
+    const int box = std::max(U(120), std::min(U(330), y1 - foot_h - (y0 + U(170)) - U(10)));
+    const int bx = x0 + pad, by = y0 + U(170);
+    const float icx = float(bx + box / 2), icy = float(by + box / 2), R = float(box) * 0.36f;
+    const float ph = float(std::fmod(t, 2.4) / 2.4);   // the animations' phase, 0..1
+    auto ease = [](float v) { v = std::clamp(v, 0.0f, 1.0f); return v * v * (3 - 2 * v); };
+    auto loop = [&](float v) { return v < 0.45f ? ease(v / 0.45f) : v < 0.75f ? 1.0f : 1.0f - ease((v - 0.75f) / 0.25f); };
+    auto arrow_arc = [&](float cx, float cy, float r, float a0, float a1, uint32_t c, float alpha) {   // clockwise
+        float half = Uf(4.5f);
+        aa_arc(cx, cy, r, half, a0, a1, c, alpha);
+        float tx = cx + std::sin(a1) * r, ty = cy - std::cos(a1) * r;   // its head
+        float dx = std::cos(a1), dy = std::sin(a1), nx = std::sin(a1), ny = -std::cos(a1), L = Uf(16);
+        float hx = tx + dx * Uf(6), hy = ty + dy * Uf(6);
+        aa_line(hx, hy, hx - dx * L + nx * L * 0.7f, hy - dy * L + ny * L * 0.7f, half, c, alpha);
+        aa_line(hx, hy, hx - dx * L - nx * L * 0.7f, hy - dy * L - ny * L * 0.7f, half, c, alpha);
+    };
+    switch (p.icon) {
+    case 0:   // INTRO: the wheel, rocking gently
+        draw_wheel_icon(icx, icy, R, float(std::sin(t * 1.7) * 22.0), 1);
+        break;
+    case 1:   // TURN_RIGHT
+    case 7:   // FORCE
+        draw_wheel_icon(icx, icy, R, p.icon == 1 ? loop(ph) * 75.0f : float(std::sin(t * 9.0) * (p.time_left >= 0 ? 0 : 6)), 1);
+        arrow_arc(icx, icy, R * 1.22f, -0.55f, 0.65f, GOLD_BOTTOM, 0.95f);
+        break;
+    case 2: {   // QUARTER_TURN: to the mark at 3 o'clock, and the hold filling round
+        float tx0 = icx + R * 1.1f, tx1 = icx + R * 1.32f;
+        aa_line(tx0, icy, tx1, icy, Uf(4), GOLD_BOTTOM, 1);
+        text(ROW_MEDIUM, U(24), L"90°", int(tx1) + U(10), int(icy) - U(14), 0, {GOLD_TOP, GOLD_BOTTOM});
+        draw_wheel_icon(icx, icy, R, loop(ph) * 90.0f, 0.35f + 0.65f * (p.progress > 0 ? 1.0f : 0.6f));
+        aa_arc(icx, icy, R * 1.2f, Uf(3), 0, 6.2831853f, 0x2A3240, 1);
+        aa_arc(icx, icy, R * 1.2f, Uf(4), 0, p.progress * 6.2831853f, 0x4CC264, 1);
+        break;
+    }
+    case 3: {   // PEDAL: the plate going down, filling as the real one moves
+        if (const WheelArt& art = wheel_art(); art.gas.ok() && art.brake.ok()) {
+            const bool gas = p.glyph == L"GAS";
+            const float h = R * 2.3f, p0 = gas ? 0.275f : 0.5f, p1 = gas ? 0.955f : 0.93f;
+            sprite_turned(gas ? art.gas : art.brake, icx, icy - R * 0.1f + loop(ph) * R * 0.12f, h / 2, h, 0.5f, 0.5f, 0, 1,
+                          gas ? 0x4CC264 : SABER, p.progress > 0.005f ? p1 - (p1 - p0) * p.progress : 2.0f, 0.6f);
+            triangle(int(icx), int(icy - h * 0.55f) + int(loop(ph) * Uf(12)), U(26), 2, GOLD_BOTTOM, 0.95f);
+            text(ROW_MEDIUM, U(22), p.glyph, int(icx), int(icy + R * 1.2f), 1, {PAGE_TEXT, PAGE_TEXT});
+            break;
+        }
+        float pw = R * 0.85f, phh = R * 1.55f, top = icy - phh / 2 + loop(ph) * R * 0.18f;
+        int l = int(icx - pw / 2), r = int(icx + pw / 2), tp = int(top), bt = int(top + phh);
+        fill(l, tp, r, bt, 0x2A3240, 1);
+        uint32_t c = p.glyph == L"GAS" ? 0x4CC264 : SABER;
+        fill(l, bt - int(float(bt - tp) * p.progress), r, bt, c, 1);
+        for (int g = 1; g < 5; g++) fill(l + U(8), tp + (bt - tp) * g / 5, r - U(8), tp + (bt - tp) * g / 5 + std::max(1, U(2)), 0x000000, 0.35f);
+        frame(l, tp, r, bt, std::max(1, U(2)), 0xC8D2E0, 0.9f);
+        aa_line(icx, float(bt), icx, icy + R * 1.15f, Uf(5), 0x8A98AC, 1);   // its arm
+        triangle(int(icx), tp - U(30) + int(loop(ph) * Uf(12)), U(26), 2, GOLD_BOTTOM, 0.95f);
+        text(ROW_MEDIUM, U(22), p.glyph, int(icx), int(icy + R * 1.2f), 1, {PAGE_TEXT, PAGE_TEXT});
+        break;
+    }
+    case 4: {   // HAND_BRAKE: the lever pulled up and back
+        if (const WheelArt& art = wheel_art(); art.handbrake.ok() && art.handbrake_base.ok()) {
+            const float h = R * 2.3f, pvx = icx, pvy = icy - R * 0.1f + h * 0.375f;
+            sprite_turned(art.handbrake_base, icx, icy - R * 0.1f, h / 2, h, 0.5f, 0.5f, 0, 1);
+            sprite_turned(art.handbrake, pvx, pvy, h / 2, h, 0.5f, 0.875f, 22.0f * loop(ph), 1, 0xF5C400, 0.43f, 0.45f * p.progress);
+            break;
+        }
+        float pvx = icx + R * 0.5f, pvy = icy + R * 0.75f, len = R * 1.45f;
+        float a = (-0.35f - loop(ph) * 0.55f);   // from upright-ish, back towards you
+        float ex = pvx + std::sin(a) * len, ey = pvy - std::cos(a) * len;
+        fill(int(pvx - R * 0.6f), int(pvy), int(pvx + R * 0.35f), int(pvy + Uf(14)), 0x8A98AC, 1);
+        aa_line(pvx, pvy, ex, ey, Uf(9), 0xC8D2E0, 1);
+        aa_ring(ex, ey, -1, Uf(18), SABER, 1);
+        aa_ring(pvx, pvy, -1, Uf(9), 0x8A98AC, 1);
+        arrow_arc(pvx, pvy, len * 1.12f, -0.95f, -0.35f, GOLD_BOTTOM, 0.5f + 0.5f * p.progress);
+        break;
+    }
+    case 5: {   // BUTTON: what is on it, a ring going out
+        float br = R * 0.62f, out = br + ph * R * 0.5f;
+        aa_ring(icx, icy, out - Uf(3), out, GOLD_BOTTOM, 1.0f - ph);
+        aa_ring(icx, icy, -1, br, 0x2A3240, 1);
+        aa_ring(icx, icy, br - Uf(5), br, 0xC8D2E0, 0.95f);
+        int gp = p.glyph.size() <= 1 ? U(72) : p.glyph.size() <= 4 ? U(40) : U(32);
+        text(TITLE, gp, p.glyph, int(icx), int(icy) - gp * 6 / 10, 1, {0xFFFFFF, 0xE2EAF4});
+        break;
+    }
+    case 6: {   // GEAR: the H gate, the knob going to the gear asked
+        float xl = icx - R * 0.55f, xr = icx + R * 0.55f, yt = icy - R * 0.8f, yb = icy + R * 0.8f, xm = (xl + xr) / 2;
+        uint32_t gate = 0x5A6476;
+        aa_line(xl, yt, xl, yb, Uf(6), gate, 1);
+        aa_line(xr, yt, xr, yb, Uf(6), gate, 1);
+        aa_line(xl, icy, xr, icy, Uf(6), gate, 1);
+        const float gx[4] = {xl, xl, xr, xr}, gy[4] = {yt, yb, yt, yb};
+        for (int g = 0; g < 4; g++) {
+            bool want = g + 1 == p.gear;
+            aa_ring(gx[g], gy[g], -1, Uf(24), want ? GOLD_BOTTOM : 0x2A3240, 1);
+            text(TITLE, U(30), std::to_wstring(g + 1), int(gx[g]), int(gy[g]) - U(18), 1,
+                 want ? Style{0x1A1200, 0x1A1200} : Style{PAGE_TEXT, PAGE_TEXT});
+        }
+        int g = std::clamp(p.gear, 1, 4) - 1;   // the knob: across, then up or down
+        float k = loop(ph), kx = xm + (gx[g] - xm) * std::min(k * 2, 1.0f), ky = icy + (gy[g] - icy) * std::max(k * 2 - 1, 0.0f);
+        aa_ring(kx, ky, -1, Uf(14), SABER, 0.95f);
+        break;
+    }
+    case 8:   // DONE
+        aa_ring(icx, icy, -1, R * 0.75f, 0x2E9E4A, 1);
+        aa_line(icx - R * 0.32f, icy + R * 0.02f, icx - R * 0.08f, icy + R * 0.26f, Uf(10), 0xFFFFFF, 1);
+        aa_line(icx - R * 0.08f, icy + R * 0.26f, icx + R * 0.36f, icy - R * 0.22f, Uf(10), 0xFFFFFF, 1);
+        break;
+    }
+
+    // What to do, at the right
+    const int tx = bx + box + U(56), tw = x1 - pad - tx;
+    int ty = by;
+    const Style gold{GOLD_TOP, GOLD_BOTTOM, 0, 0, 1, U(2)};
+    if (done) {
+        float cy = float(ty + U(26));
+        aa_ring(float(tx) + Uf(22), cy, -1, Uf(22), 0x2E9E4A, 1);
+        aa_line(float(tx) + Uf(12), cy, float(tx) + Uf(19), cy + Uf(8), Uf(3), 0xFFFFFF, 1);
+        aa_line(float(tx) + Uf(19), cy + Uf(8), float(tx) + Uf(33), cy - Uf(8), Uf(3), 0xFFFFFF, 1);
+        for (const std::wstring& line : wrap(ROW, U(38), p.done, tw - U(64))) {
+            text(ROW, U(38), line, tx + U(64), ty, 0, {0x9CF5B4, 0x4CC264, 0, 0, 1, U(2)});
+            ty += U(50);
+        }
+        ty += U(10);
+        for (const std::wstring& line : wrap(BODY, U(24), p.note, tw)) {
+            text(BODY, U(24), line, tx, ty, 0, {0xD6DEEA, 0xD6DEEA});
+            ty += U(34);
+        }
+    } else {
+        for (const std::wstring& line : wrap(ROW, U(38), p.action, tw)) {
+            text(ROW, U(38), line, tx, ty, 0, gold);
+            ty += U(50);
+        }
+        ty += U(8);
+        for (const std::wstring& line : wrap(BODY, U(24), p.hint, tw)) {
+            text(BODY, U(24), line, tx, ty, 0, {0xD6DEEA, 0xD6DEEA});
+            ty += U(34);
+        }
+        ty += U(10);
+        {   // the devices found, or what the setup set: in two columns, smaller, when one does not hold them
+            int room = std::max(1, (y1 - foot_h - U(10) - ty) / U(32));
+            bool two = int(p.lines.size()) > room;
+            int lh = two ? U(28) : U(32), lpx = two ? U(19) : U(22), per = two ? std::max(1, std::min((y1 - foot_h - U(10) - ty) / lh, (int(p.lines.size()) + 1) / 2)) : room;   // halves
+            int colw = two ? (tw - U(24)) / 2 : tw;
+            for (size_t i = 0; i < p.lines.size() && int(i) < per * (two ? 2 : 1); i++) {
+                int lx = tx + (int(i) >= per ? colw + U(24) : 0), ly = ty + (int(i) % per) * lh;
+                fill(lx, ly + U(11), lx + U(7), ly + U(18), SABER, 1);
+                std::wstring line = p.lines[i];
+                if (measure(BODY, lpx, line) > colw - U(20)) {   // too long: cut, with "..."
+                    while (line.size() > 4 && measure(BODY, lpx, line + L"...") > colw - U(20)) line.pop_back();
+                    while (!line.empty() && line.back() == L' ') line.pop_back();
+                    line += L"...";
+                }
+                text(BODY, lpx, line, lx + U(18), ly, 0, {PAGE_TEXT, PAGE_TEXT});
+            }
+        }
+        if (listening) {   // what moves now, and how far towards being taken
+            int my = y1 - foot_h - U(70);
+            std::wstring what = !p.moving.empty() ? p.moving : p.icon == 2 ? L"HOLD IT STILL" : L"WAITING FOR IT TO MOVE...";
+            text(ROW_MEDIUM, U(18), what, tx, my, 0, {PAGE_DIM, PAGE_DIM});
+            int mb = my + U(30);
+            fill(tx, mb, x1 - pad, mb + U(12), 0x2A3240, 1);
+            fill(tx, mb, tx + int(float(x1 - pad - tx) * p.progress), mb + U(12), mix(SABER, 0x4CC264, p.progress), 1);
+        }
+    }
+
+    // The countdown, along the window's bottom edge
+    if (p.time_left >= 0) fill(x0, y1 - U(5), x0 + int(float(cw) * p.time_left), y1, GOLD_BOTTOM, 0.9f);
+
+    // The keys at the left, the choices at the right
+    const int fy = y1 - foot_h + U(26);
+    fill(x0 + pad, fy - U(18), x1 - pad, fy - U(18) + std::max(1, U(1)), PAGE_LINE, 1);
+    int kx = x0 + pad, kh = U(32);
+    prompt(kx, fy + U(7), kh, p.cancel_button.empty() ? L"B" : p.cancel_button.c_str(), L"ESC", setup ? L"STOP SETUP" : L"CANCEL");
+    if (!p.choices.empty()) prompt(kx, fy + U(7), kh, L"A", L"ENTER", L"CHOOSE");
+    prompt_choices_.assign(p.choices.size(), RECT{});
+    int cx = x1 - pad;
+    for (int i = int(p.choices.size()) - 1; i >= 0; i--) {
+        int bw = measure(ROW, U(26), p.choices[size_t(i)]) + U(48);
+        RECT r{cx - bw, fy, cx, fy + U(46)};
+        bool sel = i == wheel_choice;
+        fill(r.left, r.top, r.right, r.bottom, sel ? GOLD_BOTTOM : 0x1A2230, 1);
+        frame(r.left, r.top, r.right, r.bottom, std::max(1, U(1)), sel ? GOLD_TOP : PAGE_LINE, 1);
+        text(ROW, U(26), p.choices[size_t(i)], (r.left + r.right) / 2, r.top + U(8), 1,
+             sel ? Style{0x1A1200, 0x1A1200} : Style{PAGE_TEXT, PAGE_TEXT});
+        prompt_choices_[size_t(i)] = r;
+        cx = r.left - U(16);
+    }
+}
+
+void Frontend::draw_options_page(const std::vector<Item>& list, bool over_game) {
+    auto U = [&](float v) { return int(v * u_ + 0.5f); };
+    const int w = w_, h = h_, n = int(list.size());
+    const int n_opts = n - 2;   // list: the sections, the options of the open one, BACK
+    const bool rec = screen_ == Screen::Records;   // the records: their sections and rows, nothing to change
+    const int tabs = rec ? RECORD_TAB_COUNT : TAB_COUNT;
+    auto tab_label = [&](int t) { return rec ? RECORD_TAB_NAMES[t] : TAB_NAMES[t]; };
+    auto tab_about = [&](int t) { return rec ? RECORD_TAB_ABOUT[t] : TAB_ABOUT[t]; };
+    // The page darkens what is behind it: the blurred backdrop, or the paused game
+    // (the game's HUD must not show through: blurred under the pause settings, else nearly black)
+    fill(0, 0, w, h, over_game && !pause_blur ? 0x000000 : PANEL, over_game && !pause_blur ? 0.9f : 0.6f);
+
+    // Columns: as wide as the window allows, up to 1728 units (1080p: a 96 pixel margin)
+    const int mx = std::max(U(56), (w - U(1728)) / 2);
+    const int wide_u = int(float(w - 2 * mx) / u_);   // the content's width in 1080p units
+    const bool wide = wide_u >= 1600;
+    const int rail_w = U(wide ? 300.0f : 250.0f), gap = U(wide ? 48.0f : 32.0f), panel_w = U(wide ? 600.0f : 430.0f);
+    const int rail_x = mx, rows_x0 = mx + rail_w + gap, panel_x0 = w - mx - panel_w, rows_x1 = panel_x0 - gap;
+    const int top = U(196), bottom = h - U(100);   // the columns, between the title and the key help
+
+    // Title, the red mark under it, where this is, and the logo at the top right
+    text(TITLE, U(80), rec ? L"RECORDS" : over_game ? L"SETTINGS" : L"OPTIONS", mx, U(34), 0, {0xFFFFFF, 0xE2EAF4, 0, 0, 1, U(3)});
+    fill(mx + U(2), U(134), mx + U(74), U(139), SABER, 1);
+    std::wstring crumb = std::wstring(over_game ? L"Pause" : L"Main menu") + L"  ›  " +
+                         (rec ? L"Records" : over_game ? L"Settings" : L"Options") + L"  ›  " + title_case(tab_label(tab_));
+    text(ROW_MEDIUM, U(24), crumb, mx + U(92), U(120), 0, {PAGE_DIM, PAGE_DIM});
+    if (logo_.w > 0) {
+        int lw = U(wide ? 300.0f : 240.0f), lh = lw * logo_.h / logo_.w;
+        sprite(logo_, w - mx - lw, U(26), lw, lh);
+    }
+
+    hit_.assign(size_t(n), RECT{});
+    values_.assign(size_t(n), ValueArea{-1, 0, 0});
+
+    // The sections, one under the other; the open one with a red band
+    const int sec_h = U(92);
+    tab_rects_.clear();
+    {   // the open section's ribbon, gliding there from the last one
+        int ty = top + tab_ * sec_h;
+        int gy, gh;
+        glide(glide_tab_, (long(screen_) * 2 + long(options_from_pause_)) * 100003 + h_, ty - U(8), sec_h - U(8), gy, gh);
+        RECT r{rail_x - U(20), gy, rail_x + rail_w, gy + gh};
+        int sl = gh * 30 / 100;
+        ribbon(r.left - sl / 2, r.top, r.right, r.bottom, sl, 0.85f, 0.0f, U(10), U(8), 1);
+        if (!gliding_) triangle(rail_x + U(8), ty + U(28), U(18), +1, 0xFFE08A, 0.95f);
+    }
+    for (int t = 0; t < tabs; t++) {
+        int y = top + t * sec_h;
+        bool open_tab = t == tab_;
+        RECT r{rail_x - U(20), y - U(8), rail_x + rail_w, y + sec_h - U(16)};
+        if (open_tab) {   // (its ribbon drawn above)
+        } else if (selected_ == 0 && hovered_ == 0 && mouse_y_ >= r.top && mouse_y_ < r.bottom) {
+            hgrad(r.left, r.top, r.right, r.bottom, 0xFFFFFF, 0.08f, 0.0f);   // under the pointer
+        }
+        text(TITLE, U(44), tab_label(t), rail_x + U(26), y - U(6), 0,
+             {open_tab ? 0xFFFFFFu : PAGE_DIM, open_tab ? 0xE2EAF4u : PAGE_DIM, 0, 0, 1, U(2)});
+        text(BODY, U(17), tab_about(t), rail_x + U(28), y + U(46), 0,
+             {open_tab ? 0xD2DAE6u : PAGE_FAINT, open_tab ? 0xD2DAE6u : PAGE_FAINT});
+        tab_rects_.push_back(r);
+    }
+    hit_[0] = {rail_x - U(20), top - U(8), rail_x + rail_w, top + tabs * sec_h - U(16)};
+    {   // BACK, under the sections
+        int y = top + tabs * sec_h + U(28);
+        bool sel = selected_ == n - 1;
+        RECT r{rail_x - U(20), y - U(6), rail_x + rail_w, y + U(58)};
+        if (sel) {
+            int hh = r.bottom - r.top, sl = hh * 30 / 100;
+            ribbon(r.left - sl / 2, r.top, r.right, r.bottom, sl, 0.85f, 0.0f, U(10), U(8), 1);
+        }
+        triangle(rail_x + U(20), y + U(26), U(16), -1, sel ? GOLD_BOTTOM : PAGE_DIM, 1);
+        text(TITLE, U(40), L"BACK", rail_x + U(40), y - U(2), 0,
+             sel ? Style{GOLD_TOP, GOLD_BOTTOM, 0, 0, 1, U(2)} : Style{PAGE_DIM, PAGE_DIM, 0, 0, 1, U(2)});
+        hit_[n - 1] = r;
+    }
+
+    // The options in their groups. Rows that do not fit scroll, keeping the chosen one in view
+    const int row_h = U(46), head_h = U(38), head_gap = U(10), label_px = U(30);
+    std::vector<const wchar_t*> group(size_t(std::max(0, n_opts)), nullptr);   // the heading over each row, if any
+    std::vector<const wchar_t*> group_name(size_t(std::max(0, n_opts)), L"");  // the group each row is in
+    const wchar_t* current = L"";
+    for (int k = 0; k < n_opts; k++) {
+        const wchar_t* g = rec ? RECORD_GROUPS[std::clamp(list[1 + k].index, 0, 3)] : group_of(list[1 + k].id);
+        if (rec && k > 0 && list[k].index == list[1 + k].index) g = nullptr;   // (records: a heading where the group changes)
+        if (const WheelLine* l = rec ? nullptr : line_of(list[1 + k])) {   // the WHEEL tab, CONTROLS' keys: a heading where the lines' group changes
+            const WheelLine* before = k > 0 ? line_of(list[k]) : nullptr;
+            g = before && list[k].id == list[1 + k].id && before->group == l->group ? nullptr : l->group.c_str();
+        }
+        if (g) current = group[k] = g;
+        group_name[k] = current;
+    }
+    auto height = [&](int k, bool first) {   // a row with its heading (the first one shown always has one)
+        bool head = first ? *group_name[k] != 0 : group[k] != nullptr;
+        return row_h + (head ? head_h + (first ? 0 : head_gap) : 0);
+    };
+    auto fits = [&](int from, int to) {
+        int sum = 0;
+        for (int k = from; k <= to; k++) sum += height(k, k == from);
+        return sum <= bottom - top;
+    };
+    int k_sel = selected_ - 1;
+    scroll_ = std::clamp(scroll_, 0, std::max(0, n_opts - 1));
+    if (k_sel >= 0 && k_sel < n_opts) {
+        if (k_sel < scroll_) scroll_ = k_sel;
+        while (scroll_ < k_sel && !fits(scroll_, k_sel)) scroll_++;
+    }
+    while (scroll_ > 0 && fits(scroll_ - 1, n_opts - 1)) scroll_--;   // no room left empty at the bottom
+    options_scroll_ = n_opts > 0 && (scroll_ > 0 || !fits(0, n_opts - 1));
+    more_up_ = more_down_ = RECT{};
+
+    const int text_h = mask(ROW, label_px, L"Ag", 0).text_h;
+    const Style gold{GOLD_TOP, GOLD_BOTTOM, 0, 0, 1, U(2)};
+    bool row_ribbon = false;
+    if (k_sel >= scroll_ && k_sel < n_opts) {   // the chosen row's ribbon, gliding there from the last one
+        int ry = top, k = scroll_;
+        for (; k <= k_sel; k++) {
+            if (ry + height(k, k == scroll_) > bottom) break;
+            ry += height(k, k == scroll_);
+        }
+        if (k > k_sel) {   // shown
+            ry -= row_h;
+            const Item& it = list[1 + k_sel];
+            int gy, gh;
+            glide(glide_row_, (long(screen_) * 8 + long(tab_)) * 100003 + h_ + long(options_from_pause_) * 7, ry, row_h, gy, gh);
+            int sl = row_h * 40 / 100;
+            ribbon(rows_x0 - U(30) - sl / 2, gy, rows_x1 + U(18) - sl, gy + gh, sl, 0.45f, 0.75f, U(6), U(5), it.enabled ? 1.0f : 0.4f);
+            if (!gliding_) triangle(rows_x0 - U(16), ry + row_h / 2, U(14), +1, 0xFFE08A, it.enabled ? 0.95f : 0.4f);
+            row_ribbon = true;
+        }
+    }
+    if (!row_ribbon) glide_row_.key = -1;   // next time straight there
+    int y = top, last_shown = scroll_ - 1;
+    for (int k = scroll_; k < n_opts; k++) {
+        if (y + height(k, k == scroll_) > bottom) break;
+        const Item& it = list[1 + k];
+        const wchar_t* head = k == scroll_ ? (*group_name[k] ? group_name[k] : nullptr) : group[k];
+        if (head) {
+            if (k != scroll_) y += head_gap;
+            int gw = text(ROW_MEDIUM, U(20), head, rows_x0, y + U(6), 0, {GROUP_RED, GROUP_RED});
+            fill(rows_x0 + gw + U(14), y + U(20), rows_x1, y + U(20) + std::max(1, U(1)), PAGE_LINE, 1);
+            y += head_h;
+        }
+        bool sel = 1 + k == selected_;
+        // (the chosen one's ribbon drawn above)
+        int ty = y + (row_h - text_h) / 2, cy = y + row_h / 2;
+        uint32_t lc = it.enabled ? PAGE_TEXT : PAGE_FAINT;
+        int lw = text(ROW, label_px, it.label, rows_x0, ty, 0, {lc, lc, 0, 0, 1, U(2)});
+        if (const WheelLine* ml = line_of(it); ml && ml->meter) {
+            // what the control reads now: the steering from the middle, a pedal, a button's light
+            const WheelLine& wl = *ml;
+            int mx0 = rows_x0 + std::max(lw + U(18), U(200)), mw = U(70), mh = U(8);
+            if (wl.meter == 3) {
+                bool on = wl.live > 0.5f;
+                aa_ring(float(mx0 + U(8)), float(cy), on ? -1.0f : float(U(5)), float(U(7)), on ? 0x6CE88A : 0x5A6476, 1);
+            } else {
+                fill(mx0, cy - mh / 2, mx0 + mw, cy + mh / 2, 0x2A3240, 1);
+                if (wl.meter == 1) {
+                    int mid = mx0 + mw / 2, at = mid + int(float(mw / 2) * std::clamp(wl.live, -1.0f, 1.0f));
+                    fill(std::min(mid, at), cy - mh / 2, std::max(mid, at) + 1, cy + mh / 2, GOLD_BOTTOM, 1);
+                    fill(mid, cy - mh, mid + std::max(1, U(2)), cy + mh, PAGE_DIM, 1);
+                } else {
+                    fill(mx0, cy - mh / 2, mx0 + int(float(mw) * std::clamp(wl.live, 0.0f, 1.0f)), cy + mh / 2, 0x4CC264, 1);
+                }
+            }
+        }
+        if ((it.id == OPT_SCALE && settings.render_scale != scale_at_launch) || (it.id == OPT_AA && settings.aa != aa_at_launch)) {
+            // changed, waiting for a restart
+            int tx = rows_x0 + lw + U(14), tw = measure(ROW, U(15), L"RESTART") + U(16);
+            fill(tx, cy - U(11), tx + tw, cy + U(11), 0x6A2A24, 1);
+            text(ROW, U(15), L"RESTART", tx + tw / 2, cy - U(10), 1, {0xFFD9D2, 0xFFD9D2});
+        }
+        if (it.id == OPT_RT || it.id == OPT_REFLECT || it.id == OPT_GI) {   // needs a graphics card with ray tracing
+            int tx = rows_x0 + lw + U(14), tw = measure(ROW, U(15), L"RT") + U(16);
+            fill(tx, cy - U(11), tx + tw, cy + U(11), TAG, 1);
+            text(ROW, U(15), L"RT", tx + tw / 2, cy - U(10), 1, {TAG_TEXT, TAG_TEXT});
+        }
+        int right = rows_x1 - U(20), vx0;
+        if (it.id == OPT_VOLUME || it.id == OPT_MUSIC) {   // ten segments
+            int seg_w = U(15), sgap = U(5), seg_h = U(20);
+            vx0 = right - 10 * seg_w - 9 * sgap;
+            for (int s = 0; s < 10; s++) {
+                int x0 = vx0 + s * (seg_w + sgap);
+                bool lit = s < (it.id == OPT_MUSIC ? settings.music : settings.volume);
+                uint32_t c = lit ? mix(0xBFE8FF, SABER, float(s) / 9) : 0x2A3240;
+                fill(x0 - 1, cy - seg_h / 2 - 1, x0 + seg_w + 1, cy + seg_h / 2 + 1, 0x000000, 0.8f);
+                fill(x0, cy - seg_h / 2, x0 + seg_w, cy + seg_h / 2, c, sel || !lit ? 1.0f : 0.8f);
+            }
+        } else if (it.id == OPT_WHEEL && wheel_fill(it.index) >= 0) {   // a red bar, then its value (the bars lined up)
+            uint32_t vc = it.enabled ? VALUE : PAGE_FAINT;
+            text(ROW, label_px, it.value, right, ty, 2, sel && it.enabled ? gold : Style{vc, vc, 0, 0, 1, U(2)});
+            int bx1 = right - measure(ROW, label_px, L"1080\u00B0") - U(18), bx0 = bx1 - U(wide ? 230.0f : 150.0f);
+            int bh = U(12), f = bx0 + int(float(bx1 - bx0) * std::clamp(wheel_fill(it.index), 0.0f, 1.0f) + 0.5f);
+            fill(bx0 - 1, cy - bh / 2 - 1, bx1 + 1, cy + bh / 2 + 1, 0x000000, 0.8f);
+            fill(bx0, cy - bh / 2, bx1, cy + bh / 2, 0x2A3240, 1);
+            fill(bx0, cy - bh / 2, f, cy + bh / 2, sel ? 0xE0342C : SABER, 1);
+            fill(bx0, cy - bh / 2, f, cy - bh / 2 + std::max(1, bh / 4), 0xFF8A7A, 0.35f);   // a light along its top
+            vx0 = bx0;
+        } else {
+            uint32_t vc = it.enabled ? VALUE : PAGE_FAINT;
+            vx0 = right - text(ROW, label_px, it.value, right, ty, 2, sel && it.enabled ? gold : Style{vc, vc, 0, 0, 1, U(2)});
+        }
+        if (sel && it.enabled && !rec) {   // (a record has nothing to change)
+            triangle(vx0 - U(20), cy, U(14), -1, GOLD_BOTTOM, 1);
+            triangle(right + U(13), cy, U(14), +1, GOLD_BOTTOM, 1);
+        }
+        hit_[1 + k] = {rows_x0 - U(18), y, rows_x1 + U(4), y + row_h};
+        values_[1 + k] = {vx0 - U(40), vx0 - U(4), right + U(2)};
+        y += row_h;
+        last_shown = k;
+    }
+    if (scroll_ > 0) {   // more rows above / below: arrows past the right end of the rows
+        triangle(rows_x1 + U(30), top + U(14), U(18), -2, GOLD_BOTTOM, 1);
+        more_up_ = {rows_x1 + U(10), top - U(8), rows_x1 + U(52), top + U(36)};
+    }
+    if (last_shown < n_opts - 1) {
+        triangle(rows_x1 + U(30), bottom - U(14), U(18), 2, GOLD_BOTTOM, 1);
+        more_down_ = {rows_x1 + U(10), bottom - U(36), rows_x1 + U(52), bottom + U(8)};
+    }
+
+    // The panel at the right: what the chosen row is and does
+    const int px1 = w - mx, pad = U(wide ? 36.0f : 26.0f);
+    panel_rect_ = {panel_x0, top - U(8), px1, bottom};
+    fill(panel_x0, top - U(8), px1, bottom, PANEL, over_game ? 0.95f : 0.62f);
+    frame(panel_x0, top - U(8), px1, bottom, std::max(1, U(1)), PAGE_LINE, 1);
+    fill(panel_x0, top - U(8), px1, top - U(8) + std::max(2, U(4)), SABER, 1);
+    if (selected_ >= 0 && selected_ < n) {
+        const Item& it = list[selected_];
+        bool section = it.id == TABS, back = it.id == BACK;
+        int x = panel_x0 + pad, py = top + U(22), inner = px1 - pad - x;
+        const wchar_t* kicker = section ? L"SECTION" : back || n_opts <= 0 ? L"" : group_name[std::clamp(selected_ - 1, 0, n_opts - 1)];
+        if (kicker && *kicker) text(ROW_MEDIUM, U(20), kicker, x, py, 0, {GROUP_RED, GROUP_RED});
+        py += U(30);
+        std::wstring title = section ? std::wstring(tab_label(tab_)) : it.label;
+        int title_px = U(60);
+        while (title_px > U(36) && measure(TITLE, title_px, title) > inner) title_px -= U(4);
+        text(TITLE, title_px, title, x, py, 0, {0xFFFFFF, 0xE2EAF4, 0, 0, 1, U(3)});
+        py += title_px + U(22);
+        if (!section && !back && !it.value.empty() && it.id != OPT_VOLUME && it.id != OPT_MUSIC) {
+            text(ROW, U(34), it.value, x, py, 0, it.enabled ? gold : Style{PAGE_FAINT, PAGE_FAINT});
+            py += U(52);
+        } else if (it.id == OPT_VOLUME || it.id == OPT_MUSIC) {
+            text(ROW, U(34), std::to_wstring(it.id == OPT_MUSIC ? settings.music : settings.volume) + L" / 10", x, py, 0, gold);
+            py += U(52);
+        }
+        fill(x, py, px1 - pad, py + std::max(1, U(1)), PAGE_LINE, 1);
+        py += U(24);
+        int text_end = bottom - U(16);
+        if (!rec && tab_ == WHEEL_TAB) text_end = draw_wheel_live(x, inner, bottom - U(24)) - U(20);
+        std::wstring about = section ? std::wstring(tab_about(tab_)) + L".  " + it.hint : it.hint;
+        for (const std::wstring& line : wrap(BODY, U(24), about, inner)) {
+            if (py + U(34) > text_end) break;
+            text(BODY, U(24), line, x, py, 0, {0xD6DEEA, 0xD6DEEA});
+            py += U(34);
+        }
+    }
+
+    // The key help along the bottom
+    fill(0, h - U(76), w, h, 0x000000, 0.5f);
+    fill(0, h - U(76), w, h - U(76) + std::max(1, U(1)), PAGE_LINE, 1);
+    struct Key { const wchar_t *pad, *key, *what; };
+    std::vector<Key> keys = pad_prompts
+        ? std::vector<Key>{{L"LS", nullptr, rec ? L"SELECT" : L"SELECT / CHANGE"}, {L"LB", nullptr, L""}, {L"RB", nullptr, L"SECTION"},
+                           {L"B", nullptr, L"BACK"}}
+        : rec ? std::vector<Key>{{nullptr, L"UP / DOWN", L"SELECT"}, {nullptr, L"Q / E", L"SECTION"}, {nullptr, L"ESC", L"BACK"}}
+              : std::vector<Key>{{nullptr, L"UP / DOWN", L"SELECT"}, {nullptr, L"LEFT / RIGHT", L"CHANGE"},
+                                 {nullptr, L"Q / E", L"SECTION"}, {nullptr, L"ESC", L"BACK"}};
+    if (!rec && (tab_ == WHEEL_TAB || (selected_ >= 0 && selected_ < n && list[selected_].id == OPT_BIND)))
+        keys.insert(keys.end() - 1, Key{L"Y", L"DEL", L"CLEAR"});
+    else if (!rec) keys.insert(keys.begin() + (pad_prompts ? 1 : 2), Key{L"A", L"ENTER", L"LIST"});   // (the wheel's controls: none)
+    int kh = U(34), kx = mx;
+    for (const Key& k : keys) prompt(kx, h - U(38) - kh / 2, kh, k.pad, k.key, k.what);
+    if (!rec && (tab_ == WHEEL_TAB || tab_ == CONTROLS_TAB) && wheel_prompt.on) draw_wheel_prompt();
+    else prompt_choices_.clear();
+}
+
 bool Frontend::draw(int w, int h, std::vector<uint32_t>& out) {
     if (!active() || w <= 0 || h <= 0) return false;
-    take_news();
-    if (!news_.empty() && !news_open_ && screen_ == Screen::Main && !starting && menu_in_from_ < 0) {
-        news_open_ = dirty_ = true;   // once the main menu is up (after the splash and its fade)
-        news_button_ = 0;
-        news_hot_ = -1;
+    menu_frames_++;
+    if (slide_from_ >= 0) {   // PLAY's page and back: out, then the other page in
+        int n = int(items().size());
+        double t = menu_clock() - slide_from_;
+        if (slide_out_ && t >= SLIDE_OUT_GAP * std::max(0, n - 1) + SLIDE_OUT) {
+            open(slide_to_);
+            selected_ = slide_sel_;
+            slide_out_ = false;
+            slide_from_ = screen_ == Screen::Options ? -1 : menu_clock();   // (the settings page: no entries to slide)
+        } else if (!slide_out_ && t >= (slide_intro_ ? INTRO_GAP : SLIDE_IN_GAP) * std::max(0, n - 1) +
+                                             (slide_intro_ ? INTRO_IN : SLIDE_IN)) {
+            slide_from_ = -1;
+            slide_intro_ = false;
+        }
+        dirty_ = true;
     }
     if (!dirty_ && w == w_ && h == h_ && out.size() == size_t(w) * h) return false;
+    gliding_ = false;
     if (w != w_ || h != h_) {
         w_ = w;
         h_ = h;
         u_ = std::min(h / 1080.0f, w / 1440.0f);
         bg_.clear();
         bg_blur_.clear();
-        for (RecompArt& a : recomps_) a.bg.clear();
     }
     if (screen_ == Screen::Splash) {
         if (draw_splash(out)) {
@@ -1962,7 +2994,7 @@ bool Frontend::draw(int w, int h, std::vector<uint32_t>& out) {
             return true;
         }
         open(Screen::Main);   // the last one ended: the menu comes in from black
-        menu_in_from_ = now_seconds();
+        menu_in_from_ = qpc_seconds();
     }
     auto U = [&](float v) { return int(v * u_ + 0.5f); };
     bool over_game = this->over_game();
@@ -1970,17 +3002,15 @@ bool Frontend::draw(int w, int h, std::vector<uint32_t>& out) {
     if (over_game) out.assign(size_t(w) * h, 0);
     else {
         if (bg_.empty()) backdrop_background();
-        if (screen_ == Screen::More && selected_ < RECOMP_COUNT) more_game_ = selected_;   // on BACK: the last one stays
-        out = page ? bg_blur_ : screen_ == Screen::More && !recomps_[more_game_].bg.empty() ? recomps_[more_game_].bg : bg_;
+        out = page ? bg_blur_ : bg_;
     }
     px_ = out.data();
     hit_.clear();
     values_.clear();
-    int cx = w / 2;
     // After the splash: the whole picture towards black, less every refresh
     auto fade_in = [&] {
         if (menu_in_from_ < 0) return;
-        double k = (now_seconds() - menu_in_from_) / MENU_IN;
+        double k = (qpc_seconds() - menu_in_from_) / MENU_IN;
         if (k >= 1 || over_game) {
             menu_in_from_ = -1;
             return;
@@ -1996,191 +3026,23 @@ bool Frontend::draw(int w, int h, std::vector<uint32_t>& out) {
         return true;
     }
     auto list = items();
-    bool on_records = screen_ == Screen::Records;
-    bool options = screen_ == Screen::Options || on_records;   // records use the settings' card and tab row
-    if (!over_game && !options) {   // Main, Debug, More: on the backdrop
-        draw_side_menu(list);
-        if (news_open_ && screen_ == Screen::Main) draw_news();
-        dirty_ = false;
+    if (screen_ == Screen::Options || screen_ == Screen::Records) {   // the settings page (and the records in its look)
+        draw_options_page(list, over_game);
+        dirty_ = gliding_;
+        if (drop_open_) draw_drop();
+        if (restart_open_) draw_restart();
         fade_in();
         return true;
     }
-    const Style gold{GOLD_TOP, GOLD_BOTTOM, EDGE, U(3)};
-    const Style pale{PALE_TOP, PALE_BOTTOM, 0x080806, U(2), 0.95f};
-    const Style dim{DIM, DIM, 0x080806, U(2), 0.9f};
-
-    int y_items, spacing, item_px, hint_y, foot_y;
-    if (!over_game) {   // the options (or the records): a card over the blurred backdrop
-        int top = U(70), bottom = h - U(70), half = U(580);
-        fill(cx - half, top, cx + half, bottom, PANEL, 0.74f);
-        saber(cx, top, half);
-        saber(cx, bottom, half);
-        text(TITLE, U(96), on_records ? L"RECORDS" : L"OPTIONS", cx, top + U(34), 1,
-             {GOLD_TOP, GOLD_BOTTOM, EDGE, U(5), 1, U(5)});
-        y_items = top + U(196);
-        spacing = U(70);
-        item_px = U(46);
-        hint_y = bottom - U(116);
-        foot_y = bottom - U(62);
-    } else {
-        fill(0, 0, w, h, 0x000000, 0.62f);   // the frozen game shows through, darkened
-        int n = options ? VISIBLE_OPTIONS + 2 : int(list.size());   // same panel for every settings tab
-        spacing = options ? U(56) : U(80);
-        item_px = options ? U(44) : U(58);
-        int panel_h = U(170) + n * spacing + U(130);   // title, items, hint and key help
-        int top = (h - panel_h) / 2;
-        int half = options ? U(560) : U(460);
-        fill(cx - half, top, cx + half, top + panel_h, PANEL, 0.92f);
-        saber(cx, top, half);
-        saber(cx, top + panel_h, half);
-        text(TITLE, U(110), options ? L"SETTINGS" : L"PAUSED", cx, top + U(22), 1,
-             {GOLD_TOP, GOLD_BOTTOM, EDGE, U(5), 1, U(5)});
-        y_items = top + U(170);
-        hint_y = top + panel_h - U(96);
-        foot_y = top + panel_h - U(46);
+    // Main, Play, Debug on the backdrop; the pause over the frozen game (blurred, else darkened)
+    if (over_game) {
+        if (!pause_blur) fill(0, 0, w, h, 0x000000, 0.8f);
+        shade_backdrop();   // the main menu's shade and logo
     }
-    // Settings tabs show at most VISIBLE_OPTIONS rows; longer ones scroll (the
-    // tab row and BACK stay put), keeping the selected row in view
-    int n_opts = options ? int(list.size()) - 2 : 0, shown_opts = n_opts;
-    more_up_ = more_down_ = RECT{};
-    if (options) {
-        shown_opts = std::min(n_opts, VISIBLE_OPTIONS);
-        scroll_ = std::clamp(scroll_, 0, std::max(0, n_opts - shown_opts));
-        int k = selected_ - 1;   // selected option (0-based), if it is one
-        if (k >= 0 && k < n_opts) {
-            if (k < scroll_) scroll_ = k;
-            if (k >= scroll_ + shown_opts) scroll_ = k - shown_opts + 1;
-        }
-    }
-    if (on_records) {   // the list of records fills the rows of the options
-        shown_opts = VISIBLE_OPTIONS;
-        draw_records(cx - U(420), cx + U(400), y_items + spacing + U(24), VISIBLE_OPTIONS * spacing / VISIBLE_RECORDS);
-    }
-    auto slot_of = [&](int i) {   // screen row of list entry i, -1 when scrolled out of view
-        if (!options || i == 0) return i;
-        if (i == int(list.size()) - 1) return shown_opts + 1;   // BACK
-        int k = i - 1 - scroll_;
-        return k >= 0 && k < shown_opts ? k + 1 : -1;
-    };
-
-    for (int i = 0; i < int(list.size()); i++) {
-        const Item& it = list[i];
-        bool sel = i == selected_;
-        int slot = slot_of(i);
-        int y = y_items + slot * spacing + (options && slot > 0 ? U(24) : 0);   // room under the tabs
-        int row_h = spacing;
-        int half_w = options ? U(470) : U(320);
-        if (slot < 0) {   // scrolled out of view: no hit area
-            hit_.push_back(RECT{});
-            values_.push_back({-1, 0});
-            continue;
-        }
-        hit_.push_back({cx - half_w, y - (row_h - item_px) / 2 - U(6), cx + half_w, y + item_px + (row_h - item_px) / 2});
-        values_.push_back({-1, 0});
-        if (options && slot == 1 && scroll_ > 0) {   // more rows above / below: arrows at the right edge
-            triangle(cx + half_w + U(16), y - U(4), U(20), -2, GOLD_BOTTOM, 1);
-            more_up_ = {cx + half_w - U(10), y - U(30), cx + half_w + U(44), y + U(16)};
-        }
-        if (options && slot == shown_opts && scroll_ + shown_opts < n_opts) {
-            triangle(cx + half_w + U(16), y + item_px + U(8), U(20), 2, GOLD_BOTTOM, 1);
-            more_down_ = {cx + half_w - U(10), y + item_px - U(8), cx + half_w + U(44), y + item_px + U(34)};
-        }
-        if (sel) band(cx, y - U(8), y + item_px + U(14), half_w, SABER, it.enabled ? 0.22f : 0.10f);
-        // DEBUG and its lists in red: not part of the game
-        const Style red{0xFF8A7A, 0xD8402E, EDGE, U(2), 0.95f};
-        bool debug_row = false;
-        const Style& st = !it.enabled ? dim : sel ? gold : debug_row ? red : pale;
-        if (it.id == TABS) {   // tab names side by side, the open one underlined
-            int gap = U(44), total = 0, tab_px = item_px * 17 / 20;
-            for (int t = 0; t < tab_count(); t++) total += measure(TITLE, tab_px, tab_name(t)) + gap;
-            if (total - gap > 2 * half_w - U(80)) {   // more tabs than fit: smaller names
-                tab_px = tab_px * (2 * half_w - U(80)) / (total - gap);
-                gap = gap * (2 * half_w - U(80)) / (total - gap);
-                total = 0;
-                for (int t = 0; t < tab_count(); t++) total += measure(TITLE, tab_px, tab_name(t)) + gap;
-            }
-            int x = cx - (total - gap) / 2;
-            tab_rects_.clear();
-            for (int t = 0; t < tab_count(); t++) {
-                bool open_tab = t == tab_;
-                const Style& ts = open_tab ? gold : Style{0x8A98AC, 0x6E7C90, 0x020308, U(2), 0.95f};
-                int ty0 = y + (item_px - tab_px) / 2;
-                int tw = text(TITLE, tab_px, tab_name(t), x, ty0, 0, ts);
-                if (open_tab) fill(x, ty0 + tab_px + U(6), x + tw, ty0 + tab_px + U(6) + std::max(2, U(4)), GOLD_BOTTOM, 1);
-                tab_rects_.push_back({x - gap / 2, y, x + tw + gap / 2, y + item_px});
-                x += tw + gap;
-            }
-            if (sel) {
-                int ty = y + item_px * 6 / 10;
-                triangle(tab_rects_.front().left - U(10), ty, U(18), -1, GOLD_BOTTOM, 1);
-                triangle(tab_rects_.back().right + U(10), ty, U(18), +1, GOLD_BOTTOM, 1);
-            }
-            continue;
-        }
-        if (!options || it.id == BACK) {
-            int tw = text(TITLE, item_px, it.label, cx, y, 1, st);
-            int ty = y + item_px * 6 / 10;
-            if (sel && it.enabled) {
-                triangle(cx - tw / 2 - U(34), ty, U(20), +1, GOLD_BOTTOM, 1);
-                triangle(cx + tw / 2 + U(34), ty, U(20), -1, GOLD_BOTTOM, 1);
-            }
-            if (!it.value.empty())   // e.g. COMING SOON
-                text(MONO, U(20), it.value, cx + tw / 2 + U(it.enabled ? 62.0f : 18.0f), y + item_px / 2 - U(6), 0,
-                     {0x7FB0D8, 0x6090B8});   // past the arrow of a selected entry
-            continue;
-        }
-        int left = cx - U(410), right = cx + U(410);   // symmetric about the centre
-        text(TITLE, item_px, it.label, left, y, 0, st);
-        int ty = y + item_px * 6 / 10;
-        int vx0;
-        if (it.id == OPT_VOLUME || it.id == OPT_MUSIC) {   // ten segments
-            int seg_w = U(20), gap = U(6), seg_h = U(26);
-            vx0 = right - 10 * seg_w - 9 * gap;
-            for (int s = 0; s < 10; s++) {
-                int x0 = vx0 + s * (seg_w + gap);
-                bool lit = s < (it.id == OPT_MUSIC ? settings.music : settings.volume);
-                uint32_t c = lit ? mix(0xBFE8FF, SABER, float(s) / 9) : 0x2A3240;
-                fill(x0 - 1, ty - seg_h / 2 - 1, x0 + seg_w + 1, ty + seg_h / 2 + 1, 0x000000, 0.8f);
-                fill(x0, ty - seg_h / 2, x0 + seg_w, ty + seg_h / 2, c, sel || !lit ? 1.0f : 0.8f);
-            }
-        } else {
-            const Style& vs = sel ? gold : Style{0xFFE87A, 0xE8BC2A, 0x020308, U(2), 0.95f};
-            vx0 = right - text(ITEM, item_px, it.value, right, y, 2, vs);
-        }
-        values_.back() = {vx0 - U(48), (vx0 + right) / 2};
-        if (sel) {
-            triangle(vx0 - U(24), ty, U(18), -1, GOLD_BOTTOM, 1);
-            triangle(right + U(24), ty, U(18), +1, GOLD_BOTTOM, 1);
-        }
-    }
-
-    if (selected_ < int(list.size()))
-    {   // wrapped to the card (two lines at most, the last one where a single line goes)
-        auto lines = wrap(MONO, U(24), list[selected_].hint, U(980));
-        if (lines.size() > 2) lines.resize(2);
-        int ly = hint_y - (int(lines.size()) - 1) * U(30);
-        for (const std::wstring& line : lines) {
-            text(MONO, U(24), line, cx, ly, 1, {HINT, HINT});
-            ly += U(34);
-        }
-    }
-    if (pad_prompts) {   // the gamepad's buttons, centred
-        struct Key { const wchar_t *pad, *what; };
-        std::vector<Key> keys;
-        if (on_records) keys = {{L"LS", L"SCROLL"}, {L"LB", L""}, {L"RB", L"TAB"}, {L"B", L"BACK"}};
-        else if (options) keys = {{L"LS", L"SELECT / CHANGE"}, {L"LB", L""}, {L"RB", L"TAB"}, {L"B", L"BACK"}};
-        else keys = {{L"LS", L"SELECT"}, {L"A", L"CONFIRM"}, {L"B", L"BACK"}};
-        int kh = U(34), ky = foot_y + U(12) - kh / 2, x = cx + U(40) / 2;
-        for (const Key& k : keys) x -= prompt_width(kh, k.pad, nullptr, k.what) / 2;
-        for (const Key& k : keys) prompt(x, ky, kh, k.pad, nullptr, k.what);
-    } else {
-        const wchar_t* foot = on_records   ? L"ARROWS  SCROLL / TAB      WHEEL  SCROLL      ESC  BACK"
-                              : options ? L"ARROWS  SELECT / CHANGE      Q / E  TAB      ESC  BACK"
-                                      : L"ARROWS  SELECT      ENTER / CLICK  CONFIRM      ESC  BACK";
-        text(MONO, U(21), foot, cx, foot_y, 1, {FOOT, FOOT});
-    }
-    if (news_open_ && screen_ == Screen::Main) draw_news();
-    dirty_ = false;
+    draw_side_menu(list);
+    if (setup_open_ && screen_ == Screen::Play) draw_setup();
+    if (restart_open_ && screen_ == Screen::Pause) draw_restart();
+    dirty_ = slide_from_ >= 0 || gliding_;   // moving: drawn again every refresh
     fade_in();
     return true;
 }

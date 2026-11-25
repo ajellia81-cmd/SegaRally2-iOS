@@ -44,7 +44,7 @@ layout(location = 10) out vec4 dust_light; // DUST: the light bounced onto it (r
 
 #ifdef RAY_TRACING
 layout(set = 0, binding = 0) uniform usampler2D texture_ram;
-layout(set = 0, binding = 1) uniform sampler2D replacements[4096];
+layout(set = 0, binding = 1) uniform sampler2D replacements[];
 #define ATMOSPHERE_BINDING 2
 #include "atmosphere.glsl"
 #define RT_SET 0
@@ -101,8 +101,17 @@ void main() {
     flags = in_flags;
     params = in_params;
     replace = in_replace;
-    gl_Position = vp.proj * vec4(pos, 1.0);
-    vec4 before = vp.proj * vec4(mix(in_prev, in_pos, vp.params.w), 1.0);
+    // The viewport's lens at this image's t, and at the previous image's in
+    // the projection's places that are otherwise 0 when column 0 row 3 says
+    // so (R3DRenderer: R3DScene::proj_at; the attract's camera zooms every frame)
+    mat4 lens = vp.proj, lens_before = vp.proj;
+    if (vp.proj[0][3] == 1.0) {
+        lens[0][1] = 0.0, lens[0][2] = 0.0, lens[0][3] = 0.0, lens[1][0] = 0.0, lens[1][2] = 0.0;
+        lens_before = lens;
+        lens_before[0][0] = vp.proj[0][1], lens_before[1][1] = vp.proj[0][2], lens_before[2][0] = vp.proj[1][0], lens_before[2][1] = vp.proj[1][2];
+    }
+    gl_Position = lens * vec4(pos, 1.0);
+    vec4 before = lens_before * vec4(mix(in_prev, in_pos, vp.params.w), 1.0);
     clip_now = gl_Position;
     clip_before = before;
     dust_light = vec4(0.0, 0.0, 0.0, 1.0);

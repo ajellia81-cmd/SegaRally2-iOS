@@ -58,20 +58,45 @@ const std::vector<Entry>& table() {
         text("--rom", "ZIP", &Options::rom_zip, "path to srally2.zip (or SR2_ROM_ZIP; by default next to the exe)"),
         text("--data", "DIR", &Options::data_dir, "folder with the ROM already extracted by tools/romtool.py (data)"),
         flag("--boot", &Options::show_boot, "show the power-on screens before the SEGA logo"),
+        off("--no-trigger-rumble", &Options::trigger_rumble,
+            "no rumble in the triggers of Xbox One / Series pads (they are then read through XInput)"),
+        custom("--difficulty", "very_easy|easy|normal|hard|very_hard",
+               "the arcade's difficulty: the time at the start and at each checkpoint (normal)", false,
+               [](Options& o, const char* v) {
+                   static const char* const NAMES[5] = {"normal", "hard", "very_hard", "very_easy", "easy"};
+                   for (int d = 0; d < 5; d++)
+                       if (strcmp(v, NAMES[d]) == 0) o.difficulty = d;
+               }),
+        off("--no-hidden-cars", &Options::hidden_cars, "SELECT CAR with the arcade's six cars (no Toyota Celica, no Lancia Delta)"),
+        off("--no-forest", &Options::forest, "SELECT COURSE with the arcade's four courses (no FOREST, the unused fifth)"),
         section("Picture"),
         real("--scale", &Options::supersample, "internal 3D resolution multiplied by F (1)"),
         num("--msaa", &Options::msaa, "samples per pixel (4; 1 = no MSAA)"),
-        custom("--aa", "msaa|dlaa|dlss|none", "antialiasing: msaa (default), dlaa, dlss (quality upscaling; both NVIDIA) or none", false,
+        custom("--aa", "msaa|fxaa|dlaa|dlss|dlss_balanced|dlss_performance|dlss_ultra|none",
+               "antialiasing: msaa (default), fxaa (cheap, for older cards), dlaa, dlss (quality upscaling), dlss_balanced, "
+               "dlss_performance, dlss_ultra (all NVIDIA) or none", false,
                [](Options& o, const char* v) {
-                   o.dlss = strcmp(v, "dlss") == 0;
+                   static const char* const DLSS[5] = {"", "dlss", "dlss_balanced", "dlss_performance", "dlss_ultra"};
+                   o.dlss = 0;
+                   for (int m = 1; m < 5; m++)
+                       if (strcmp(v, DLSS[m]) == 0) o.dlss = m;
+                   if (strcmp(v, "dlss_quality") == 0) o.dlss = 1;
                    o.dlaa = o.dlss || strcmp(v, "dlaa") == 0;
-                   if (strcmp(v, "none") == 0 || strcmp(v, "off") == 0) o.msaa = 1;
+                   o.fxaa = strcmp(v, "fxaa") == 0;
+                   if (strcmp(v, "none") == 0 || strcmp(v, "off") == 0 || o.fxaa) o.msaa = 1;
+               }),
+        custom("--dlss-model", "auto|k|m|l", "DLSS's model (preset): auto (K, M for dlss_performance, L for dlss_ultra; "
+               "K without FP8, RTX 20/30), k, m or l", false,
+               [](Options& o, const char* v) {
+                   o.dlss_model = (v[0] == 'k' || v[0] == 'K') ? 1 : (v[0] == 'm' || v[0] == 'M') ? 2
+                                  : (v[0] == 'l' || v[0] == 'L') ? 3 : 0;
                }),
         num("--aniso", &Options::aniso, "anisotropic filtering (8; 0 = no mipmaps, original look)"),
-        custom("--aspect", "A:B", "wider 3D view: 16:9 (default), 21:9, 4:3 or a number", false,
+        custom("--aspect", "A:B", "wider 3D view: 16:9 (default), 21:9, 32:9, 4:3 or a number", false,
                [](Options& o, const char* v) {
                    const char* colon = strchr(v, ':');
                    o.max_aspect = colon ? float(atof(v) / atof(colon + 1)) : float(atof(v));
+                   o.pixel_aspect = 1.0f;   // (square pixels, whatever ASPECT says)
                }),
         real("--light-gain", &Options::light_gain, "multiply the sunlight and the ambient light (1)"),
         strength("--bloom", &Options::bloom, "glow around bright things, strength F (1)"),
@@ -84,6 +109,8 @@ const std::vector<Entry>& table() {
         real("--gamma", &Options::gamma, "gamma (1 = original; higher is brighter)"),
         off("--no-sun", &Options::sun, "the game's own sunlight, not the stronger, warmer one"),
         off("--no-shadows", &Options::shadows, "no sun shadows"),
+        off("--no-car-probes", &Options::car_probes, "the cars do not darken in the shade (no light probes on them)"),
+        off("--no-car-shadows", &Options::car_shadows, "the sun shadows do not fall on the cars themselves"),
         custom("--rt", "off|shadows|ao", "ray tracing: sun shadows, and ambient occlusion (ao, the default)", false,
                [](Options& o, const char* v) {
                    o.ray_tracing = strcmp(v, "off") == 0 ? 0 : strcmp(v, "shadows") == 0 ? 1 : 2;
@@ -92,16 +119,20 @@ const std::vector<Entry>& table() {
         off("--no-soft", &Options::soft, "hard edges where translucent effects meet the geometry"),
         off("--no-hdr", &Options::hdr, "clipped lighting like the original"),
         off("--no-reflections", &Options::reflections, "no ray traced reflections on the cars"),
-        custom("--gi", "off|low|high", "global illumination: the sun's light bounced off the scenery (ray traced; low by default)", false,
-               [](Options& o, const char* v) { o.gi = strcmp(v, "off") == 0 ? 0 : strcmp(v, "high") == 0 ? 2 : 1; }),
+        custom("--gi", "off|on", "global illumination: the sun's light bounced off the scenery (ray traced; on by default)", false,
+               [](Options& o, const char* v) { o.gi = strcmp(v, "off") == 0 || strcmp(v, "0") == 0 ? 0 : 1; }),
         custom("--no-gi", nullptr, "no global illumination (as --gi off)", false, [](Options& o, const char*) { o.gi = 0; }),
         off("--classic-dust", &Options::dust, "the arcade's flat fans of dust behind the wheels, no particles"),
+        num("--object-distance", &Options::object_distance,
+            "metres ahead the spectators, cameramen, signs... appear from (250; 100 = original)"),
         off("--no-sharpen", &Options::sharpen, "no adaptive sharpening of the 3D image"),
         off("--no-interp", &Options::interp, "game frames as they are, not interpolated"),
         flag("--letterbox", &Options::letterbox, "keep the black bars of the cutscenes"),
         flag("--pixel2d", &Options::pixel_2d, "2D layers without xBR upscaling"),
-        flag("--classic-text", &Options::classic_text, "original pixel letters instead of vector fonts"),
-        flag("--hud-centre", &Options::hud_centre, "the HUD stays in the 4:3 area"),
+        flag("--classic-hud", &Options::classic_hud, "the ROM's own HUD and screens: pixel letters, no redrawn graphics"),
+        flag("--classic-text", &Options::classic_hud, "the same as --classic-hud"),
+        flag("--classic-liveries", &Options::classic_liveries, "the cars with the ROM's own paint, not the redone liveries"),
+        flag("--hud-centre", &Options::hud_centre, "the HUD stays in the 4:3 area (otherwise at most at a 16:9 view's edges)"),
         flag("--dump-textures", &Options::dump_textures, "write new textures to out/textures"),
         section("Sound"),
         real("--volume", &Options::volume, "output gain (5)"),

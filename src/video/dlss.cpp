@@ -120,17 +120,55 @@ bool Dlaa::ensure_feature(VkCommandBuffer cmd, uint32_t width, uint32_t height, 
         NVSDK_NGX_VULKAN_ReleaseFeature(feature);
         feature = nullptr;
     }
-    NVSDK_NGX_Parameter_SetUI(params_, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
-                              NVSDK_NGX_DLSS_Hint_Render_Preset_K);
-    NVSDK_NGX_Parameter_SetUI(params_, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
-                              NVSDK_NGX_DLSS_Hint_Render_Preset_K);
+    // The same preset for whichever mode NGX looks it up under (0: its own default)
+    static const char* const PRESET_PARAMS[] = {
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance};
+    for (const char* name : PRESET_PARAMS) NVSDK_NGX_Parameter_SetUI(params_, name, unsigned(preset_));
+    static const NVSDK_NGX_PerfQuality_Value PERF[MODE_COUNT] = {
+        NVSDK_NGX_PerfQuality_Value_DLAA, NVSDK_NGX_PerfQuality_Value_MaxQuality, NVSDK_NGX_PerfQuality_Value_Balanced,
+        NVSDK_NGX_PerfQuality_Value_MaxPerf, NVSDK_NGX_PerfQuality_Value_UltraPerformance};
     bool upscale = out_width != width || out_height != height;
     NVSDK_NGX_DLSS_Create_Params create{};
     create.Feature.InWidth = width;
     create.Feature.InHeight = height;
     create.Feature.InTargetWidth = out_width;
     create.Feature.InTargetHeight = out_height;
-    create.Feature.InPerfQualityValue = upscale ? NVSDK_NGX_PerfQuality_Value_MaxQuality : NVSDK_NGX_PerfQuality_Value_DLAA;
+    create.Feature.InPerfQualityValue = !upscale ? NVSDK_NGX_PerfQuality_Value_DLAA : PERF[mode_ > 0 && mode_ < MODE_COUNT ? mode_ : 1];
+    // Dynamic resolution at DLAA's size: made as QUALITY, whose inputs may
+    // be smaller than the output image (DLAA's must be all of it: a smaller
+    // part was refused, 0xBAD00005), with the whole output as their size
+    if (!upscale && dynamic_) create.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_MaxQuality;
+    {   // (once: the sizes NGX takes for each mode, for the log)
+        static bool logged = false;
+        NVSDK_NGX_Parameter* caps = nullptr;
+        if (!logged && channel == 0 && NVSDK_NGX_SUCCEED(NVSDK_NGX_VULKAN_GetCapabilityParameters(&caps)) && caps) {
+            logged = true;
+            for (NVSDK_NGX_PerfQuality_Value q : {NVSDK_NGX_PerfQuality_Value_DLAA, NVSDK_NGX_PerfQuality_Value_MaxQuality}) {
+                // (as NGX_DLSS_GET_OPTIMAL_SETTINGS in nvsdk_ngx_helpers.h, which needs the D3D headers)
+                unsigned ow = 0, oh = 0, xw = 0, xh = 0, nw = 0, nh = 0;
+                void* callback = nullptr;
+                NVSDK_NGX_Parameter_GetVoidPointer(caps, NVSDK_NGX_Parameter_DLSSOptimalSettingsCallback, &callback);
+                if (!callback) break;
+                NVSDK_NGX_Parameter_SetUI(caps, NVSDK_NGX_Parameter_Width, out_width);
+                NVSDK_NGX_Parameter_SetUI(caps, NVSDK_NGX_Parameter_Height, out_height);
+                NVSDK_NGX_Parameter_SetI(caps, NVSDK_NGX_Parameter_PerfQualityValue, q);
+                NVSDK_NGX_Parameter_SetI(caps, NVSDK_NGX_Parameter_RTXValue, 0);
+                if (NVSDK_NGX_FAILED(reinterpret_cast<PFN_NVSDK_NGX_DLSS_GetOptimalSettingsCallback>(callback)(caps))) continue;
+                NVSDK_NGX_Parameter_GetUI(caps, NVSDK_NGX_Parameter_OutWidth, &ow);
+                NVSDK_NGX_Parameter_GetUI(caps, NVSDK_NGX_Parameter_OutHeight, &oh);
+                NVSDK_NGX_Parameter_GetUI(caps, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, &xw);
+                NVSDK_NGX_Parameter_GetUI(caps, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, &xh);
+                NVSDK_NGX_Parameter_GetUI(caps, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, &nw);
+                NVSDK_NGX_Parameter_GetUI(caps, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, &nh);
+                LOG_INFO("[dlaa] %s for %ux%u: inputs %ux%u (from %ux%u to %ux%u)\n",
+                             q == NVSDK_NGX_PerfQuality_Value_DLAA ? "DLAA" : "QUALITY", out_width, out_height, ow, oh,
+                             nw, nh, xw, xh);
+            }
+            NVSDK_NGX_VULKAN_DestroyParameters(caps);
+        }
+    }
     // Reverse-Z depth; motion vectors at render resolution.
     // The alpha (where it is 0 the composition shows the 2D background) goes
     // through the second instance.
@@ -146,6 +184,11 @@ bool Dlaa::ensure_feature(VkCommandBuffer cmd, uint32_t width, uint32_t height, 
         failed_ = true;
         return false;
     }
+    if (channel == 0) {
+        static const char* const MODES[MODE_COUNT] = {"DLAA", "QUALITY", "BALANCED", "PERFORMANCE", "ULTRA PERFORMANCE"};
+        LOG_INFO("[dlaa] DLSS %s %ux%u -> %ux%u, preset %c\n", MODES[upscale && mode_ > 0 && mode_ < MODE_COUNT ? mode_ : 0],
+                 width, height, out_width, out_height, preset_ ? char('A' + preset_ - 1) : '-');
+    }
     width_[channel] = width;
     height_[channel] = height;
     out_width_[channel] = out_width;
@@ -155,7 +198,8 @@ bool Dlaa::ensure_feature(VkCommandBuffer cmd, uint32_t width, uint32_t height, 
 
 bool Dlaa::evaluate(VkCommandBuffer cmd, const Image& color, const Image& depth, const Image& motion,
                     const Image& output, uint32_t width, uint32_t height, uint32_t out_width, uint32_t out_height,
-                    float jitter_x, float jitter_y, bool reset, int channel) {
+                    float jitter_x, float jitter_y, bool reset, int channel, uint32_t draw_width,
+                    uint32_t draw_height) {
     if (!params_ || failed_) return false;
     bool fresh = !feature_[channel] || width != width_[channel] || height != height_[channel] ||
                  out_width != out_width_[channel] || out_height != out_height_[channel];
@@ -171,7 +215,10 @@ bool Dlaa::evaluate(VkCommandBuffer cmd, const Image& color, const Image& depth,
     eval.pInMotionVectors = &in_motion;
     eval.InJitterOffsetX = jitter_x;
     eval.InJitterOffsetY = jitter_y;
-    eval.InRenderSubrectDimensions = {width, height};
+    // (the feature is made for the whole inputs; an image drawn smaller uses
+    // their top left part: DLSS's dynamic resolution)
+    eval.InRenderSubrectDimensions = {draw_width && draw_width <= width ? draw_width : width,
+                                      draw_height && draw_height <= height ? draw_height : height};
     eval.InReset = reset || fresh ? 1 : 0;
     eval.InMVScaleX = eval.InMVScaleY = 1.0f;   // motion vectors are already in pixels
     eval.InPreExposure = eval.InExposureScale = 1.0f;
@@ -182,6 +229,11 @@ bool Dlaa::evaluate(VkCommandBuffer cmd, const Image& color, const Image& depth,
         return false;
     }
     return true;
+}
+
+void Dlaa::configure(int mode, int preset) {
+    mode_ = mode;
+    preset_ = preset;
 }
 
 void Dlaa::shutdown() {

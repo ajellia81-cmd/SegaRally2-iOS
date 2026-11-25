@@ -1,10 +1,12 @@
-// Force feedback board of the Star Wars Trilogy joystick (Sega 838-13992
-// family): a Z80 at 8 MHz running epr-21119, a Z80 CTC whose channel 1 drives
-// the NMI, an ADC that reads the stick's two pots one bit at a time, and the
-// motor outputs. The main board writes a command byte to input register 0x10
-// and reads the board's reply at input register 0x0C; at boot the game waits
-// for the board to answer its initialisation (reply 0xCB) and stops with
-// FAILED FEEDBACK LEVER INITIALIZE otherwise.
+// Force feedback drive board, here running Sega Rally 2's program
+// (epr-20512). The model was written first for Star Wars Trilogy's joystick
+// board (Sega 838-13992 family), which the rest of this comment describes: a
+// Z80 at 8 MHz, a Z80 CTC whose channel 1 drives the NMI, an ADC that reads
+// the stick's two pots one bit at a time, and the motor outputs. The main
+// board writes a command byte to input register 0x10 and reads the board's
+// reply at input register 0x0C; at boot Star Wars Trilogy waits for the board
+// to answer its initialisation (reply 0xCB) and stops with FAILED FEEDBACK
+// LEVER INITIALIZE otherwise.
 // Port map and timing follow the behaviour of Supermodel's
 // Src/Model3/DriveBoard/JoystickBoard.cpp; the Z80 core is
 // third_party/z80 (MIT).
@@ -20,19 +22,22 @@ extern "C" {
 
 class DriveBoard {
 public:
-    // rom: epr-21119 (64 KB); empty = no board (reads 0xFF, like a detached one)
+    // rom: the board's program (epr-20512); empty = no board (reads 0xFF, like a detached one)
     void init(std::vector<uint8_t> rom);
     void reset();
     void run_frame();                  // one video frame of Z80 time
     void command(uint8_t v);           // main board writes input register 0x10
     uint8_t reply() const { return rom_.empty() ? 0xFF : reply_; }   // input register 0x0C
-    bool initialized() const { return initialized_; }
     // Stick position seen by the board's ADC (0x80 = centre); the board only
     // reads it after it has initialised, before that it sees the centre
     void set_stick(uint8_t x, uint8_t y) { stick_x_ = x; stick_y_ = y; }
-    // Motor outputs (0x7F = no force), for gamepad rumble later
-    uint8_t motor_x() const { return out42_; }
-    uint8_t motor_y() const { return out45_; }
+    // Sega Rally 2's wheel board (epr-20512) does not write a motor level:
+    // port 0x2E picks a servo register and port 0x2A gives its value (decoded
+    // as Supermodel's WheelBoard.cpp does). What the game asks for:
+    float force() const { return force_ * gain_ / (127.0f * 128.0f); }    // -1..1, + turns the wheel right
+    float vibration() const { return vibrate_ * gain_ / (127.0f * 255.0f); }   // 0..1
+    uint8_t reg() const { return out46_; }      // the last register and value (SR2_FFB_LOG)
+    uint8_t value() const { return out42_; }
 
 private:
     static uint8_t mem_read(void* self, uint16_t a);
@@ -67,4 +72,7 @@ private:
     int adc_bit_ = 0;
     uint8_t stick_x_ = 0x80, stick_y_ = 0x80;
     uint8_t out42_ = 0x7F, out45_ = 0x7F, out46_ = 0;
+    void servo_write();   // port 0x2A written: out42_ into the register out46_ picks
+    uint8_t gain_ = 0x7F, vib1_ = 0, vib2_ = 0, vibrate_ = 0;
+    int force_ = 0;       // -128..127
 };

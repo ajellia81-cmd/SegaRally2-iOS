@@ -3,9 +3,11 @@
 // down -Z, Y up), grouped by viewport and pass. See docs/real3d_spec.md
 // sections 2-5.
 #pragma once
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -48,6 +50,11 @@ enum : uint32_t {
     R3D_ACTOR = 1 << 18,       // a model of the world turned its own way: the other cars, people (r3d_world.cpp)
     R3D_NO_SHADOW = 1 << 20,   // receives no sun shadows (the dust's particles)
     R3D_DUST = 1 << 23,        // DUST: ENHANCED: a particle drawn by r3d.frag's dust() (r3d_dust.cpp)
+    R3D_OWN_TEXTURE = 1 << 24, // replace is a picture of the port's own (R3DSceneBuilder::own_texture), not the pack's
+    // Fading in or out by the game's LOD (drawn translucent only for that): it
+    // still casts a traced sun shadow, as solid as the top 6 bits say (0..63)
+    R3D_LOD_FADE = 1 << 25,
+    R3D_LOD_SHADOW_SHIFT = 26,
 };
 
 struct R3DViewport {
@@ -57,6 +64,11 @@ struct R3DViewport {
     uint32_t node = 0;                       // culling RAM address of the viewport node (debugging)
     uint32_t build_index = 0;                // its list in R3DSceneBuilder::instances()
     uint32_t frustum[12] = {};               // its words 0x08-0x13: projection and frustum planes (debugging)
+    // Its lens in the frame built before (x and y scale and offset, proj 0, 5,
+    // 8, 9), when the same viewport was there and its lens did not jump (a cut):
+    // R3DScene::proj_at
+    bool has_prev_lens = false;
+    float prev_lens[4] = {0, 0, 0, 0};
     float sun[3] = {0, 0, 0};
     float sun_intensity = 0, ambient = 0;
     float fog_color[3] = {0, 0, 0};
@@ -87,6 +99,20 @@ struct R3DViewport {
     float scenery_far = 0;      // distance of the farthest scenery (most of it is nearer)
 };
 
+// SUN (sun on): more contrast in clear outdoor scenes (sunlit, little of the
+// game's own fog), the fogged, dark and indoor ones keep the game's light.
+// The world viewport's gains on the sun and the ambient, and how clear it is
+// (0: the game's own light; R3DRenderer's atmosphere, r3d.frag)
+inline float r3d_sun_gains(const R3DViewport& w, bool sun_on, float& sun_gain, float& ambient_gain) {
+    sun_gain = ambient_gain = 1.0f;
+    if (!sun_on || w.sun_intensity <= 0.3f) return 0.0f;
+    float fogged = std::clamp(w.scroll_fog * 2.0f + w.fog_density * 300.0f, 0.0f, 1.0f);
+    float k = 1.0f - fogged;
+    sun_gain = 1.0f + 0.45f * k;
+    ambient_gain = 1.0f - 0.4f * k;
+    return k;
+}
+
 struct R3DScene {
     std::vector<R3DVertex> vertices;
     std::vector<R3DViewport> viewports;   // sorted by priority, then list order
@@ -98,6 +124,15 @@ struct R3DScene {
     uint64_t frame = 0;
     size_t polygons = 0;
     size_t moving = 0;   // vertices whose position changed since the previous frame
+    // Viewport v's projection at t (smooth motion), its lens blended from the
+    // previous frame's to now's. A camera that zooms every frame (the
+    // attract's, standing far off with a long lens: 0.6 to 1.3% a frame) was
+    // drawn with now's lens all the frame long, the models in between: each
+    // frame began with the previous one's places through the new lens,
+    // everything jumping 2 to 3 px towards the middle (6 at the picture's
+    // sides) at every frame and sliding back through it, trembling and
+    // doubled. No previous lens: now's. SR2_PROJ_NOW=1: always now's (to compare)
+    void proj_at(size_t v, float t, float out[16]) const;
 };
 
 class R3DSceneBuilder {
@@ -123,11 +158,32 @@ public:
     // road) left out, where the traced sun shadows of the cars themselves
     // take their place
     void set_hide_blob_shadows(bool on) { hide_blob_shadows_ = on; }
+    // FOREST (the race's course, from the game's RAM): its world lit with
+    // more ambient light and as much less sun as keeps the sunlit ground as
+    // bright (build). sun_on: the SUN option (r3d_sun_gains); shadows_on: the
+    // sun shadows (the road's shadows the game paints with a grey colour left out)
+    void set_forest(bool on, bool sun_on, bool shadows_on) { forest_ = on, sun_on_ = sun_on, shadows_on_ = shadows_on; }
     // Replacement textures (nullptr = none)
     void set_texture_pack(TexturePack* pack, R3DTextureRam* ram) {
         pack_ = pack;
         texture_ram_ = ram;
     }
+
+    // Pictures of the port's own for models the port draws itself: copies of
+    // the game's in VROM the game never uses (from own_from on, set_own_models),
+    // so the same polygons can be told apart from the game's. Their polygons
+    // with texture word tex take the picture (the rows top to bottom of a
+    // PNG, TexturePack::own_picture). pictures: where they are loaded (kept
+    // apart from set_texture_pack, which may be off)
+    struct OwnPicture {
+        std::string file;
+        float top = 0, bottom = 1;
+        bool flip = false;
+        std::string over;   // optional PNG of the same size drawn over it (FOREST's PROTOTYPE badge)
+    };
+    void set_own_models(uint32_t own_from) { own_from_ = own_from; }
+    void set_own_pictures(TexturePack* pictures) { own_pictures_ = pictures; }
+    void own_texture(uint32_t tex, const OwnPicture& picture) { own_textures_[tex] = picture; }
 
 private:
     float stage_ms_[7] = {};   // nodes, track, screen, pack, pair, smooth, sync
@@ -137,6 +193,11 @@ private:
     struct Attribs {
         int tex_x = 0, tex_y = 0, page = 0;
         float model_scale = 1, alpha = 1;
+        // How solid a caster of sun shadows it is while the LOD fades it: of
+        // two models cross-fading only the one more on screen casts (else the
+        // shadow paled mid-swap), and a model fading in at the far end casts
+        // as much as it is drawn
+        float shadow = 1;
         bool no_cull = false;
     };
     struct PrevVertex {
@@ -154,6 +215,10 @@ private:
     uint32_t model_word(uint32_t addr) const;
     Mat matrix(uint32_t index) const;
     void link_previous(R3DScene& out);
+    // Each viewport's lens by its node, in the last frame built and the one
+    // before (R3DViewport::prev_lens)
+    std::unordered_map<uint32_t, std::array<float, 4>> lens_last_, lens_prev_;
+    uint64_t lens_last_frame_ = ~0ull, lens_prev_frame_ = ~0ull;
     // Sega Rally 2: smooth normals on the cars (r3d_scene.cpp)
     static void smooth_car_normals(R3DScene& out);
     // ... and their see-through layers moved with the bodywork between frames
@@ -175,6 +240,9 @@ private:
     // Interpolation: every vertex gets a key (scene path + model instance +
     // polygon + corner) to find where it was in the previous frame
     std::vector<uint64_t> keys_, opaque_keys_, trans_keys_;
+    // ... and every back face's corner (R3DScene::backs), the same keys: a
+    // polygon that turns towards the camera, or away, is still followed
+    std::vector<uint64_t> back_keys_, backs_keys_;
     // Polygon key (corner bits clear) -> its first vertex: an open-addressing
     // table kept from frame to frame (from Lost World)
     struct KeyIndex {
@@ -187,14 +255,22 @@ private:
         uint32_t find(uint64_t key) const;       // EMPTY if absent
     };
     KeyIndex index_, prev_index_;                        // this frame's, the previous frame's
+    KeyIndex back_front_, back_near_;                    // link_previous: the world's corners facing the camera, by place and by 5 cm cell
     std::vector<uint64_t> prev_keys_;                    // the previous frame's vertex keys
     std::vector<std::array<float, 3>> prev_positions_;   // the previous frame's vertices
+    size_t prev_front_count_ = ~size_t(0);              // ... of which those facing the camera (the back faces after)
     struct PrevInstance {
         uint32_t key, path, start;
         float origin[3];
+        float ride[3];
+        uint32_t ride_on;
+        float world[3];
+        bool has_world;
     };
+    std::unordered_set<uint32_t> placed_;   // copies the game put somewhere new this frame (pair_copies): they stand still in the world
     std::vector<PrevInstance> prev_instances_;   // for pairing identical copies by place
-    void pair_copies();
+    void pair_copies(const R3DScene& out);
+    std::vector<const R3DInstance*> bases_;      // (pair_copies: the models copies may ride on)
     // pair_copies' and link_previous' tables, kept from frame to frame (cleared, their buckets stay)
     std::unordered_map<uint32_t, std::vector<R3DInstance*>> copies_now_;
     std::unordered_map<uint32_t, std::vector<const PrevInstance*>> copies_before_;
@@ -203,15 +279,21 @@ private:
     // Instances that turned a lot since the previous frame, and how far their origin travelled meanwhile
     std::unordered_map<uint32_t, std::array<float, 3>> spinning_;
     std::unordered_map<uint32_t, std::array<float, 3>> prev_origins_, origins_;   // model instance -> its origin last frame, this frame
+    // The world viewport's axes and camera last frame (link_previous: the glow sprites)
+    float prev_world_axes_[9] = {}, prev_world_camera_[3] = {};
+    bool prev_world_valid_ = false;
     std::unordered_map<uint32_t, uint32_t> instance_count_;
     uint32_t node_key_ = 0, viewport_key_ = 0;
     bool hide_blob_shadows_ = false;
+    bool forest_ = false, sun_on_ = true, shadows_on_ = true;
     // settle_player_car: how far above the road the game keeps the player's car (-1: not known yet)
     void settle_player_car(R3DScene& out);
     struct CarLift {
         float height = -1;
         uint32_t skips = 0;
         uint64_t frame = 0, patch = 0;   // last seen, last measured by its patch
+        float raw = 0;                   // the last measurement
+        bool kerb = false;               // a step under the car is being waited out
     };
     std::unordered_map<uint32_t, CarLift> car_lifts_;   // by the car's viewport
     float fov_widened_ = 1.0f;
@@ -219,6 +301,10 @@ private:
     TexturePack* pack_ = nullptr;
     R3DTextureRam* texture_ram_ = nullptr;
     std::unordered_map<uint32_t, uint32_t> frame_slots_;   // texture word -> slot, this frame
+    TexturePack* own_pictures_ = nullptr;
+    uint32_t own_from_ = 0x1000000;                           // VROM words of own models (none)
+    std::unordered_map<uint32_t, OwnPicture> own_textures_;   // texture word -> picture (own models only)
+    std::unordered_set<uint32_t> own_seen_;                   // own models' texture words already logged
 
     // Models drawn in each viewport, for the interpolation (copies of a model
     // are paired by place) and the world tracking

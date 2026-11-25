@@ -17,17 +17,39 @@ struct Options {
     bool headless = false;           // --headless: no window, full speed, report at the end
     bool menu = true;                // the main menu and save/settings.ini; off in test runs
     bool show_boot = false;          // --boot: the power-on screens before the SEGA logo
+    int difficulty = -1;             // --difficulty: the game's number (0 normal, 1 hard, 2 very hard,
+                                     // 3 very easy, 4 easy) held in the operator settings; -1: as the EEPROM says
+    // The other operator settings PLAY's race set-up changes (GAME ASSIGNMENTS, docs/game_ram.md);
+    // -1: as the EEPROM says
+    int game_mode = -1;              // 0 NORMAL, 1 SPECIAL
+    int default_view = -1;           // 0 DRIVER (in the car), 1 BEHIND
+    int speed_kmh = -1;              // 0 MPH, 1 KM/H (the test menu's order)
+    int free_play = -1;              // COIN ASSIGNMENTS: 1 FREE PLAY, 0 coins; -1 as the EEPROM says
+    bool arcade = false;             // EXPERIENCE ARCADE ORIGINAL: the game as the cabinet ran it (app.cpp)
+    bool hidden_cars = true;         // --no-hidden-cars: SELECT CAR with the arcade's six (no Celica, no Delta)
+    bool forest = true;              // --no-forest: SELECT COURSE (practice) without its fifth card, FOREST,
+                                     // the stage the ROM has but no select reaches (game_hooks.cpp; never in ARCADE ORIGINAL)
     // Picture
     float supersample = 1.0f;        // --scale: internal 3D resolution factor
     int msaa = 4;                    // --msaa: samples per pixel (1 = off)
-    bool dlaa = false;               // --aa dlaa: NVIDIA DLAA instead of MSAA (also set by --aa dlss)
-    bool dlss = false;               // --aa dlss: DLSS QUALITY, the 3D drawn at two thirds of the size and upscaled
+    bool dlaa = false;               // --aa dlaa: NVIDIA DLAA instead of MSAA (also set by --aa dlss*)
+    bool fxaa = false;               // --aa fxaa: FXAA over the 3D image instead of MSAA (cheap, for older cards)
+    int dlss = 0;                    // --aa dlss*: 0 none (DLAA), 1 QUALITY, 2 BALANCED, 3 PERFORMANCE, 4 ULTRA PERFORMANCE
+                                     // (the 3D drawn smaller and upscaled)
+    int dlss_model = 0;              // --dlss-model: 0 auto, 1 K, 2 M, 3 L
     int aniso = 8;                   // --aniso: anisotropic taps (0 = no mipmaps, original look)
     float max_aspect = 16.0f / 9.0f; // --aspect: widest 3D view (4:3 = original)
+    float pixel_aspect = 1.0f;       // the picture's pixels this much wider than tall (ASPECT 4:3: 1.032,
+                                     // the cabinet's 496x384 on a 4:3 monitor)
     bool pixel_2d = false;           // --pixel2d: 2D layers without xBR upscaling
-    bool hud_centre = false;         // --hud-centre: keep the HUD in the 4:3 area (otherwise its corners go to the window's)
+    bool hud_centre = false;         // --hud-centre: keep the HUD in the 4:3 area (otherwise its corners go out, up to a 16:9 view's edges)
+    bool telemetry = false;          // UDP telemetry for SimHub / motion rigs (settings.ini telemetry = 1; telemetry.h)
+    int telemetry_port = 20777;
+    int telemetry_format = 0;        // 0 DiRT Rally packet, 1 OGS-TS (settings.ini telemetry_format)
+    bool trigger_rumble = true;      // --no-trigger-rumble: Xbox pads through XInput, no motors in the triggers
     bool letterbox = false;          // --letterbox: keep the black cutscene bars
-    bool classic_text = false;       // --classic-text: original pixel-art letters instead of vector fonts
+    bool classic_hud = false;        // --classic-hud: the ROM's own HUD and screens (pixel letters, no redrawn dials, signs...)
+    bool classic_liveries = false;   // --classic-liveries: the cars with the ROM's own paint (no texture pack in textures/)
     bool interp = true;              // --no-interp: show game frames as they are
     bool dump_textures = false;      // --dump-textures: write new textures to out/textures
     float light_gain = 1.0f;         // --light-gain: light multiplier on the sun and the ambient
@@ -38,11 +60,16 @@ struct Options {
     float gamma = 1;                 // --gamma: 1 = original, higher = brighter
     bool hdr = true;                 // --no-hdr: the original's clipped lighting
     bool reflections = true;         // --no-reflections: no ray traced reflections on the cars
-    int gi = 1;                      // --gi off|low|high: global illumination (the sun's light bounced off the world, ray traced)
+    int gi = 1;                      // --gi off|on: global illumination (the sun's light bounced off the world, ray traced)
     bool dust = true;                // --classic-dust: the game's own flat fans of dust, no particles
+    int object_distance = 250;       // --object-distance: metres ahead of the camera the course's placed
+                                     // objects (spectators, cameramen, signs, cones...) are put in the
+                                     // scene from; the arcade's is 100 (game_hooks.cpp)
     bool sharpen = true;             // --no-sharpen: no sharpening of the 3D image
     bool soft = true;                // --no-soft: hard edges where translucent effects meet geometry
     bool shadows = true;             // --no-shadows: no sun shadows
+    bool car_probes = true;          // --no-car-probes: the cars do not darken in the shade (CAR LIGHT PROBES off)
+    bool car_shadows = true;         // --no-car-shadows: the world's sun shadows do not fall on the cars (CAR SHADOWS off)
     int ray_tracing = 2;             // --rt off|shadows|ao (--no-rt): traced sun shadows (1) and ambient occlusion (2)
     bool sun = true;                 // --no-sun: the game's own sunlight (SUN off)
     // Sound

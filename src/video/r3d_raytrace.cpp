@@ -123,9 +123,12 @@ bool R3DRayTracer::reserve(uint32_t triangles) {
     tinfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
     tinfo.geometryCount = 1;
     tinfo.pGeometries = &tgeo;
-    uint32_t two = 2;
+    // (one instance per level: sized for 2 when there were 2, it was built with
+    // LEVELS and came out short, VUID-vkCmdBuildAccelerationStructuresKHR-pInfos-10126)
+    uint32_t instances = LEVELS;
     VkAccelerationStructureBuildSizesInfoKHR tsizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-    vkGetAccelerationStructureBuildSizesKHR(dev_, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tinfo, &two, &tsizes);
+    vkGetAccelerationStructureBuildSizesKHR(dev_, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tinfo, &instances,
+                                            &tsizes);
     tlas_scratch_offset_ = scratch;
     if (!create_buffer(scratch_, scratch + tsizes.buildScratchSize + scratch_align_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                        false))
@@ -202,6 +205,36 @@ void R3DRayTracer::prepare(const R3DScene& scene, const R3DViewport& world, floa
         bool car = vp.opaque_count > 0 && vp.opaque_first < scene.vertices.size() &&
                    (scene.vertices[vp.opaque_first].flags & R3D_CAR);
         if (&vp != &world && !car) continue;
+        // The scenery's solid polygons, a little wider for the rays: its
+        // pieces meet at edges that are not quite closed (corners of separate
+        // models a hair apart, more so while the camera turns and each moves
+        // between frames on its own), and the sun shone through the cracks,
+        // white lines flickering between the chunks of a cliff's shadow. Each
+        // edge moves out by a few centimetres, a little more far off; less
+        // than the rays' own lift off the surface (r3d.frag sun_rays), so
+        // nothing shades itself. SR2_RT_SEAL=0: as before
+        static const float seal = getenv("SR2_RT_SEAL") ? float(atof(getenv("SR2_RT_SEAL"))) : 1.0f;
+        auto widen = [&](float* p) {
+            float q[9];
+            for (int k = 0; k < 3; k++) {
+                const float *a = p + k * 3, *b = p + ((k + 1) % 3) * 3, *c = p + ((k + 2) % 3) * 3;
+                float u[3], w[3];
+                for (int i = 0; i < 3; i++) u[i] = b[i] - a[i], w[i] = c[i] - a[i];
+                float lu = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+                float lw = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+                if (lu < 1e-5f || lw < 1e-5f) return;
+                float in[3], half[3];
+                for (int i = 0; i < 3; i++) u[i] /= lu, w[i] /= lw, in[i] = u[i] + w[i], half[i] = u[i] - w[i];
+                float li = std::sqrt(in[0] * in[0] + in[1] * in[1] + in[2] * in[2]);
+                if (li < 1e-5f) return;
+                // sin of half the corner's angle: the corner moves e / that for each edge to move e
+                float s = 0.5f * std::sqrt(half[0] * half[0] + half[1] * half[1] + half[2] * half[2]);
+                float dist = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+                float e = seal * (0.03f + 0.001f * dist) / std::max(s, 0.25f);
+                for (int i = 0; i < 3; i++) q[k * 3 + i] = a[i] - in[i] / li * e;
+            }
+            memcpy(p, q, sizeof(q));
+        };
         auto add = [&](const R3DVertex* v, bool moves) {
             float p[9], lowest = 1e30f;
             for (int k = 0; k < 3; k++) {
@@ -273,21 +306,34 @@ void R3DRayTracer::prepare(const R3DScene& scene, const R3DViewport& world, floa
             // The cars' decals are alpha tested over the bodywork: as cut-outs
             // their clear texels let the sun through, holes in the car's
             // shadow. The cars (and people) are solid to the rays
-            if (card || ((flags & R3D_TEXTURED) && (flags & (R3D_ALPHA_TEST | R3D_TEX_ALPHA)) && !actor)) {
+            // A camera flash (raytrace.glsl's glow_sprite) is a cut-out: the sun's rays pass it
+            const uint32_t glow_mask = R3D_TEXTURED | R3D_ALPHA_TEST | R3D_LUMINOUS | R3D_TEX_ALPHA | R3D_SPECULAR;
+            bool glow = (flags & glow_mask) == (glow_mask & ~uint32_t(R3D_SPECULAR));
+            // Fading by LOD (R3D_LOD_FADE): partly solid, a cut-out (raytrace.glsl cutout_solid)
+            bool fading = (flags & R3D_LOD_FADE) && !actor;
+            if (card || glow || fading || ((flags & R3D_TEXTURED) && (flags & (R3D_ALPHA_TEST | R3D_TEX_ALPHA)) && !actor)) {
                 l.cut_pos.insert(l.cut_pos.end(), p, p + 9);
                 l.cut_data.push_back(c);
             } else {
+                if (!actor && seal > 0) widen(p);
                 l.solid_pos.insert(l.solid_pos.end(), p, p + 9);
                 l.solid_data.push_back(c);
             }
         };
-        // The solid polygons, and the cars' see-through textured ones (their glass)
+        // The solid polygons, the cars' see-through textured ones (their
+        // glass), and what the game's LOD is fading in or out (R3D_LOD_FADE).
+        // SR2_LOD_SHADOWS=0: not the last, as before (their shadows popped in)
+        static const bool lod_shadows = !(getenv("SR2_LOD_SHADOWS") && atoi(getenv("SR2_LOD_SHADOWS")) == 0);
         for (int pass = 0; pass < 2; pass++) {
             size_t first = pass ? vp.trans_first : vp.opaque_first;
             size_t end = std::min<size_t>(first + (pass ? vp.trans_count : vp.opaque_count), scene.vertices.size());
             for (size_t i = first; i + 2 < end; i += 3) {
                 const R3DVertex* v = &scene.vertices[i];
-                if (pass && (!(v[0].flags & (R3D_ACTOR | R3D_CAR)) || !(v[0].flags & R3D_TEXTURED))) continue;
+                if (pass) {
+                    bool glass = (v[0].flags & (R3D_ACTOR | R3D_CAR)) && (v[0].flags & R3D_TEXTURED);
+                    bool fading = lod_shadows && (v[0].flags & R3D_LOD_FADE) && !(v[0].flags & (R3D_ACTOR | R3D_CAR));
+                    if (!glass && !fading) continue;
+                }
                 add(v, true);
             }
         }
@@ -298,6 +344,18 @@ void R3DRayTracer::prepare(const R3DScene& scene, const R3DViewport& world, floa
         if (car) {
             size_t end = std::min<size_t>(size_t(vp.back_first) + vp.back_count, scene.backs.size());
             for (size_t i = vp.back_first; i + 2 < end; i += 3) add(&scene.backs[i], false);
+        }
+        // So is the world: about half of its polygons face away from the
+        // camera, and which do changes as it turns. Left out, the scenery
+        // facing away let the sun through, and as the camera turned (into a
+        // curve on the mountain) they came back one by one: the cliffs'
+        // shadows popped in over the road in chunks (issue #131). Moved as
+        // the camera moved (R3DSceneBuilder::link_previous).
+        // SR2_RT_BACKS=0: left out, as before
+        static const bool world_backs = !(getenv("SR2_RT_BACKS") && atoi(getenv("SR2_RT_BACKS")) == 0);
+        if (&vp == &world && world_backs) {
+            size_t end = std::min<size_t>(size_t(vp.back_first) + vp.back_count, scene.backs.size());
+            for (size_t i = vp.back_first; i + 2 < end; i += 3) add(&scene.backs[i], true);
         }
     }
     uint32_t total = 0;

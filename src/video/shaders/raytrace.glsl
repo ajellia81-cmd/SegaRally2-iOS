@@ -19,6 +19,14 @@ layout(std430, set = RT_SET, binding = 7) readonly buffer Cutouts {
     Cutout cutouts[];
 };
 
+// R3D_LOD_FADE: a model the game's LOD is fading in or out. It casts a
+// shadow as solid as the top 6 bits of its flags say (r3d_scene.cpp), and
+// its texture's alpha, not its fading colour, says where it has holes
+const uint LOD_FADE = 33554432u;
+float lod_solid(Cutout c) { return float(c.flags >> 26) / 63.0; }
+bool lod_fading(Cutout c) { return (c.flags & LOD_FADE) != 0u; }
+bool lod_plain(Cutout c) { return lod_fading(c) && (c.flags & (ALPHA_TEST | TEX_ALPHA)) == 0u; }
+
 // The texture of a triangle where a ray crossed it, nearest texel of mip
 // level `level` (0 for the cut-outs' alpha test; a smaller one for what a
 // reflection shows)
@@ -48,7 +56,9 @@ vec4 surface_texel(Cutout c, vec2 bary, int level) {
 // alpha there, nearest texel of the top level, as the alpha test would see it
 bool cutout_blocks(uint index, vec2 bary) {
     Cutout c = cutouts[index];
+    if (lod_plain(c)) return lod_solid(c) >= 0.5;
     float a = surface_texel(c, bary, 0).a;
+    if (lod_fading(c)) return lod_solid(c) >= 0.5 && ((c.flags & ALPHA_TEST) != 0u ? a >= 32.0 / 255.0 : a >= 0.5);
     // Alpha test: what the 3D pass keeps; texture alpha: only its solid texels
     // are in the opaque pass
     return (c.flags & ALPHA_TEST) != 0u ? a >= 32.0 / 255.0 : a * float(c.color >> 24) / 255.0 >= 0.5;
@@ -61,6 +71,7 @@ bool cutout_blocks(uint index, vec2 bary) {
 // blurs its outline, and the coarser the level that will do)
 float cutout_solid(uint index, vec2 bary, int level) {
     Cutout c = cutouts[index];
+    if (lod_plain(c)) return lod_solid(c);
     vec2 uv = c.uv[0] * (1.0 - bary.x - bary.y) + c.uv[1] * bary.x + c.uv[2] * bary.y;
     float a;
     if (c.replace != 0u) {
@@ -90,7 +101,8 @@ float cutout_solid(uint index, vec2 bary, int level) {
     }
     // Alpha test: the 3D pass keeps a pixel as often as its alpha says (smooth
     // outlines); texture alpha: its solid texels in the opaque pass, the
-    // others blended over it
+    // others blended over it. (Fading by LOD: its texture's alpha, as solid as the fade says)
+    if (lod_fading(c)) return a * lod_solid(c);
     return (c.flags & ALPHA_TEST) != 0u ? a : a * float(c.color >> 24) / 255.0;
 }
 
@@ -112,6 +124,7 @@ float rt_light(vec3 origin, vec3 dir, float range, uint mask) {
             // The disc (some 0.03 across) blurs a caster 6 units away over a
             // texel of foliage or so: a level coarser every time that doubles
             int mip = int(log2(max(rayQueryGetIntersectionTEXT(q, false) / 6.0, 1.0)) + 0.5);
+            if (glow_sprite(cutouts[index].flags)) continue;   // (a camera flash: no shadow)
             light *= 1.0 - cutout_solid(index, rayQueryGetIntersectionBarycentricsEXT(q, false), mip);
             if (light < 0.02) rayQueryConfirmIntersectionEXT(q);
         }
@@ -129,11 +142,13 @@ float rt_trace(vec3 origin, vec3 dir, float range, uint mask, bool any) {
                           0.0, dir, range);
     while (rayQueryProceedEXT(q)) {
         // Only cut-out triangles are candidates: after the level's solid ones
+        // (a camera flash hides nothing: not in the occlusion either)
         if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
             uint level = uint(rayQueryGetIntersectionInstanceIdEXT(q, false));
             uint index = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false)) + solid_count[level] +
                          uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false));
-            if (cutout_blocks(index, rayQueryGetIntersectionBarycentricsEXT(q, false))) rayQueryConfirmIntersectionEXT(q);
+            if (!glow_sprite(cutouts[index].flags) && cutout_blocks(index, rayQueryGetIntersectionBarycentricsEXT(q, false)))
+                rayQueryConfirmIntersectionEXT(q);
         }
     }
     return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT
