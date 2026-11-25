@@ -161,6 +161,41 @@ void R3DSceneBuilder::build(const R3DFrameState& state, R3DScene& out) {
         for (uint32_t i = v.opaque_first; i < v.opaque_first + v.opaque_count; i++) out.vertices[i].flags |= R3D_CAR;
         for (uint32_t i = v.trans_first; i < v.trans_first + v.trans_count; i++) out.vertices[i].flags |= R3D_CAR;
     }
+    {   // (diagnosis, temporary: the shadow's near edge jumping at the start
+        // in the championship) The game's own patches, before we touch them:
+        // how many corners, and the nearest to the camera, when it moves 3 cm
+        // or more - for the first 15 s of a game world
+        static uint64_t since = 0;
+        static float last_near = 0;
+        static size_t last_count = 0;
+        bool world = false;
+        for (const R3DViewport& v : out.viewports) world |= v.world;
+        if (!world) since = 0;
+        else if (!since) since = out.frame;
+        if (since && out.frame - since < 900) {
+            float nearest = 1e30f, nh = 0;
+            size_t count = 0;
+            const R3DViewport* wv = nullptr;
+            for (const R3DViewport& v : out.viewports)
+                if (v.world) wv = &v;
+            for (const R3DVertex& x : out.vertices)
+                if ((x.flags & (R3D_WORLD | R3D_LUMINOUS | R3D_TEXTURED)) == (R3D_WORLD | R3D_LUMINOUS) &&
+                    (x.color & 0x00FFFFFFu) == 0 && (x.color >> 24) < 255) {
+                    count++;
+                    float d = std::sqrt(x.pos[0] * x.pos[0] + x.pos[1] * x.pos[1] + x.pos[2] * x.pos[2]);
+                    if (d < nearest) {
+                        nearest = d;
+                        const float* up = wv->world_axes + 3;
+                        nh = x.pos[0] * up[0] + x.pos[1] * up[1] + x.pos[2] * up[2];
+                    }
+                }
+            if (count && (std::fabs(nearest - last_near) > 0.03f || count != last_count)) {
+                printf("[patch] frame %llu corners %zu nearest %.3f m (height %.3f)\n", (unsigned long long)out.frame,
+                       count, nearest, nh);
+                last_near = nearest, last_count = count;
+            }
+        }
+    }
     settle_player_car(out);
     // The cars' dark patches (their shadows) marked: r3d.vert draws them a
     // little nearer (iOS port)
