@@ -21,6 +21,7 @@
 void platform_crash_haptic(float strength, int where = 0);   // platform/ios_lifecycle.mm
 extern std::atomic<uint32_t> g_crash_knocks;   // runtime.cpp: each crash sound heard
 extern std::atomic<float> g_crash_knock_strength;   // ... and the strongest since the last one taken
+static std::atomic<float> g_crash_rumble_kick{0.0f};   // a crash sound's strength, for the car's rumble (below)
 #endif
 
 bool g_menu_open = false;   // a menu has the controls
@@ -229,6 +230,15 @@ bool poll_gamepads(HWND hwnd) {
             static const bool no_ffb = getenv("SR2_NO_FFB_RUMBLE") != nullptr;
             if (!no_ffb) {   // the rumble from the player's car (pad_rumble.cpp)
                 float lo = g_pad_motor[0].exchange(0.0f), hi = g_pad_motor[1].exchange(0.0f);
+#ifdef __APPLE__
+                // A crash sound (below) rumbles in the car's rumble too, fading
+                // as a hit does (pad_rumble.cpp): a knock of its own is not felt
+                // over the road's rumble on the same motors (iOS port)
+                static float crash = 0;
+                crash *= 0.94f;
+                if (g_crash_rumble_kick.load()) crash = std::max(crash, g_crash_rumble_kick.exchange(0.0f));
+                lo = std::max(lo, 0.75f * crash), hi = std::max(hi, 0.75f * crash);
+#endif
                 if (lo > 0.08f || hi > 0.08f) g_pads.rumble(i, lo, hi, 60);
                 // and the triggers' own
                 float tl = g_trigger_rumble[0].exchange(0.0f), tr = g_trigger_rumble[1].exchange(0.0f);
@@ -246,6 +256,7 @@ bool poll_gamepads(HWND hwnd) {
                 if (knocks != seen) {
                     seen = knocks;
                     float st = g_crash_knock_strength.exchange(0.0f);
+                    g_crash_rumble_kick = st;
                     double now = qpc_seconds();
                     static const float level[4] = {0.0f, 0.45f, 0.75f, 1.0f};
                     printf("[knock] crash sound, strength %.2f%s\n", st,

@@ -299,6 +299,24 @@ void Gamepads::rumble(int i, float low, float high, int ms) {
 #ifdef __APPLE__
     if (lo > 1 && i < 8 && flip[i]) lo ^= 1;   // (the lowest bit: a step of 65535, not to be felt)
 #endif
+#ifdef __APPLE__
+    // iOS port: SDL plays a pad's rumble as one endless haptic event, started
+    // at the first rumble after a quiet spell and then only made stronger or
+    // weaker. iOS ends such an event after 30 s: the car's rumble, never quiet
+    // on the road, went dead 30-40 s into a race (only a stop and a start make
+    // a new one: coming back from the background did). Stopped and started
+    // again every 20 s of rumble without a break, for one frame
+    if (i < 8) {
+        static Uint64 started[8] = {}, last_call[8] = {};
+        Uint64 now = SDL_GetTicks();
+        if (now - last_call[i] > Uint64(ms) + 50) started[i] = now;   // (SDL stopped it when its time ran out)
+        last_call[i] = now;
+        if (now - started[i] > 20000) {
+            SDL_RumbleGamepad(slot_[i].pad, 0, 0, 0);
+            started[i] = now;
+        }
+    }
+#endif
     Uint64 from = SDL_GetTicksNS();
     bool ok = SDL_RumbleGamepad(slot_[i].pad, lo, hi, Uint32(ms));
     g_vibration_seconds += double(SDL_GetTicksNS() - from) * 1e-9;
