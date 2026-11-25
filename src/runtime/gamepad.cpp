@@ -303,6 +303,19 @@ void Gamepads::rumble(int i, float low, float high, int ms) {
     bool ok = SDL_RumbleGamepad(slot_[i].pad, lo, hi, Uint32(ms));
     g_vibration_seconds += double(SDL_GetTicksNS() - from) * 1e-9;
 #ifdef __APPLE__
+    {   // (diagnosis, temporary: the rumble stopping after a while) Once a
+        // second: how many rumbles went to SDL, the strongest, how many it refused
+        static Uint64 second = 0;
+        static int sent = 0, refused = 0;
+        static Uint16 most_lo = 0, most_hi = 0;
+        sent++, refused += !ok, most_lo = std::max(most_lo, lo), most_hi = std::max(most_hi, hi);
+        if (SDL_GetTicks() - second >= 1000) {
+            printf("[rumble] %d sent, strongest %u/%u of 65535, %d refused\n", sent, unsigned(most_lo), unsigned(most_hi), refused);
+            second = SDL_GetTicks(), sent = refused = 0, most_lo = most_hi = 0;
+        }
+    }
+#endif
+#ifdef __APPLE__
     // iOS port: a controller's haptics engine that iOS stopped (the app in the
     // background, an idle spell, an audio interruption) is never started again
     // by SDL: the rumble stopped for good. Closing and opening the controller

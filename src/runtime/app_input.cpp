@@ -248,6 +248,8 @@ bool poll_gamepads(HWND hwnd) {
                     float st = g_crash_knock_strength.exchange(0.0f);
                     double now = qpc_seconds();
                     static const float level[4] = {0.0f, 0.45f, 0.75f, 1.0f};
+                    printf("[knock] crash sound, strength %.2f%s\n", st,
+                           now - last > 0.35 && g_pad_rumble > 0 ? "" : " (too soon: none)");   // (diagnosis, temporary)
                     if (now - last > 0.35 && g_pad_rumble > 0) {
                         last = now;
                         platform_crash_haptic(st * level[std::clamp(g_pad_rumble, 0, 3)]);

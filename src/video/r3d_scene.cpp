@@ -419,6 +419,12 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
         }
     }
     bool measured = raw > -0.1f && raw < 0.45f;
+    // (iOS port) A reading at the road or under it, while the car was being
+    // lowered, is not taken: at the championship's start, as the car drove
+    // off, its corners read 0 for half a second while the bodywork did not
+    // move (the road under it read from other triangles): followed, the car
+    // rose 8 cm and came down again
+    if (measured && raw <= 0.0f && lift.height > 0.03f) measured = false;
     // Kept while it cannot be measured, however long: in the air, and as the
     // car drives off from a camera standing by the road (the championship's
     // start: 40 m off, no road drawn within 4 m of it), where it was let go
@@ -458,7 +464,7 @@ void R3DSceneBuilder::settle_player_car(R3DScene& out) {
         static uint64_t since = 0, last_frame = 0;
         static float last_raw = -9, last_lift = -9, last_low = -9;
         if (out.frame < since || out.frame - last_frame > 120) since = out.frame;   // (a new race: frames went on without one)
-        if (out.frame - since < 1500 &&
+        if (!patches.empty() && out.frame - since < 1500 &&
             (std::fabs(raw - last_raw) >= 0.005f || std::fabs(lift.height - last_lift) >= 0.005f ||
              std::fabs(low[1] - last_low) >= 0.005f)) {
             printf("[car] frame %llu (+%llu) car %06X patch %zu road %zu raw %.3f lowest %.3f lift %.3f kerb %d skips %d\n",

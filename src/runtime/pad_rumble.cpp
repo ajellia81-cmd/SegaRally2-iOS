@@ -152,6 +152,8 @@ void pad_rumble_frame(float arcade, bool attract) {
     // no jump in one frame; a speed-loss rule did not feel right to Sergi, so
     // for now only the big jolts above and the landings kick)
     // (held ~0.5 s, so a crash is told apart from the gravel's buzz)
+    if (hit_now >= 0.3f && hit_now > s.hit * 0.94f + 0.1f)   // (diagnosis, iOS port, temporary: landings not felt)
+        printf("[rumble] hit %.2f (speed lost %.1f)\n", hit_now, dv6);
     s.hit = std::max(hit_now, s.hit * 0.94f);
 
     // Slide: where the car points against where it goes
