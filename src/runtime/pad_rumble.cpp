@@ -84,14 +84,6 @@ void pad_rumble_frame(float arcade, bool attract) {
     const uint32_t car = rd32(PLAYER_CAR);
     const bool racing = !attract && rd32(SEQUENCE) == 1 && rd32(PHASE) == 1 && car != 0 && car < 0x800000 &&
                         int32_t(rd32(G_CAR_STATUS)) == 1;
-    {   // (diagnosis, iOS port, temporary: the rumble stopping after a while in a race)
-        static int was = -1;
-        if (int(racing) != was) {
-            printf("[rumble] %s (sequence %d, phase %d, car status %d)\n", racing ? "racing" : "not racing",
-                   int32_t(rd32(SEQUENCE)), int32_t(rd32(PHASE)), car && car < 0x800000 ? int32_t(rd32(G_CAR_STATUS)) : -1);
-            was = int(racing);
-        }
-    }
     if (!racing) {
         s = State{};
         bump(g_pad_motor[0], arcade);   // the select screens' jolts, as before

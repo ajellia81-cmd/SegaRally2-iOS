@@ -108,10 +108,6 @@ struct Ribbon {
 };
 
 std::vector<Particle> g_parts;
-// (diagnosis, iOS port, temporary: no water spray in puddles) Counted over a
-// second: the splash sprites the game drew, those taken as a puddle's, the
-// wheels found wet, the drops made
-uint32_t g_diag_splash_seen = 0, g_diag_splash_taken = 0, g_diag_wet = 0, g_diag_drops = 0;
 std::vector<Emitter> g_emitters;
 Frame g_before;            // the world in the previous frame's view
 V3 g_delta;                // the fans' world minus the tracker's (to go on while no fan is drawn)
@@ -386,7 +382,6 @@ void emit_along(Emitter& e, const Ribbon& r, V3 a, V3 b, float frames, float dis
             e.drops -= 1.0f;
             float f = rng.f();
             emit_drop(r, a + move * f, vel, speed, (1.0f - f) * dt, rng);
-            g_diag_drops++;
         }
     }
     // Far away, fewer and bigger puffs
@@ -516,16 +511,6 @@ void r3d_set_sr2_dust(bool enhanced) { g_enhanced = enhanced; }
 void r3d_set_sr2_snowy(bool snowy) { g_snowy = snowy; }
 
 void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& instances, R3DTextureRam* textures) {
-    {   // (diagnosis, see g_diag_splash_seen) once a second, when any was seen
-        static uint64_t last = 0;
-        if (out.frame - last >= 57) {
-            if (g_diag_splash_seen || g_diag_drops || g_diag_wet)
-                printf("[splash] game's splash sprites %u, taken %u, wet wheels %u, drops made %u, particles %zu\n",
-                       g_diag_splash_seen, g_diag_splash_taken, g_diag_wet, g_diag_drops, g_parts.size());
-            g_diag_splash_seen = g_diag_splash_taken = g_diag_wet = g_diag_drops = 0;
-            last = out.frame;
-        }
-    }
     static const bool off = getenv("SR2_DUST") && atoi(getenv("SR2_DUST")) == 0;
     static FILE* log = getenv("SR2_DUSTLOG") ? fopen(getenv("SR2_DUSTLOG"), "w") : nullptr;
     if (!g_enhanced || off) {
@@ -684,9 +669,6 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
         float pace = 0;
         int rows = 0;
         for (const R3DInstance& in : instances[v.build_index]) {
-            if (in.polygons == 1 && in.trans[1] == in.trans[0] + 6 && v.trans_first + in.trans[0] < out.vertices.size() &&
-                is_splash(out.vertices[v.trans_first + in.trans[0]]))
-                g_diag_splash_seen++;
             if ((in.start & 0xFFFFFF) < 0x100000 || in.polygons != 1 || in.trans[1] != in.trans[0] + 6 || in.axes[8] < 0.999f) continue;
             uint32_t k = v.trans_first + in.trans[0];
             if (k + 5 >= out.vertices.size() || !is_splash(out.vertices[k])) continue;
@@ -694,7 +676,6 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
             uint32_t model = in.start & 0xFFFFFF;
             if (v.world && model != g_splash_model) continue;
             if (!v.world) g_splash_model = model;
-            g_diag_splash_taken++;
             splash.push_back(k), splash.push_back(k + 3);
             // Each row of them is the flight of the water from one wheel, newest
             // first: a row begins where the place jumps. Its first is at the wheel
@@ -712,7 +693,7 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
                 float d = length(r.tip_view - load(in.origin));
                 if (r.viewport == vi && d < best) best = d, near = &r;
             }
-            if (near) near->wet = wet = true, g_diag_wet++;
+            if (near) near->wet = wet = true;
         }
         if (wet) bits.insert(bits.end(), splash.begin(), splash.end());
     }
